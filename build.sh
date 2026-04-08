@@ -16,6 +16,7 @@ FILES=(
     "02a_awg.sh"
     "02b_3xui.sh"
     "02c_outline.sh"
+    "02d_proxy.sh"
     "03a_teamspeak.sh"
     "03b_mumble.sh"
     "04a_unbound.sh"
@@ -25,6 +26,8 @@ FILES=(
     "04e_ufw.sh"
     "04f_update.sh"
     "04g_routine.sh"
+    "04h_telegrambot.sh"
+    "04i_backup.sh"
     "main.sh"
     "99_entry.sh"
 )
@@ -66,7 +69,7 @@ for f in "${FILES[@]}"; do
         cat "$src" >> "$OUT_FILE"
     fi
 
-    echo "  ✓ ${f} (${lines} строк)"
+    echo "  [OK] ${f} (${lines} строк)"
 done
 
 chmod +x "$OUT_FILE"
