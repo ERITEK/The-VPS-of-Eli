@@ -30,8 +30,18 @@ _pr_find_file() {
 prayer_run() {
     eli_header
     eli_banner "Prayer of Eli" \
-        "Аудит VPS стека: сверка книги с реальным состоянием
-  Восстановление env файлов, обновление книги, проверка сервисов"
+        "Аудит и самовосстановление VPS стека.
+
+  Что делает: проходит по всем установленным компонентам и сверяет
+    то, что записано в книге (book_of_Eli.json) с тем, что реально
+    работает на сервере. Если находит расхождения — исправляет.
+
+  Примеры: если потерялся env-файл — восстановит из книги.
+    Если сменился IP сервера или ядро — обновит книгу.
+    Если сервис упал — покажет предупреждение.
+
+  Безопасен: не удаляет данные, не перезапускает сервисы.
+    Только читает, сравнивает, дописывает и сообщает."
 
     _PR_FIXED=(); _PR_UPDATED=(); _PR_WARN=(); _PR_FAILED=()
 
@@ -41,7 +51,8 @@ prayer_run() {
         _pr_warn "Книга не найдена, создаём"
         book_init && _pr_fixed "Книга создана: $_BOOK" || _pr_failed "Не удалось создать книгу"
     elif ! jq empty "$_BOOK" 2>/dev/null; then
-        local bak="${_BOOK}.broken.$(date +%Y%m%d_%H%M%S)"
+        local bak
+        bak="${_BOOK}.broken.$(date +%Y%m%d_%H%M%S)"
         mv "$_BOOK" "$bak"
         _pr_warn "JSON повреждён, бэкап: $bak"
         book_init && _pr_fixed "Книга пересоздана"
@@ -275,26 +286,26 @@ EOF
 
     # --> ИТОГОВЫЙ ОТЧЁТ <--
     echo ""
-    echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}${CYAN}║                   ИТОГОВЫЙ ОТЧЁТ                        ║${NC}"
-    echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${BOLD}${CYAN}+==========================================================+${NC}"
+    echo -e "${BOLD}${CYAN}|                   ИТОГОВЫЙ ОТЧЁТ                        |${NC}"
+    echo -e "${BOLD}${CYAN}+==========================================================+${NC}"
     echo ""
 
     if [[ ${#_PR_FIXED[@]} -gt 0 ]]; then
         echo -e "${GREEN}${BOLD}ПОЧИНИЛ (${#_PR_FIXED[@]}):${NC}"
-        for item in "${_PR_FIXED[@]}"; do echo -e "  ${GREEN}✓${NC} $item"; done; echo ""
+        for item in "${_PR_FIXED[@]}"; do echo -e "  ${GREEN}[OK]${NC} $item"; done; echo ""
     fi
     if [[ ${#_PR_UPDATED[@]} -gt 0 ]]; then
         echo -e "${CYAN}${BOLD}ОБНОВИЛ (${#_PR_UPDATED[@]}):${NC}"
-        for item in "${_PR_UPDATED[@]}"; do echo -e "  ${CYAN}↑${NC} $item"; done; echo ""
+        for item in "${_PR_UPDATED[@]}"; do echo -e "  ${CYAN}^${NC} $item"; done; echo ""
     fi
     if [[ ${#_PR_WARN[@]} -gt 0 ]]; then
         echo -e "${YELLOW}${BOLD}ВНИМАНИЕ (${#_PR_WARN[@]}):${NC}"
-        for item in "${_PR_WARN[@]}"; do echo -e "  ${YELLOW}⚠${NC}  $item"; done; echo ""
+        for item in "${_PR_WARN[@]}"; do echo -e "  ${YELLOW}[!]${NC}  $item"; done; echo ""
     fi
     if [[ ${#_PR_FAILED[@]} -gt 0 ]]; then
         echo -e "${RED}${BOLD}НЕ СМОГ (${#_PR_FAILED[@]}):${NC}"
-        for item in "${_PR_FAILED[@]}"; do echo -e "  ${RED}✗${NC} $item"; done; echo ""
+        for item in "${_PR_FAILED[@]}"; do echo -e "  ${RED}[X]${NC} $item"; done; echo ""
     fi
 
     local total=$(( ${#_PR_FIXED[@]} + ${#_PR_UPDATED[@]} + ${#_PR_WARN[@]} + ${#_PR_FAILED[@]} ))
