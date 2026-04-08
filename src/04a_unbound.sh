@@ -7,14 +7,16 @@ unbound_install() {
     print_section "Установка Unbound"
     command -v unbound &>/dev/null || apt-get install -y -qq unbound
 
-    # - отключаем DNSStubListener (занимает 127.0.0.53:53) -
+    # - отключаем DNSStubListener + направляем resolved на Unbound -
     mkdir -p /etc/systemd/resolved.conf.d/
     cat > /etc/systemd/resolved.conf.d/no-stub.conf << 'EOF'
 [Resolve]
 DNSStubListener=no
+DNS=127.0.0.1
+FallbackDNS=8.8.8.8
 EOF
     systemctl restart systemd-resolved 2>/dev/null || true
-    print_ok "DNSStubListener отключён"
+    print_ok "systemd-resolved: StubListener off, DNS -> 127.0.0.1"
 
     # - собираем IP AWG интерфейсов -
     local awg_ips=() awg_ifaces=()
@@ -25,7 +27,7 @@ EOF
         tip=$(grep "^SERVER_TUNNEL_IP=" "$env_file" | cut -d'"' -f2 || true)
         [[ -z "$iface" || -z "$tip" ]] && continue
         awg_ifaces+=("$iface"); awg_ips+=("$tip")
-        print_ok "Интерфейс: ${iface} → ${tip}"
+        print_ok "Интерфейс: ${iface} -> ${tip}"
     done
     [[ ${#awg_ips[@]} -eq 0 ]] && print_warn "AWG интерфейсов не найдено, Unbound на 127.0.0.1"
 
@@ -98,14 +100,19 @@ EOF
     if command -v dig &>/dev/null; then
         local test_ip
         test_ip=$(dig +short +time=3 google.com @127.0.0.1 2>/dev/null | grep -oP '^\d+\.\d+\.\d+\.\d+$' | head -1 || true)
-        [[ -n "$test_ip" ]] && print_ok "Резолвинг: google.com → ${test_ip}" \
+        [[ -n "$test_ip" ]] && print_ok "Резолвинг: google.com -> ${test_ip}" \
             || print_warn "Резолвинг не ответил"
     fi
 
     # - /etc/resolv.conf -
     if ! grep -q "^nameserver 127.0.0.1" /etc/resolv.conf 2>/dev/null; then
         if [[ -L /etc/resolv.conf ]]; then
-            rm /etc/resolv.conf
+            local _resolv_target
+            _resolv_target=$(readlink -f /etc/resolv.conf 2>/dev/null || echo "")
+            print_warn "/etc/resolv.conf - симлинк на ${_resolv_target}"
+            print_warn "Заменяю на обычный файл (бэкап: /etc/resolv.conf.bak)"
+            cp --remove-destination /etc/resolv.conf /etc/resolv.conf.bak 2>/dev/null || true
+            rm -f /etc/resolv.conf
             printf "nameserver 127.0.0.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf
         else
             sed -i '1s/^/nameserver 127.0.0.1\n/' /etc/resolv.conf
