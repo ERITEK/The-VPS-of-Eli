@@ -21,7 +21,7 @@ update_scan() {
         # - убираем префикс v для корректного сравнения -
         local _xc="${xui_cur#v}" _xl="${xui_lat#v}"
         [[ "$_xc" == "$_xl" ]] && print_ok "3X-UI: ${xui_cur} (актуальна)" \
-            || print_warn "3X-UI: ${xui_cur} → ${xui_lat}"
+            || print_warn "3X-UI: ${xui_cur} -> ${xui_lat}"
     else
         print_info "3X-UI: не установлен"
     fi
@@ -33,7 +33,7 @@ update_scan() {
         ts_lat=$(ts_get_latest_version 2>/dev/null || echo "?")
         local _tc="${ts_cur#v}" _tl="${ts_lat#v}"
         [[ "$_tc" == "$_tl" ]] && print_ok "TeamSpeak: ${ts_cur} (актуальна)" \
-            || print_warn "TeamSpeak: ${ts_cur} → ${ts_lat}"
+            || print_warn "TeamSpeak: ${ts_cur} -> ${ts_lat}"
     else
         print_info "TeamSpeak: не установлен"
     fi
