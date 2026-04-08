@@ -34,7 +34,7 @@ boot_install_packages() {
 
     if ! apt-get -y install -qq ufw wget curl nano tcpdump btop ca-certificates gnupg2 \
         lsof net-tools dnsutils htop iotop ncdu tmux unzip logrotate fail2ban \
-        python3 unbound jq; then
+        python3 unbound jq cron; then
         print_err "Установка пакетов не удалась"
         return 1
     fi
@@ -43,7 +43,7 @@ boot_install_packages() {
     # - unbound ставим сейчас, но запускать будем позже через меню Unbound -
     systemctl stop unbound 2>/dev/null || true
     systemctl disable unbound 2>/dev/null || true
-    print_ok "Unbound установлен (настройка через меню Обслуживание → Unbound)"
+    print_ok "Unbound установлен (настройка через меню Обслуживание -> Unbound)"
     return 0
 }
 
@@ -122,6 +122,12 @@ boot_setup_swap() {
             fi
             print_info "Swapfile ${old_mb} MB меньше нужного, пересоздаём на ${size_mb} MB"
             swapoff /swapfile 2>/dev/null || true
+            # - проверяем что swap действительно отключился -
+            if swapon --show 2>/dev/null | grep -q "/swapfile"; then
+                print_warn "Не удалось отключить /swapfile (RAM мало, swap активен)"
+                print_warn "Пропускаю пересоздание, текущий swap остаётся"
+                return 0
+            fi
             rm -f /swapfile
         fi
         print_info "Создаём /swapfile ${size_mb} MB"
@@ -196,7 +202,7 @@ EOBBR
     local ram_mb conntrack_max
     ram_mb=$(free -m | awk '/^Mem:/{print $2}')
     conntrack_max=$(( ram_mb * 1024 * 1024 * 5 / 100 / 300 ))
-    print_info "RAM: ${ram_mb} MB → nf_conntrack_max = ${conntrack_max}"
+    print_info "RAM: ${ram_mb} MB -> nf_conntrack_max = ${conntrack_max}"
 
     # - VPN tune -
     cat > /etc/sysctl.d/99-vpn-tune.conf << EOVPN
@@ -270,7 +276,8 @@ boot_setup_ssh_port() {
 
     print_info "Новый порт SSH: ${new_port}"
 
-    local backup_file="/etc/ssh/sshd_config.bak.$(date +%F_%H-%M-%S)"
+    local backup_file
+    backup_file="/etc/ssh/sshd_config.bak.$(date +%F_%H-%M-%S)"
     cp /etc/ssh/sshd_config "$backup_file"
     print_info "Бэкап: ${backup_file}"
 
@@ -308,10 +315,10 @@ boot_setup_fail2ban() {
     if [[ -f /var/log/auth.log ]]; then
         f2b_backend="auto"
         f2b_logpath="logpath  = /var/log/auth.log"
-        print_info "Fail2Ban: найден auth.log → backend=auto"
+        print_info "Fail2Ban: найден auth.log -> backend=auto"
     else
         f2b_backend="systemd"
-        print_info "Fail2Ban: auth.log не найден → backend=systemd (journald)"
+        print_info "Fail2Ban: auth.log не найден -> backend=systemd (journald)"
     fi
 
     mkdir -p /etc/fail2ban/jail.d/
@@ -401,7 +408,7 @@ boot_setup_ufw() {
         echo ""
         print_warn "UFW сейчас НЕАКТИВЕН! Правила добавлены, но не применяются."
         print_info "После установки всех компонентов включи UFW:"
-        print_info "Меню → 4. Обслуживание → 5. UFW → Включить"
+        print_info "Меню -> 4. Обслуживание -> 5. UFW -> Включить"
         echo ""
     fi
     return 0
@@ -447,9 +454,9 @@ boot_cleanup() {
 # - показывает результат и предлагает перезагрузку -
 boot_summary() {
     echo ""
-    echo -e "${BOLD}${GREEN}════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}${GREEN}====================================================${NC}"
     echo -e "  ${GREEN}${BOLD}Первичная настройка завершена!${NC}"
-    echo -e "${BOLD}${GREEN}════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}${GREEN}====================================================${NC}"
     echo ""
 
     if [[ "$BOOT_SSH_CHANGED" == "yes" ]]; then
@@ -479,10 +486,22 @@ boot_summary() {
 # - последовательный запуск всех шагов первичной настройки -
 boot_run() {
     eli_header
-    eli_banner "В начале юзер сотворил update" \
-        "Первичная настройка VPS: обновление, пакеты, Docker, swap, BBR, SSH, fail2ban, UFW
-  Рекомендуется запускать один раз на свежем сервере
-  После завершения потребуется reboot"
+    eli_banner "Первичная настройка VPS" \
+        "Подготовка свежего сервера к работе. Запускается один раз.
+
+  Что будет сделано:
+    1. Обновление системы (apt update + upgrade)
+    2. Установка базовых утилит (curl, jq, htop, tmux и др.)
+    3. Установка Docker (нужен для Outline, 3X-UI, MTProto, SOCKS5)
+    4. Настройка swap (виртуальная память, защита от OOM)
+    5. Сетевые оптимизации (BBR, буферы, conntrack)
+    6. Смена порта SSH (опционально, защита от сканеров)
+    7. Настройка Fail2Ban (автоблокировка брутфорса SSH)
+    8. Настройка файрвола UFW (правила будут добавлены, но не включены)
+    9. Инициализация книги (book_of_Eli — хранилище настроек стека)
+
+  После завершения потребуется перезагрузка (reboot).
+  Время выполнения: 3-10 минут в зависимости от сервера."
 
     local confirm=""
     ask_yn "Запустить первичную настройку?" "y" confirm
