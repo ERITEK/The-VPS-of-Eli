@@ -1,11 +1,17 @@
 # --> МОДУЛЬ: UFW <--
 # - управление правилами файрвола: добавление, удаление, проверка покрытия -
 
+_ufw_guard() {
+    command -v ufw &>/dev/null || { print_err "UFW не установлен"; return 1; }
+    return 0
+}
+
 ufw_active() {
     ufw status 2>/dev/null | grep -q "^Status: active"
 }
 
 ufw_show_status() {
+    _ufw_guard || return 0
     print_section "Статус UFW"
     if ufw_active; then print_ok "UFW: активен"
     else print_warn "UFW: неактивен"; fi
@@ -17,6 +23,7 @@ ufw_show_status() {
 }
 
 ufw_toggle() {
+    _ufw_guard || return 0
     print_section "Включить / выключить UFW"
     if ufw_active; then
         print_warn "UFW активен"
@@ -39,6 +46,7 @@ ufw_toggle() {
 }
 
 ufw_add_port() {
+    _ufw_guard || return 0
     print_section "Добавить порт"
     echo -e "  ${CYAN}Форматы: 80 / 80/tcp / 80/udp / 80:90/tcp${NC}"
     local port_input=""
@@ -54,6 +62,7 @@ ufw_add_port() {
         esac
     fi
     local comment=""
+    echo -e "  ${CYAN}Комментарий — пометка для чего этот порт (например: nginx, игра). Можно пропустить.${NC}"
     ask "Комментарий (опционально)" "" comment
     if [[ -n "$comment" ]]; then ufw allow "${port_spec}" comment "${comment}"
     else ufw allow "${port_spec}"; fi
@@ -62,6 +71,7 @@ ufw_add_port() {
 }
 
 ufw_delete_rule() {
+    _ufw_guard || return 0
     print_section "Удалить правило"
     ufw status numbered 2>/dev/null | grep -v "^Status:" | sed 's/^/  /'
     echo ""
@@ -74,6 +84,7 @@ ufw_delete_rule() {
 }
 
 ufw_check_ports() {
+    _ufw_guard || return 0
     print_section "Активные порты vs UFW"
     local ufw_rules; ufw_rules=$(ufw status 2>/dev/null || true)
     local missing=0
@@ -85,9 +96,9 @@ ufw_check_ports() {
         [[ -z "$port" ]] && continue
         echo "$addr" | grep -qE '^127\.|^\[::1\]' && continue
         if echo "$ufw_rules" | grep -qE "${port}/(tcp|udp)|${port} "; then
-            echo -e "  ${GREEN}✓${NC} ${port}  ${proc}"
+            echo -e "  ${GREEN}[OK]${NC} ${port}  ${proc}"
         else
-            echo -e "  ${YELLOW}⚠${NC}  ${port}  ${proc}  ${YELLOW}нет правила${NC}"
+            echo -e "  ${YELLOW}[!]${NC}  ${port}  ${proc}  ${YELLOW}нет правила${NC}"
             missing=$(( missing + 1 ))
         fi
     done < <(ss -tulpn 2>/dev/null | tail -n +2)
@@ -98,6 +109,7 @@ ufw_check_ports() {
 }
 
 ufw_reset() {
+    _ufw_guard || return 0
     print_section "Сброс всех правил"
     print_warn "Все правила будут удалены, UFW отключён!"
     local confirm=""; ask_yn "Подтвердить?" "n" confirm
