@@ -12,7 +12,11 @@ XUI_UNIT="/etc/systemd/system/x-ui.service"
 XUI_INSTALL_URL="https://raw.githubusercontent.com/MHSanaei/3x-ui/main/install.sh"
 
 xui_installed() {
-    [[ -f "$XUI_BIN" ]] && systemctl is-active --quiet "$XUI_SERVICE" 2>/dev/null
+    [[ -f "$XUI_BIN" ]] || systemctl list-unit-files "$XUI_SERVICE" 2>/dev/null | grep -q "$XUI_SERVICE"
+}
+
+xui_running() {
+    systemctl is-active --quiet "$XUI_SERVICE" 2>/dev/null
 }
 
 xui_get_param() {
@@ -169,9 +173,9 @@ EOF
     book_write ".3xui.installed_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     echo ""
-    echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}${BOLD}====================================================${NC}"
     echo -e "  ${GREEN}${BOLD}3X-UI установлен!${NC}"
-    echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}${BOLD}====================================================${NC}"
     echo ""
     echo -e "  ${BOLD}URL:${NC}     http://${server_ip}:${panel_port}${panel_path}"
     echo -e "  ${BOLD}Логин:${NC}   ${panel_user}"
@@ -228,7 +232,7 @@ xui_show_creds() {
 # - ВНИМАНИЕ: endpoint /panel/api/inbounds/list, curl с -L и -c cookie -
 xui_show_inbounds() {
     print_section "Inbound'ы 3X-UI"
-    if ! xui_installed 2>/dev/null; then
+    if ! xui_running 2>/dev/null; then
         print_err "3X-UI не запущен"; return 0
     fi
     [[ ! -f "$XUI_ENV" ]] && { print_err "3xui.env не найден"; return 0; }
@@ -276,7 +280,8 @@ xui_backup_db() {
     print_section "Бэкап БД"
     [[ ! -f "$XUI_DB" ]] && { print_err "БД не найдена: ${XUI_DB}"; return 0; }
     mkdir -p "$XUI_BACKUP_DIR"
-    local backup_file="${XUI_BACKUP_DIR}/x-ui_$(date +%Y%m%d_%H%M%S).db"
+    local backup_file
+    backup_file="${XUI_BACKUP_DIR}/x-ui_$(date +%Y%m%d_%H%M%S).db"
     cp -f "$XUI_DB" "$backup_file"; chmod 600 "$backup_file"
     print_ok "Бэкап: ${backup_file} ($(du -h "$backup_file" | awk '{print $1}'))"
     find "$XUI_BACKUP_DIR" -name "x-ui_*.db" -mtime +30 -delete 2>/dev/null || true
