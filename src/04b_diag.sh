@@ -16,24 +16,33 @@ _diag_section() {
 # - HTML хелперы -
 _hb() {
     case "$1" in
-        ok) echo "<span class='badge badge-ok'>✓ $2</span>" ;; warn) echo "<span class='badge badge-warn'>⚠ $2</span>" ;;
-        err) echo "<span class='badge badge-err'>✗ $2</span>" ;; *) echo "<span class='badge badge-info'>$2</span>" ;; esac
+        ok) echo "<span class='badge badge-ok'>[OK] $2</span>" ;; warn) echo "<span class='badge badge-warn'>[!] $2</span>" ;;
+        err) echo "<span class='badge badge-err'>[X] $2</span>" ;; *) echo "<span class='badge badge-info'>$2</span>" ;; esac
 }
 _hr() { echo "<tr><td class='label'>$1</td><td>$(_hb "${3:-info}" "$2")</td></tr>"; }
 
 diag_run() {
     eli_header
     eli_banner "Диагностика VPS стека" \
-        "16 секций: железо, канал, безопасность, VPN, ядро, диск, сервисы
-  Результат: TXT + HTML отчёт в /root/"
+        "Полная проверка сервера по 18 секциям. Занимает 2-5 минут.
+
+  Что проверяется: процессор, RAM, swap, скорость диска, скорость канала
+    (загрузка 100 MB с 10 серверов по миру), пинг, DNS, NTP, SSH-атаки,
+    настройки ядра (BBR, буферы, conntrack), статус всех VPN и сервисов,
+    открытые порты, MSS clamping, файрвол, journald, cron задачи.
+
+  Результат: цветной отчёт в терминале + файлы TXT и HTML в /root/.
+    HTML отчёт можно скачать и открыть в браузере — там красивые таблицы
+    и светофор (красный/жёлтый/зелёный) с рекомендациями по каждой проблеме."
 
     _DG_RED=(); _DG_YELLOW=(); _DG_GREEN=()
     local _TS; _TS=$(date +%Y%m%d_%H%M%S)
     local RPT_TXT="/root/diag_${_TS}.txt"
     local RPT_HTML="/root/diag_${_TS}.html"
+    exec 3>&1 4>&2
     exec > >(tee -a "$RPT_TXT") 2>&1
     # - страховка: восстановить stdout при любом выходе из функции -
-    trap 'exec > /dev/tty 2>&1 || true' RETURN
+    trap 'exec 1>&3 2>&4 3>&- 4>&-' RETURN
 
     # --> ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ <--
     local D_CPU="?" D_CORES=1 D_RAM=0 D_RAMFREE=0 D_SWAP=0 D_SWAPUSED=0
@@ -267,7 +276,7 @@ diag_run() {
         D_ENTROPY=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo "0")
         [[ -e /dev/hwrng ]] && D_ENTROPY_SRC="hwrng"
         command -v haveged &>/dev/null && D_ENTROPY_SRC="haveged"
-        ls /sys/bus/virtio/drivers/virtio_rng 2>/dev/null | grep -q . && D_ENTROPY_SRC="virtio-rng"
+        [[ -d /sys/bus/virtio/drivers/virtio_rng ]] && D_ENTROPY_SRC="virtio-rng"
         _dg_ck() { [[ "$1" == "$2" ]] && { print_ok "$3: $1"; _dg_green "$3 = $1"; } || { print_warn "$3: $1 (рек. $2)"; _dg_yellow "$3 = $1 вместо $2|sysctl -w ..."; }; }
         _dg_ck "$D_BBR" "bbr" "BBR"; _dg_ck "$D_QDISC" "fq" "Qdisc"
         _dg_ck "$D_SWAPPINESS" "20" "Swappiness"; _dg_ck "$D_MTUP" "1" "MTU Probing"
@@ -324,6 +333,7 @@ diag_run() {
             else st="н/у"; print_info "${label}: не установлен"; fi; D_SVC_TABLE+=("${label}|${st}"); }
         _sv "fail2ban" "Fail2Ban"; _sv "docker" "Docker"; _sv "x-ui" "3X-UI"
         _sv "teamspeak" "TeamSpeak"; _sv "mumble-server" "Mumble"; _sv "unbound" "Unbound"
+        _sv "hysteria-server" "Hysteria2"
         D_UFW=$(ufw status 2>/dev/null | grep -oP '^Status: \K\w+' || echo "?")
         [[ "$D_UFW" == "active" ]] && { print_ok "UFW: активен"; _dg_green "UFW активен"; } \
             || { print_warn "UFW: ${D_UFW}"; _dg_yellow "UFW не включён|ufw --force enable"; }
@@ -334,20 +344,96 @@ diag_run() {
                 print_ok "AWG ${_ai}: поднят"; D_SVC_TABLE+=("AWG ${_ai}|активен")
             else print_err "AWG ${_ai}: не поднят"; D_SVC_TABLE+=("AWG ${_ai}|остановлен"); fi
         done
+        # - docker контейнеры: MTProto, SOCKS5, Outline, Signal -
+        if command -v docker &>/dev/null; then
+            for cn in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E "^(mtproto-|socks5-|shadowbox|signal)"); do
+                if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${cn}$"; then
+                    print_ok "${cn}: запущен"; D_SVC_TABLE+=("${cn}|активен")
+                else
+                    print_err "${cn}: остановлен"; D_SVC_TABLE+=("${cn}|остановлен")
+                    _dg_red "Контейнер ${cn} остановлен|docker start ${cn}"
+                fi
+            done
+        fi
+    }
+    # --> ПРОКСИ (MTProto, SOCKS5, Hysteria 2) <--
+    _dg_proxy() {
+        # - MTProto мультиинстанс -
+        local mtp_count=0
+        for envf in /etc/mtproto/instance_*.env; do
+            [[ -f "$envf" ]] || continue
+            mtp_count=$(( mtp_count + 1 ))
+            source "$envf" 2>/dev/null
+            local inst_id; inst_id=$(basename "$envf" | sed 's/instance_//;s/\.env//')
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER:-}$"; then
+                print_ok "MTProto #${inst_id}: port ${PORT} (${TLS_DOMAIN})"
+                _dg_green "MTProto #${inst_id} активен"
+            else
+                print_err "MTProto #${inst_id}: остановлен"
+                _dg_red "MTProto #${inst_id} остановлен|docker start ${CONTAINER}"
+            fi
+        done
+        [[ $mtp_count -eq 0 ]] && print_info "MTProto: не установлен"
+
+        # - SOCKS5 мультиинстанс -
+        local s5_count=0
+        for envf in /etc/socks5/instance_*.env; do
+            [[ -f "$envf" ]] || continue
+            s5_count=$(( s5_count + 1 ))
+            source "$envf" 2>/dev/null
+            local inst_id; inst_id=$(basename "$envf" | sed 's/instance_//;s/\.env//')
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER:-}$"; then
+                print_ok "SOCKS5 #${inst_id}: port ${PORT}"
+                _dg_green "SOCKS5 #${inst_id} активен"
+            else
+                print_err "SOCKS5 #${inst_id}: остановлен"
+                _dg_red "SOCKS5 #${inst_id} остановлен|docker start ${CONTAINER}"
+            fi
+        done
+        [[ $s5_count -eq 0 ]] && print_info "SOCKS5: не установлен"
+
+        # - Hysteria 2 -
+        if [[ -f /etc/hysteria/hysteria.env ]]; then
+            source /etc/hysteria/hysteria.env 2>/dev/null
+            if systemctl is-active --quiet hysteria-server 2>/dev/null; then
+                print_ok "Hysteria 2: port ${PORT} (ver ${VERSION})"
+                _dg_green "Hysteria 2 активен"
+            else
+                print_err "Hysteria 2: остановлен"
+                _dg_red "Hysteria 2 остановлен|systemctl start hysteria-server"
+            fi
+        else
+            print_info "Hysteria 2: не установлен"
+        fi
+    }
+    # --> TELEGRAM МОНИТОРИНГ <--
+    _dg_tgmon() {
+        if [[ -f /etc/vps-eli-stack/telegrambot.env ]]; then
+            source /etc/vps-eli-stack/telegrambot.env 2>/dev/null
+            if crontab -l 2>/dev/null | grep -q "eli-tgbot-monitor"; then
+                print_ok "Telegram мониторинг: каждые ${INTERVAL} мин"
+                _dg_green "Telegram мониторинг активен"
+            else
+                print_warn "Telegram мониторинг: настроен, но cron отсутствует"
+                _dg_yellow "Telegram cron не найден|Перенастрой мониторинг"
+            fi
+        else
+            print_info "Telegram мониторинг: не настроен"
+        fi
     }
     _dg_maintenance() {
         local jl; jl=$(grep "SystemMaxUse" /etc/systemd/journald.conf.d/size-limit.conf 2>/dev/null | grep -oP '=\K.*' || echo "")
         local js; js=$(journalctl --disk-usage 2>/dev/null | grep -oP '[\d.]+\s*[KMGT]?B' | tail -1 || echo "?")
-        [[ -n "$jl" ]] && { print_ok "Journald: ${js}/${jl}"; D_MAINT_TABLE+=("Journald|✓ ${js} / ${jl}"); } \
-            || { print_warn "Journald: без лимита"; _dg_yellow "Journald без лимита|Запусти Автообслуживание"; D_MAINT_TABLE+=("Journald|⚠ Без лимита"); }
+        [[ -n "$jl" ]] && { print_ok "Journald: ${js}/${jl}"; D_MAINT_TABLE+=("Journald|[OK] ${js} / ${jl}"); } \
+            || { print_warn "Journald: без лимита"; _dg_yellow "Journald без лимита|Запусти Автообслуживание"; D_MAINT_TABLE+=("Journald|[!] Без лимита"); }
         local cr; cr=$(crontab -l 2>/dev/null | grep -v "^#" | grep -c "reboot" | tr -d '[:space:]' || echo "0")
-        [[ "${cr:-0}" -gt 0 ]] && { print_ok "Авто-reboot: ${cr}"; D_MAINT_TABLE+=("Авто-reboot|✓ ${cr} задачи"); } \
-            || { print_warn "Авто-reboot: нет"; _dg_yellow "Нет авто-reboot|Запусти Автообслуживание"; D_MAINT_TABLE+=("Авто-reboot|⚠ Выключен"); }
+        [[ "${cr:-0}" -gt 0 ]] && { print_ok "Авто-reboot: ${cr}"; D_MAINT_TABLE+=("Авто-reboot|[OK] ${cr} задачи"); } \
+            || { print_warn "Авто-reboot: нет"; _dg_yellow "Нет авто-reboot|Запусти Автообслуживание"; D_MAINT_TABLE+=("Авто-reboot|[!] Выключен"); }
         local cd; cd=$(crontab -l 2>/dev/null | grep -v "^#" | grep -c "docker-cleanup" | tr -d '[:space:]' || echo "0")
-        [[ "${cd:-0}" -gt 0 ]] && D_MAINT_TABLE+=("Docker cleanup|✓ Активен") || D_MAINT_TABLE+=("Docker cleanup|⚠ Выключен")
+        [[ "${cd:-0}" -gt 0 ]] && D_MAINT_TABLE+=("Docker cleanup|[OK] Активен") || D_MAINT_TABLE+=("Docker cleanup|[!] Выключен")
         local upd; upd=$(apt-get upgrade --dry-run 2>/dev/null | grep -c "^Inst " | tr -d '[:space:]' || echo "0")
-        [[ "${upd:-0}" -gt 0 ]] && { print_warn "Обновлений: ${upd}"; D_MAINT_TABLE+=("Обновлений|⚠ ${upd}"); } \
-            || { print_ok "Система актуальна"; D_MAINT_TABLE+=("Обновлений|✓ Актуально"); }
+        [[ "${upd:-0}" -gt 0 ]] && { print_warn "Обновлений: ${upd}"; D_MAINT_TABLE+=("Обновлений|[!] ${upd}"); } \
+            || { print_ok "Система актуальна"; D_MAINT_TABLE+=("Обновлений|[OK] Актуально"); }
         local ud; ud=$(awk '{print int($1/86400)}' /proc/uptime 2>/dev/null || echo "?")
         local lr; lr=$(who -b 2>/dev/null | awk '{print $3, $4}' || echo "?")
         print_info "Uptime: ${ud} дней"; D_MAINT_TABLE+=("Uptime|${ud} дней (reboot: ${lr})")
@@ -369,12 +455,14 @@ diag_run() {
     _diag_section "8. Outline" _dg_outline
     _diag_section "9. 3X-UI" _dg_xui
     _diag_section "10. TeamSpeak" _dg_teamspeak
-    _diag_section "11. Сетевые настройки ядра" _dg_kernel
-    _diag_section "12. iptables" _dg_iptables
-    _diag_section "13. Порты" _dg_ports
-    _diag_section "14. Диск" _dg_disk
-    _diag_section "15. Сервисы" _dg_services
-    _diag_section "16. Обслуживание" _dg_maintenance
+    _diag_section "11. Прокси (MTProto, SOCKS5, Hysteria 2)" _dg_proxy
+    _diag_section "12. Telegram мониторинг" _dg_tgmon
+    _diag_section "13. Сетевые настройки ядра" _dg_kernel
+    _diag_section "14. iptables" _dg_iptables
+    _diag_section "15. Порты" _dg_ports
+    _diag_section "16. Диск" _dg_disk
+    _diag_section "17. Сервисы" _dg_services
+    _diag_section "18. Обслуживание" _dg_maintenance
 
     # --> ПРОГНОЗ ЁМКОСТИ <--
     print_section "Прогноз ёмкости"
@@ -399,16 +487,16 @@ diag_run() {
 
     # --> ТЕРМИНАЛЬНЫЙ ИТОГ <--
     echo ""
-    echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}${CYAN}║                  ИТОГОВЫЙ ОТЧЁТ                     ║${NC}"
-    echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════════════╝${NC}"
+    echo -e "${BOLD}${CYAN}+======================================================+${NC}"
+    echo -e "${BOLD}${CYAN}|                  ИТОГОВЫЙ ОТЧЁТ                     |${NC}"
+    echo -e "${BOLD}${CYAN}+======================================================+${NC}"
     echo ""
     if [[ ${#_DG_RED[@]} -gt 0 ]]; then echo -e "${RED}${BOLD}ТРЕБУЕТ ДЕЙСТВИЙ (${#_DG_RED[@]}):${NC}"
-        for i in "${_DG_RED[@]}"; do echo -e "  ${RED}✗${NC} ${i%%|*}"; [[ "$i" == *"|"* ]] && echo -e "    ${YELLOW}→ ${i##*|}${NC}"; done; echo ""; fi
+        for i in "${_DG_RED[@]}"; do echo -e "  ${RED}[X]${NC} ${i%%|*}"; [[ "$i" == *"|"* ]] && echo -e "    ${YELLOW}-> ${i##*|}${NC}"; done; echo ""; fi
     if [[ ${#_DG_YELLOW[@]} -gt 0 ]]; then echo -e "${YELLOW}${BOLD}ВНИМАНИЕ (${#_DG_YELLOW[@]}):${NC}"
-        for i in "${_DG_YELLOW[@]}"; do echo -e "  ${YELLOW}⚠${NC}  ${i%%|*}"; [[ "$i" == *"|"* ]] && echo -e "    ${CYAN}→ ${i##*|}${NC}"; done; echo ""; fi
+        for i in "${_DG_YELLOW[@]}"; do echo -e "  ${YELLOW}[!]${NC}  ${i%%|*}"; [[ "$i" == *"|"* ]] && echo -e "    ${CYAN}-> ${i##*|}${NC}"; done; echo ""; fi
     if [[ ${#_DG_GREEN[@]} -gt 0 ]]; then echo -e "${GREEN}${BOLD}ВСЁ ХОРОШО (${#_DG_GREEN[@]}):${NC}"
-        for i in "${_DG_GREEN[@]}"; do echo -e "  ${GREEN}✓${NC} ${i%%|*}"; done; echo ""; fi
+        for i in "${_DG_GREEN[@]}"; do echo -e "  ${GREEN}[OK]${NC} ${i%%|*}"; done; echo ""; fi
 
     # ============================================================
     # --> HTML ГЕНЕРАЦИЯ (ПОЛНАЯ, КАК В ОРИГИНАЛЕ) <--
@@ -457,26 +545,26 @@ CSS
 
     {
     # - header -
-    echo "<div class='header'><div><h1>🖥 VPS Diag v${ELI_VERSION}</h1>"
-    echo "<div style='color:var(--mut);font-size:13px;margin-top:4px'>AmneziaWG · Outline · 3X-UI · TeamSpeak · Mumble</div></div>"
+    echo "<div class='header'><div><h1>[VPS] VPS Diag v${ELI_VERSION}</h1>"
+    echo "<div style='color:var(--mut);font-size:13px;margin-top:4px'>AmneziaWG * Outline * 3X-UI * TeamSpeak * Mumble</div></div>"
     echo "<div class='meta'><span><b style='color:var(--txt)'>${D_HOST}</b></span>"
     echo "<span>$(date '+%d.%m.%Y %H:%M:%S UTC')</span><span>${D_OS}</span><span>Ядро: ${D_KERNEL}</span></div></div>"
 
     # - светофор с подсказками -
     echo "<div class='traffic-light'>"
-    echo "<div class='tl-block tl-red'><h3>🔴 Требует действий (${#_DG_RED[@]})</h3><ul>"
+    echo "<div class='tl-block tl-red'><h3>[ALERT] Требует действий (${#_DG_RED[@]})</h3><ul>"
     [[ ${#_DG_RED[@]} -eq 0 ]] && echo "<li style='color:var(--mut)'>Нет критических проблем</li>"
     for i in "${_DG_RED[@]}"; do
-        echo "<li>${i%%|*}"; [[ "$i" == *"|"* ]] && echo "<span class='fix'>→ ${i##*|}</span>"; echo "</li>"
+        echo "<li>${i%%|*}"; [[ "$i" == *"|"* ]] && echo "<span class='fix'>-> ${i##*|}</span>"; echo "</li>"
     done
     echo "</ul></div>"
     echo "<div class='tl-block tl-yellow'><h3>🟡 Внимание (${#_DG_YELLOW[@]})</h3><ul>"
     [[ ${#_DG_YELLOW[@]} -eq 0 ]] && echo "<li style='color:var(--mut)'>Нет предупреждений</li>"
     for i in "${_DG_YELLOW[@]}"; do
-        echo "<li>${i%%|*}"; [[ "$i" == *"|"* ]] && echo "<span class='fix'>→ ${i##*|}</span>"; echo "</li>"
+        echo "<li>${i%%|*}"; [[ "$i" == *"|"* ]] && echo "<span class='fix'>-> ${i##*|}</span>"; echo "</li>"
     done
     echo "</ul></div>"
-    echo "<div class='tl-block tl-green'><h3>🟢 Всё хорошо (${#_DG_GREEN[@]})</h3><ul>"
+    echo "<div class='tl-block tl-green'><h3>[GREEN] Всё хорошо (${#_DG_GREEN[@]})</h3><ul>"
     [[ ${#_DG_GREEN[@]} -eq 0 ]] && echo "<li style='color:var(--mut)'>Нет</li>"
     for i in "${_DG_GREEN[@]}"; do echo "<li>${i%%|*}</li>"; done
     echo "</ul></div></div>"
@@ -485,7 +573,7 @@ CSS
     echo "<div class='grid'>"
 
     # Железо
-    echo "<div class='card'><div class='card-header'><span class='icon'>💻</span> Железо и система<div class='card-sub'>CPU, RAM, swap, ядро, uptime</div></div><div class='card-body'><table>"
+    echo "<div class='card'><div class='card-header'><span class='icon'>[HW]</span> Железо и система<div class='card-sub'>CPU, RAM, swap, ядро, uptime</div></div><div class='card-body'><table>"
     _hr "CPU" "${D_CPU}" "info"; _hr "vCPU" "${D_CORES}" "info"
     _hr "RAM" "${D_RAM} MB (свободно: ${D_RAMFREE} MB)" "$([ $D_RAM -ge 870 ] && echo ok || echo warn)"
     _hr "Swap" "${D_SWAP} MB (исп: ${D_SWAPUSED} MB)" "$([ $D_SWAP -gt 0 ] && echo ok || echo warn)"
@@ -494,13 +582,13 @@ CSS
     echo "</table></div></div>"
 
     # CPU crypto
-    echo "<div class='card'><div class='card-header'><span class='icon'>🔐</span> Производительность CPU<div class='card-sub'>Скорость шифрования, влияет на пропускную способность VPN</div></div><div class='card-body'><table>"
+    echo "<div class='card'><div class='card-header'><span class='icon'>[CPU]</span> Производительность CPU<div class='card-sub'>Скорость шифрования, влияет на пропускную способность VPN</div></div><div class='card-body'><table>"
     _hr "AES-256-GCM (Outline)" "${D_AES} (~${D_AES_MBIT} Мбит/с)" "$([ "$D_AES" != "?" ] && echo ok || echo warn)"
     _hr "ChaCha20-Poly1305 (AWG)" "${D_CHA} (~${D_CHA_MBIT} Мбит/с)" "$([ "$D_CHA" != "?" ] && echo ok || echo warn)"
     echo "</table></div></div>"
 
     # Канал с регионами
-    echo "<div class='card'><div class='card-header'><span class='icon'>📡</span> Скорость канала<div class='card-sub'>Загрузка 100 МБ до 10 точек по миру</div></div><div class='card-body'><table>"
+    echo "<div class='card'><div class='card-header'><span class='icon'>[NET]</span> Скорость канала<div class='card-sub'>Загрузка 100 МБ до 10 точек по миру</div></div><div class='card-body'><table>"
     for sr in "${D_SPEED_RESULTS[@]}"; do
         local sh="${sr%%|*}" sv="${sr##*|}"
         if [[ "$sh" == "__region__" ]]; then
@@ -514,7 +602,7 @@ CSS
     echo "</table></div></div>"
 
     # Латентность
-    echo "<div class='card'><div class='card-header'><span class='icon'>📶</span> Латентность (10 пакетов)<div class='card-sub'>TeamSpeak: jitter &lt;5 мс, потери &lt;1%, avg &lt;50 мс</div></div><div class='card-body'><table class='ping-table'>"
+    echo "<div class='card'><div class='card-header'><span class='icon'>[PING]</span> Латентность (10 пакетов)<div class='card-sub'>TeamSpeak: jitter &lt;5 мс, потери &lt;1%, avg &lt;50 мс</div></div><div class='card-body'><table class='ping-table'>"
     echo "<tr><th>Хост</th><th>avg</th><th>jitter</th><th>loss</th></tr>"
     for pr in "${D_PING_RESULTS[@]}"; do
         IFS='|' read -r pl pa pj pp <<< "$pr"
@@ -524,18 +612,18 @@ CSS
     echo "</table></div></div>"
 
     # Безопасность
-    echo "<div class='card'><div class='card-header'><span class='icon'>🛡</span> Безопасность<div class='card-sub'>SSH атаки, fail2ban, TCP соединения</div></div><div class='card-body'><table>"
+    echo "<div class='card'><div class='card-header'><span class='icon'>[SEC]</span> Безопасность<div class='card-sub'>SSH атаки, fail2ban, TCP соединения</div></div><div class='card-body'><table>"
     _hr "SSH атак (24ч)" "${D_SSH_FAILS} (${D_SEC_LEVEL})" "$([ "$D_SEC_LEVEL" = "высокий" ] && echo err || echo info)"
     _hr "Fail2ban забанено" "${D_F2B_TOTAL}" "ok"
     echo "</table></div></div>"
 
     # AWG интерфейсы
     if [[ ${#D_AWG_DATA[@]} -gt 0 ]]; then
-        echo "<div class='card'><div class='card-header'><span class='icon'>🔒</span> AmneziaWG<div class='card-sub'>Интерфейсы, MSS clamping, MTU</div></div><div class='card-body'>"
+        echo "<div class='card'><div class='card-header'><span class='icon'>[AWG]</span> AmneziaWG<div class='card-sub'>Интерфейсы, MSS clamping, MTU</div></div><div class='card-body'>"
         for ae in "${D_AWG_DATA[@]}"; do
             IFS='|' read -r ai ap apr amu amc ami <<< "$ae"
             echo "<div class='awg-iface'><div class='name'>${ai}</div><table>"
-            _hr "Порт" "${ap}" "info"; _hr "Пиров" "${apr}" "info"; _hr "MTU" "${amu}" "$([ "$amu" = "1420" ] && echo ok || echo warn)"
+            _hr "Порт" "${ap}" "info"; _hr "Пиров" "${apr}" "info"; _hr "MTU" "${amu}" "$(echo "$amu" | grep -qE '^(1280|1320|1420)$' && echo ok || echo warn)"
             _hr "MSS конфиг" "${amc}" "$([ "$amc" = "есть" ] && echo ok || echo err)"
             _hr "MSS iptables" "${ami}" "$([ "$ami" = "да" ] && echo ok || echo warn)"
             echo "</table></div>"
@@ -544,32 +632,32 @@ CSS
     fi
 
     # Outline
-    echo "<div class='card'><div class='card-header'><span class='icon'>🔑</span> Outline (Shadowsocks)<div class='card-sub'>Docker контейнер shadowbox</div></div><div class='card-body'><table>"
+    echo "<div class='card'><div class='card-header'><span class='icon'>[OTL]</span> Outline (Shadowsocks)<div class='card-sub'>Docker контейнер shadowbox</div></div><div class='card-body'><table>"
     _hr "Статус" "${D_OL_STATUS}" "$([ "$D_OL_STATUS" = "запущен" ] && echo ok || echo warn)"
     _hr "CPU" "${D_OL_CPU}" "info"; _hr "RAM" "${D_OL_MEM}" "info"
     _hr "UDP" "${D_OL_UDP}" "$([ "$D_OL_UDP" != "нет" ] && echo ok || echo info)"
     echo "</table></div></div>"
 
     # 3X-UI
-    echo "<div class='card'><div class='card-header'><span class='icon'>🌐</span> 3X-UI (VLESS/VMESS)<div class='card-sub'>Панель управления Xray прокси</div></div><div class='card-body'><table>"
+    echo "<div class='card'><div class='card-header'><span class='icon'>[HTML]</span> 3X-UI (VLESS/VMESS)<div class='card-sub'>Панель управления Xray прокси</div></div><div class='card-body'><table>"
     _hr "Статус" "${D_XUI_STATUS}" "$([ "$D_XUI_STATUS" = "активен" ] && echo ok || echo warn)"
     _hr "Версия 3X-UI" "${D_XUI_VER}" "info"; _hr "Версия Xray" "${D_XRAY_VER}" "info"
     echo "</table></div></div>"
 
     # TeamSpeak
-    echo "<div class='card'><div class='card-header'><span class='icon'>🎙</span> TeamSpeak<div class='card-sub'>Голосовой сервер</div></div><div class='card-body'><table>"
+    echo "<div class='card'><div class='card-header'><span class='icon'>[TS]</span> TeamSpeak<div class='card-sub'>Голосовой сервер</div></div><div class='card-body'><table>"
     _hr "Статус" "${D_TS_STATUS}" "$([ "$D_TS_STATUS" = "запущен" ] && echo ok || echo warn)"
     _hr "RAM" "${D_TS_MEM} MB" "info"
     echo "</table></div></div>"
 
     # Unbound
-    echo "<div class='card'><div class='card-header'><span class='icon'>🌍</span> Unbound DNS<div class='card-sub'>Рекурсивный резолвер для VPN туннелей</div></div><div class='card-body'><table>"
+    echo "<div class='card'><div class='card-header'><span class='icon'>[DNS]</span> Unbound DNS<div class='card-sub'>Рекурсивный резолвер для VPN туннелей</div></div><div class='card-body'><table>"
     _hr "Статус" "${D_UB_STATUS}" "$([ "$D_UB_STATUS" = "активен" ] && echo ok || echo warn)"
     _hr "Резолвинг" "${D_UB_RESOLVE}" "$(echo "$D_UB_RESOLVE" | grep -q "OK" && echo ok || echo warn)"
     echo "</table></div></div>"
 
     # Ядро
-    echo "<div class='card'><div class='card-header'><span class='icon'>⚙️</span> Сетевые настройки ядра<div class='card-sub'>BBR, буферы, conntrack, file descriptors</div></div><div class='card-body'><table>"
+    echo "<div class='card'><div class='card-header'><span class='icon'>[KERN]</span> Сетевые настройки ядра<div class='card-sub'>BBR, буферы, conntrack, file descriptors</div></div><div class='card-body'><table>"
     _hr "TCP Congestion" "${D_BBR}" "$([ "$D_BBR" = "bbr" ] && echo ok || echo warn)"
     _hr "Queue Discipline" "${D_QDISC}" "$([ "$D_QDISC" = "fq" ] && echo ok || echo warn)"
     _hr "Swappiness" "${D_SWAPPINESS}" "$([ "$D_SWAPPINESS" = "20" ] && echo ok || echo warn)"
@@ -581,7 +669,7 @@ CSS
     echo "</table></div></div>"
 
     # Сервисы
-    echo "<div class='card'><div class='card-header'><span class='icon'>🚦</span> Сервисы<div class='card-sub'>Статус всех системных сервисов</div></div><div class='card-body'><table>"
+    echo "<div class='card'><div class='card-header'><span class='icon'>[SVC]</span> Сервисы<div class='card-sub'>Статус всех системных сервисов</div></div><div class='card-body'><table>"
     for sv in "${D_SVC_TABLE[@]}"; do
         local sl="${sv%%|*}" ss="${sv##*|}" st="info"
         [[ "$ss" == "активен" || "$ss" == "active" ]] && st="ok"
@@ -592,12 +680,12 @@ CSS
     echo "</table></div></div>"
 
     # Диск
-    echo "<div class='card'><div class='card-header'><span class='icon'>💾</span> Диск<div class='card-sub'>Занятое место и скорость записи</div></div><div class='card-body'><table>"
+    echo "<div class='card'><div class='card-header'><span class='icon'>[DISK]</span> Диск<div class='card-sub'>Занятое место и скорость записи</div></div><div class='card-body'><table>"
     _hr "Скорость записи" "${D_DISK_SPEED}" "ok"
     while IFS= read -r line; do
         [[ "$line" =~ ^Filesystem ]] && continue
-        local mp usedh availh pcth pct_num t="ok"
-        usedh=$(echo "$line" | awk '{print $4}'); availh=$(echo "$line" | awk '{print $5}')
+        local mp usedh pcth pct_num t="ok"
+        usedh=$(echo "$line" | awk '{print $4}')
         pcth=$(echo "$line" | awk '{print $6}'); mp=$(echo "$line" | awk '{print $7}')
         pct_num=${pcth%%%}; [[ "$pct_num" =~ ^[0-9]+$ && $pct_num -gt 70 ]] && t="warn"
         [[ "$pct_num" =~ ^[0-9]+$ && $pct_num -gt 85 ]] && t="err"
@@ -606,21 +694,21 @@ CSS
     echo "</table></div></div>"
 
     # Прогноз
-    echo "<div class='card'><div class='card-header'><span class='icon'>📊</span> Прогноз ёмкости (${D_CORES} vCPU · ${D_RAM} MB RAM)<div class='card-sub'>Ориентировочно при CPU ≤72% и RAM ≤80%</div></div><div class='card-body'>"
+    echo "<div class='card'><div class='card-header'><span class='icon'>[STAT]</span> Прогноз ёмкости (${D_CORES} vCPU * ${D_RAM} MB RAM)<div class='card-sub'>Ориентировочно при CPU ≤72% и RAM ≤80%</div></div><div class='card-body'>"
     echo "<div class='forecast'>"
-    echo "<div class='forecast-item'><div class='num'>${AWG_MAX}</div><div class='lbl'>AWG клиентов<br><span style='font-size:11px;color:var(--mut)'>ChaCha20 · ~10 Мбит/с/кл</span></div></div>"
-    echo "<div class='forecast-item'><div class='num'>${OUT_MAX}</div><div class='lbl'>Outline клиентов<br><span style='font-size:11px;color:var(--mut)'>AES-256-GCM · ~8 Мбит/с/кл</span></div></div>"
-    echo "<div class='forecast-item'><div class='num'>${XUI_MAX}</div><div class='lbl'>3X-UI клиентов<br><span style='font-size:11px;color:var(--mut)'>VLESS/Trojan · ~5 Мбит/с/кл</span></div></div>"
-    echo "<div class='forecast-item'><div class='num'>${TS_MAX}</div><div class='lbl'>TeamSpeak слотов<br><span style='font-size:11px;color:var(--mut)'>~15 МБ RAM · 0.2 Мбит/кл</span></div></div>"
+    echo "<div class='forecast-item'><div class='num'>${AWG_MAX}</div><div class='lbl'>AWG клиентов<br><span style='font-size:11px;color:var(--mut)'>ChaCha20 * ~10 Мбит/с/кл</span></div></div>"
+    echo "<div class='forecast-item'><div class='num'>${OUT_MAX}</div><div class='lbl'>Outline клиентов<br><span style='font-size:11px;color:var(--mut)'>AES-256-GCM * ~8 Мбит/с/кл</span></div></div>"
+    echo "<div class='forecast-item'><div class='num'>${XUI_MAX}</div><div class='lbl'>3X-UI клиентов<br><span style='font-size:11px;color:var(--mut)'>VLESS/Trojan * ~5 Мбит/с/кл</span></div></div>"
+    echo "<div class='forecast-item'><div class='num'>${TS_MAX}</div><div class='lbl'>TeamSpeak слотов<br><span style='font-size:11px;color:var(--mut)'>~15 МБ RAM * 0.2 Мбит/кл</span></div></div>"
     echo "</div>"
     echo "<div style='margin-top:14px;padding:10px 12px;background:var(--bg3);border-radius:8px;font-size:13px'>"
-    echo "<span style='color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:0.06em'>Смешанный сценарий (CPU≤72% · RAM≤80%)</span><br>"
+    echo "<span style='color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:0.06em'>Смешанный сценарий (CPU≤72% * RAM≤80%)</span><br>"
     echo "<span style='color:var(--cyn)'>AWG ${MIX_AWG}</span> +  <span style='color:var(--blu)'>Outline ${MIX_OUT}</span> +  <span style='color:#f78166'>3X-UI ${MIX_XUI}</span> +  <span style='color:var(--pur)'>TS ${MIX_TS}</span>  одновременно"
     echo "</div></div></div>"
     echo "</div>" # grid
 
     # Порты с цветами
-    echo "<div class='card' style='margin-bottom:24px'><div class='card-header'><span class='icon'>🔌</span> Открытые порты<div class='card-sub'>Что слушает снаружи и зачем</div></div><div class='card-body'>"
+    echo "<div class='card' style='margin-bottom:24px'><div class='card-header'><span class='icon'>[PORT]</span> Открытые порты<div class='card-sub'>Что слушает снаружи и зачем</div></div><div class='card-body'>"
     echo "<table class='ports-table'><tr><th>Порт</th><th>Протокол</th><th>Процесс</th><th>Назначение</th></tr>"
     for pe in "${D_PORT_TABLE[@]}"; do
         IFS='|' read -r pp ppro ppr ppurp <<< "$pe"
@@ -631,25 +719,25 @@ CSS
     echo "</table></div></div>"
 
     # Обслуживание
-    echo "<div class='card'><div class='card-header'><span class='icon'>🔧</span> Обслуживание системы<div class='card-sub'>Cron, journald, logrotate, Docker cleanup</div></div><div class='card-body'><table>"
+    echo "<div class='card'><div class='card-header'><span class='icon'>[MAINT]</span> Обслуживание системы<div class='card-sub'>Cron, journald, logrotate, Docker cleanup</div></div><div class='card-body'><table>"
     for mt in "${D_MAINT_TABLE[@]}"; do
         local ml="${mt%%|*}" mv="${mt##*|}" t="info"
-        [[ "$mv" == "✓"* ]] && t="ok"; [[ "$mv" == "⚠"* ]] && t="warn"
-        mv="${mv#✓ }"; mv="${mv#⚠ }"
+        [[ "$mv" == "[OK]"* ]] && t="ok"; [[ "$mv" == "[!]"* ]] && t="warn"
+        mv="${mv#[OK] }"; mv="${mv#[!] }"
         _hr "$ml" "$mv" "$t"
     done
     echo "</table></div></div>"
 
     # DNS
-    echo "<div class='grid'><div class='card'><div class='card-header'><span class='icon'>🌍</span> DNS резолвинг<div class='card-sub'>Проверка через 8.8.8.8 / 1.1.1.1 / 9.9.9.9</div></div><div class='card-body'><table>"
+    echo "<div class='grid'><div class='card'><div class='card-header'><span class='icon'>[DNS]</span> DNS резолвинг<div class='card-sub'>Проверка через 8.8.8.8 / 1.1.1.1 / 9.9.9.9</div></div><div class='card-body'><table>"
     for dr in "${D_DNS_RESULTS[@]}"; do
         IFS='|' read -r ns st res <<< "$dr"
-        [[ "$st" == "ok" ]] && _hr "DNS ${ns}" "OK (→ ${res})" "ok" || _hr "DNS ${ns}" "НЕ ОТВЕЧАЕТ" "err"
+        [[ "$st" == "ok" ]] && _hr "DNS ${ns}" "OK (-> ${res})" "ok" || _hr "DNS ${ns}" "НЕ ОТВЕЧАЕТ" "err"
     done
     echo "</table></div></div>"
 
     # NTP
-    echo "<div class='card'><div class='card-header'><span class='icon'>🕐</span> Синхронизация времени<div class='card-sub'>NTP, критично для TLS и VPN</div></div><div class='card-body'><table>"
+    echo "<div class='card'><div class='card-header'><span class='icon'>[TIME]</span> Синхронизация времени<div class='card-sub'>NTP, критично для TLS и VPN</div></div><div class='card-body'><table>"
     _hr "NTP статус" "${D_NTP}" "$([ "$D_NTP" = "синхронизировано" ] && echo ok || echo warn)"
     echo "</table><div style='font-size:12px;color:var(--mut);margin-top:8px'>Несинхронизированное время ломает TLS и VPN-хендшейки</div></div></div></div>"
 
@@ -657,11 +745,11 @@ CSS
     echo "<div class='footer'>VPS Diag v${ELI_VERSION} &middot; ${D_HOST} &middot; $(date '+%d.%m.%Y %H:%M:%S UTC')</div></body></html>"
     } >> "$RPT_HTML"
 
-    echo -e "${BOLD}════════════════════════════════════════════════════${NC}"
-    echo -e "  📄 TXT:  ${RPT_TXT}"
-    echo -e "  🌐 HTML: ${RPT_HTML}"
-    echo -e "${BOLD}════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}====================================================${NC}"
+    echo -e "  [TXT] TXT:  ${RPT_TXT}"
+    echo -e "  [HTML] HTML: ${RPT_HTML}"
+    echo -e "${BOLD}====================================================${NC}"
     echo ""
-    exec > /dev/tty 2>&1 || true
+    # - FD 3/4 закроются автоматически через trap RETURN -
     return 0
 }
