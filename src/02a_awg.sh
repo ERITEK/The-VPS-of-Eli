@@ -5,6 +5,171 @@
 AWG_SETUP_DIR="/etc/awg-setup"
 AWG_CONF_DIR="/etc/amnezia/amneziawg"
 AWG_ACTIVE_IFACE=""
+AWG_VER=""
+
+# --> AWG: ВЫБОР ВЕРСИИ ПРОТОКОЛА <--
+# - AWG 1.0 (classic) vs AWG 2.0 (ranged headers, S3/S4) vs WG vanilla -
+_awg_ask_version() {
+    echo ""
+    echo -e "  ${BOLD}Версия протокола:${NC}"
+    echo -e "  ${GREEN}1)${NC} AWG 1.0 (classic) - совместим с Keenetic 4.2+, OpenWrt, все клиенты"
+    echo -e "  ${GREEN}2)${NC} AWG 2.0 - улучшенная обфускация, ranged H, S3/S4"
+    echo -e "  ${GREEN}3)${NC} WireGuard (vanilla) - без обфускации, максимальная совместимость"
+    while true; do
+        echo -ne "  ${BOLD}Выбор?${NC} "; read -r _awg_ver_ch
+        case "$_awg_ver_ch" in
+            1) AWG_VER="1.0"; break ;;
+            2) AWG_VER="2.0"
+               print_warn "Проверь роутер на поддержку обфускации 2.0"
+               break ;;
+            3) AWG_VER="wg"
+               print_info "Обфускация отключена, все клиенты WireGuard совместимы"
+               break ;;
+            *) print_warn "1, 2 или 3" ;;
+        esac
+    done
+}
+
+# --> AWG: ГЕНЕРАЦИЯ ОБФУСКАЦИИ <--
+# - общие параметры Jc/Jmin/Jmax/S1/S2 -
+_awg_gen_obf_common() {
+    local auto="$1"
+    if [[ "$auto" == "yes" ]]; then
+        OBF_JC=$(rand_range 3 10)
+        OBF_S1=$(rand_range 15 40)
+        local _att=0
+        while true; do
+            OBF_S2=$(rand_range 15 40)
+            [[ $OBF_S2 -ne $(( OBF_S1 + 56 )) ]] && break
+            (( _att++ )); [[ $_att -gt 10 ]] && break
+        done
+        OBF_JMIN=$(rand_range 50 150)
+        OBF_JMAX=$(rand_range 500 1000)
+    else
+        print_info "Правила: Jmin < Jmax, S1+56 != S2, H1-H4 разные"
+        echo -e "  ${CYAN}Jc — кол-во мусорных пакетов (больше = сложнее распознать VPN, но чуть больше трафика).${NC}"
+        echo -e "  ${CYAN}Jmin/Jmax — диапазон размера мусорных пакетов в байтах.${NC}"
+        echo -e "  ${CYAN}S1/S2 — сдвиг заголовков пакетов (влияет на маскировку, S1+56 не должно равняться S2).${NC}"
+        ask "Jc (3-10)" "5" OBF_JC; ask "Jmin (50-150)" "64" OBF_JMIN; ask "Jmax (500-1000)" "1000" OBF_JMAX
+        ask "S1 (15-40)" "20" OBF_S1; ask "S2 (15-40, != S1+56)" "20" OBF_S2
+    fi
+}
+
+# - AWG 1.0: H1-H4 одиночные значения -
+_awg_gen_obf_v1() {
+    local auto="$1"
+    _awg_gen_obf_common "$auto"
+    OBF_S3=""; OBF_S4=""
+    if [[ "$auto" == "yes" ]]; then
+        OBF_H1=$(rand_h); OBF_H2=$(rand_h); OBF_H3=$(rand_h); OBF_H4=$(rand_h)
+        while [[ "$OBF_H2" == "$OBF_H1" ]]; do OBF_H2=$(rand_h); done
+        while [[ "$OBF_H3" == "$OBF_H1" || "$OBF_H3" == "$OBF_H2" ]]; do OBF_H3=$(rand_h); done
+        while [[ "$OBF_H4" == "$OBF_H1" || "$OBF_H4" == "$OBF_H2" || "$OBF_H4" == "$OBF_H3" ]]; do OBF_H4=$(rand_h); done
+    else
+        echo -e "  ${CYAN}H1-H4 — магические числа в заголовках. Должны быть разными. Любые целые числа.${NC}"
+        ask "H1" "1" OBF_H1; ask "H2" "2" OBF_H2; ask "H3" "3" OBF_H3; ask "H4" "4" OBF_H4
+    fi
+}
+
+# - AWG 2.0: S3/S4 + H1-H4 диапазоны (min-max) -
+_awg_gen_obf_v2() {
+    local auto="$1"
+    _awg_gen_obf_common "$auto"
+    if [[ "$auto" == "yes" ]]; then
+        OBF_S3=$(rand_range 15 40)
+        OBF_S4=$(rand_range 15 40)
+        # - 4 сегмента разных порядков, гарантированно не пересекаются -
+        local _segs=("1000 90000" "100000 900000" "1000000 9000000" "10000000 90000000")
+        local _ord=(0 1 2 3) _i _j _tmp
+        for (( _i=3; _i>0; _i-- )); do
+            _j=$(( RANDOM % (_i + 1) ))
+            _tmp=${_ord[$_i]}; _ord[$_i]=${_ord[$_j]}; _ord[$_j]=$_tmp
+        done
+        local _n=1 _lo _hi
+        for _si in "${_ord[@]}"; do
+            read -r _lo _hi <<< "${_segs[$_si]}"
+            printf -v "OBF_H${_n}" '%s' "$(rand_h_range "$_lo" "$_hi")"
+            _n=$(( _n + 1 ))
+        done
+    else
+        echo -e "  ${CYAN}S3/S4 — дополнительные сдвиги заголовков для AWG 2.0 (15-40).${NC}"
+        ask "S3 (15-40)" "20" OBF_S3; ask "S4 (15-40)" "20" OBF_S4
+        echo -e "  ${CYAN}H1-H4 — диапазоны магических чисел в формате min-max.${NC}"
+        echo -e "  ${CYAN}Диапазоны не должны пересекаться между собой.${NC}"
+        ask "H1 (min-max)" "1000-50000" OBF_H1
+        ask "H2 (min-max)" "100000-500000" OBF_H2
+        ask "H3 (min-max)" "1000000-5000000" OBF_H3
+        ask "H4 (min-max)" "10000000-50000000" OBF_H4
+    fi
+}
+
+# - WireGuard vanilla: все параметры обнулены, совместимость со стандартным WG -
+_awg_gen_obf_wg() {
+    OBF_JC=0; OBF_JMIN=0; OBF_JMAX=0
+    OBF_S1=0; OBF_S2=0; OBF_S3=""; OBF_S4=""
+    OBF_H1=1; OBF_H2=2; OBF_H3=3; OBF_H4=4
+}
+
+# - блок обфускации для .conf (server и client) -
+_awg_obf_conf_lines() {
+    echo "Jc = ${OBF_JC}"
+    echo "Jmin = ${OBF_JMIN}"
+    echo "Jmax = ${OBF_JMAX}"
+    echo "S1 = ${OBF_S1}"
+    echo "S2 = ${OBF_S2}"
+    [[ -n "$OBF_S3" ]] && echo "S3 = ${OBF_S3}"
+    [[ -n "$OBF_S4" ]] && echo "S4 = ${OBF_S4}"
+    echo "H1 = ${OBF_H1}"
+    echo "H2 = ${OBF_H2}"
+    echo "H3 = ${OBF_H3}"
+    echo "H4 = ${OBF_H4}"
+}
+
+# - блок обфускации для env файла -
+_awg_obf_env_lines() {
+    echo "AWG_VERSION=\"${AWG_VER}\""
+    echo "JC=\"${OBF_JC}\""
+    echo "JMIN=\"${OBF_JMIN}\""
+    echo "JMAX=\"${OBF_JMAX}\""
+    echo "S1=\"${OBF_S1}\""
+    echo "S2=\"${OBF_S2}\""
+    [[ -n "$OBF_S3" ]] && echo "S3=\"${OBF_S3}\""
+    [[ -n "$OBF_S4" ]] && echo "S4=\"${OBF_S4}\""
+    echo "H1=\"${OBF_H1}\""
+    echo "H2=\"${OBF_H2}\""
+    echo "H3=\"${OBF_H3}\""
+    echo "H4=\"${OBF_H4}\""
+}
+
+# - заголовок Keenetic asc (только 1.0) или предупреждение (2.0) или WG -
+_awg_client_header_comment() {
+    if [[ "$AWG_VER" == "1.0" ]]; then
+        echo "# Keenetic: interface WireguardX wireguard asc ${OBF_JC} ${OBF_JMIN} ${OBF_JMAX} ${OBF_S1} ${OBF_S2} ${OBF_H1} ${OBF_H2} ${OBF_H3} ${OBF_H4}"
+    elif [[ "$AWG_VER" == "2.0" ]]; then
+        echo "# AWG 2.0 - Keenetic 4.2 не поддерживает S3/S4 и ranged H"
+    else
+        echo "# WireGuard vanilla - совместим с любым WG клиентом"
+    fi
+}
+
+# --> AWG: QR-КОД КЛИЕНТСКОГО КОНФИГА <--
+# - показывает QR в терминале, ставит qrencode если нет -
+_awg_show_qr() {
+    local conf_file="$1"
+    [[ ! -f "$conf_file" ]] && return 1
+    if ! command -v qrencode &>/dev/null; then
+        local do_install=""
+        ask_yn "Установить qrencode для QR-кодов?" "y" do_install
+        if [[ "$do_install" == "yes" ]]; then
+            apt-get install -y -qq qrencode 2>/dev/null || { print_warn "Не удалось установить qrencode"; return 1; }
+        else
+            return 1
+        fi
+    fi
+    echo ""
+    qrencode -t ansiutf8 < "$conf_file"
+    echo ""
+}
 
 # --> AWG: ПУТИ ПО ИМЕНИ ИНТЕРФЕЙСА <--
 awg_iface_env()    { echo "${AWG_SETUP_DIR}/iface_${1}.env"; }
@@ -64,7 +229,7 @@ awg_remove_peer_by_pubkey() {
     local conf="$1" pub_key="$2"
     if ! command -v python3 &>/dev/null; then
         print_err "python3 не найден"
-        print_info "Установи через: Меню → 1. Старт (boot_run ставит python3)"
+        print_info "Установи через: Меню -> 1. Старт (boot_run ставит python3)"
         return 1
     fi
     local tmpfile
@@ -105,7 +270,7 @@ awg_remove_peer_by_name() {
     local conf="$1" cname="$2"
     if ! command -v python3 &>/dev/null; then
         print_err "python3 не найден"
-        print_info "Установи через: Меню → 1. Старт (boot_run ставит python3)"
+        print_info "Установи через: Меню -> 1. Старт (boot_run ставит python3)"
         return 1
     fi
     local tmpfile
@@ -173,9 +338,9 @@ awg_select_iface() {
         env_file=$(awg_iface_env "$iface")
         [[ -f "$env_file" ]] && desc=$(grep "^IFACE_DESC=" "$env_file" | cut -d'"' -f2 || true)
         if systemctl is-active --quiet "awg-quick@${iface}" 2>/dev/null; then
-            status="${GREEN}● активен${NC}"
+            status="${GREEN}(*) активен${NC}"
         else
-            status="${RED}○ остановлен${NC}"
+            status="${RED}( ) остановлен${NC}"
         fi
         echo -e "  ${GREEN}${count})${NC} ${BOLD}${iface}${NC}  ${desc:+(${desc})}  $(echo -e "${status}")"
     done
@@ -243,6 +408,7 @@ awg_migrate_legacy() {
 # AmneziaWG, параметры интерфейса awg0 (мигрировано)
 IFACE_NAME="awg0"
 IFACE_DESC="основной"
+AWG_VERSION="1.0"
 SERVER_ENDPOINT_IP="${SERVER_ENDPOINT_IP:-}"
 SERVER_PORT="${SERVER_PORT:-1618}"
 SERVER_TUNNEL_IP="${SERVER_TUNNEL_IP:-10.8.0.1}"
@@ -294,7 +460,7 @@ awg_install() {
     arch=$(uname -m)
     print_ok "Ядро: ${kver}, арх: ${arch}"
 
-    local headers_available="no" install_method=""
+    local install_method=""
 
     if lsmod 2>/dev/null | grep -q "^amneziawg" || \
        [[ -f "/lib/modules/${kver}/extra/amneziawg.ko" ]] || \
@@ -343,7 +509,7 @@ EXISTING_SUBNETS="${existing_subnets}"
 SYSEOF
     chmod 600 "${AWG_SETUP_DIR}/system.env"
 
-    # ── УСТАНОВКА МОДУЛЯ ──
+    # -- УСТАНОВКА МОДУЛЯ --
     print_section "Установка AmneziaWG"
     apt-get update -qq || true
     apt-get install -y -qq curl gnupg2 dkms wireguard-tools || true
@@ -358,7 +524,17 @@ SYSEOF
             ask_yn "Установить стандартное ядро ${fallback_pkg}?" "y" do_install
             if [[ "$do_install" == "yes" ]]; then
                 apt-get install -y "$fallback_pkg" "linux-headers-amd64" || true
-                print_warn "Ядро установлено. После reboot запусти установку AWG повторно."
+                # - флаг для healthcheck: после reboot доустановить AWG модуль -
+                echo "pending" > "${AWG_SETUP_DIR}/pending_dkms"
+                chmod 600 "${AWG_SETUP_DIR}/pending_dkms"
+                book_write ".awg.pending_dkms" "true" bool
+                print_warn "Ядро установлено."
+                print_info "После reboot healthcheck автоматически доустановит AWG модуль."
+                print_info "Затем запусти скрипт и продолжи настройку AWG."
+                echo ""
+                local do_reboot=""
+                ask_yn "Перезагрузить сейчас?" "y" do_reboot
+                [[ "$do_reboot" == "yes" ]] && { print_info "Reboot..."; reboot; }
             fi
         else
             print_err "Метапакет linux-image-amd64 не найден в репозитории"
@@ -398,7 +574,9 @@ REPOEOF
 
         if [[ -f /etc/apt/sources.list ]]; then
             if ! grep -q "^deb-src" /etc/apt/sources.list; then
-                grep "^deb " /etc/apt/sources.list | sed 's/^deb /deb-src /' >> /etc/apt/sources.list
+                local _src_lines
+                _src_lines=$(grep "^deb " /etc/apt/sources.list | sed 's/^deb /deb-src /')
+                echo "$_src_lines" >> /etc/apt/sources.list
             fi
         fi
 
@@ -428,7 +606,7 @@ REPOEOF
     fi
     print_ok "awg-quick найден: $(command -v awg-quick)"
 
-    # ── ПАРАМЕТРЫ ПЕРВОГО ИНТЕРФЕЙСА ──
+    # -- ПАРАМЕТРЫ ПЕРВОГО ИНТЕРФЕЙСА --
     print_section "Параметры сервера AmneziaWG"
 
     local endpoint_ip="${server_ip:-}"
@@ -531,46 +709,52 @@ REPOEOF
         esac
     done
 
-    # ── ОБФУСКАЦИЯ ──
-    print_section "Параметры обфускации"
+    # -- MTU ТУННЕЛЯ --
+    local tunnel_mtu="1320"
+    echo ""
+    echo -e "  ${BOLD}MTU туннеля:${NC}"
+    echo -e "  ${GREEN}1)${NC} 1280 - максимальная совместимость (мобильные сети, GTP)"
+    echo -e "  ${GREEN}2)${NC} 1320 - баланс (рекомендуется 'ЭТО БАЗА')"
+    echo -e "  ${GREEN}3)${NC} 1420 - максимальная скорость (чистый Ethernet)"
+    while true; do
+        echo -ne "  ${BOLD}Выбор?${NC} [2]: "; read -r mtu_ch
+        case "${mtu_ch:-2}" in
+            1) tunnel_mtu="1280"; break ;;
+            2) tunnel_mtu="1320"; break ;;
+            3) tunnel_mtu="1420"; break ;;
+            *) print_warn "1, 2 или 3" ;;
+        esac
+    done
+    print_ok "MTU: ${tunnel_mtu}"
 
-    local s_min=15 s_max=40
-    local jmin_min=50 jmin_max=150
-    local jmax_min=500 jmax_max=1000
-    local jc jmin jmax s1 s2 h1 h2 h3 h4
+    # -- ВЕРСИЯ ПРОТОКОЛА И ОБФУСКАЦИЯ --
+    _awg_ask_version
 
-    local obf_auto=""
-    ask_yn "Сгенерировать параметры автоматически?" "y" obf_auto
-    if [[ "$obf_auto" == "yes" ]]; then
-        jc=$(rand_range 3 10)
-        s1=$(rand_range "$s_min" "$s_max")
-        local _att=0
-        while true; do
-            s2=$(rand_range "$s_min" "$s_max")
-            [[ $s2 -ne $(( s1 + 56 )) ]] && break
-            (( _att++ )); [[ $_att -gt 10 ]] && break
-        done
-        jmin=$(rand_range "$jmin_min" "$jmin_max")
-        jmax=$(rand_range "$jmax_min" "$jmax_max")
-        h1=$(rand_h); h2=$(rand_h); h3=$(rand_h); h4=$(rand_h)
-        while [[ "$h2" == "$h1" ]]; do h2=$(rand_h); done
-        while [[ "$h3" == "$h1" || "$h3" == "$h2" ]]; do h3=$(rand_h); done
-        while [[ "$h4" == "$h1" || "$h4" == "$h2" || "$h4" == "$h3" ]]; do h4=$(rand_h); done
-        print_ok "Параметры сгенерированы"
+    if [[ "$AWG_VER" == "wg" ]]; then
+        _awg_gen_obf_wg
+        print_ok "WireGuard vanilla - обфускация отключена"
     else
-        print_info "Правила: Jmin < Jmax, S1+56 != S2, H1-H4 разные"
-        ask "Jc (3-10)" "5" jc; ask "Jmin" "64" jmin; ask "Jmax" "1000" jmax
-        ask "S1" "20" s1; ask "S2" "20" s2
-        ask "H1" "1" h1; ask "H2" "2" h2; ask "H3" "3" h3; ask "H4" "4" h4
+        print_section "Параметры обфускации"
+        local obf_auto=""
+        ask_yn "Сгенерировать параметры автоматически?" "y" obf_auto
+        if [[ "$AWG_VER" == "2.0" ]]; then
+            _awg_gen_obf_v2 "$obf_auto"
+        else
+            _awg_gen_obf_v1 "$obf_auto"
+        fi
+        print_ok "Параметры сгенерированы (AWG ${AWG_VER})"
+        print_info "Jc=${OBF_JC} Jmin=${OBF_JMIN} Jmax=${OBF_JMAX} S1=${OBF_S1} S2=${OBF_S2}"
+        [[ -n "$OBF_S3" ]] && print_info "S3=${OBF_S3} S4=${OBF_S4}"
+        print_info "H1=${OBF_H1} H2=${OBF_H2} H3=${OBF_H3} H4=${OBF_H4}"
     fi
-    print_info "Jc=${jc} Jmin=${jmin} Jmax=${jmax} S1=${s1} S2=${s2}"
-    print_info "H1=${h1} H2=${h2} H3=${h3} H4=${h4}"
 
-    # ── КЛИЕНТЫ ──
+    # -- КЛИЕНТЫ --
     print_section "Клиенты"
+    echo -e "  ${CYAN}Клиент — это одно устройство (телефон, ноутбук, роутер).${NC}"
+    echo -e "  ${CYAN}Для каждого будет создан отдельный конфиг-файл с QR-кодом.${NC}"
     local client_count=""
     while true; do
-        echo -ne "  ${BOLD}Сколько клиентов создать?${NC} "
+        echo -ne "  ${BOLD}Сколько клиентов создать (1-50)?${NC} "
         read -r client_count
         [[ "$client_count" =~ ^[0-9]+$ ]] && [[ "$client_count" -ge 1 ]] && [[ "$client_count" -le 50 ]] && break
         print_err "Число от 1 до 50"
@@ -580,6 +764,7 @@ REPOEOF
     for (( ci=1; ci<=client_count; ci++ )); do
         local cname=""
         while true; do
+            echo -e "  ${CYAN}Придумай имя для устройства (латиница, цифры, дефис, подчёркивание).${NC}"
             ask "Имя клиента #${ci}" "client${ci}" cname
             if ! validate_name "$cname"; then print_err "Буквы, цифры, дефис, подчёркивание"; continue; fi
             local dup=false
@@ -589,7 +774,7 @@ REPOEOF
         done
     done
 
-    # ── ГЕНЕРАЦИЯ КЛЮЧЕЙ И КОНФИГОВ ──
+    # -- ГЕНЕРАЦИЯ КЛЮЧЕЙ И КОНФИГОВ --
     print_section "Генерация ключей и конфигов"
 
     local iface="awg0"
@@ -613,17 +798,10 @@ REPOEOF
     cat > "$conf" << CONFEOF
 [Interface]
 Address = ${srv_tunnel_ip}/24
+MTU = ${tunnel_mtu}
 ListenPort = ${srv_port}
 PrivateKey = ${srv_priv}
-Jc = ${jc}
-Jmin = ${jmin}
-Jmax = ${jmax}
-S1 = ${s1}
-S2 = ${s2}
-H1 = ${h1}
-H2 = ${h2}
-H3 = ${h3}
-H4 = ${h4}
+$(_awg_obf_conf_lines)
 PostUp = iptables -A FORWARD -i ${iface} -j ACCEPT; iptables -A FORWARD -o ${iface} -j ACCEPT; iptables -t nat -A POSTROUTING -o ${main_iface} -j MASQUERADE; iptables -t mangle -A FORWARD -o ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu; iptables -t mangle -A FORWARD -i ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 PostDown = iptables -D FORWARD -i ${iface} -j ACCEPT; iptables -D FORWARD -o ${iface} -j ACCEPT; iptables -t nat -D POSTROUTING -o ${main_iface} -j MASQUERADE; iptables -t mangle -D FORWARD -o ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu; iptables -t mangle -D FORWARD -i ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 CONFEOF
@@ -652,20 +830,13 @@ AllowedIPs = ${cli_ip}/32
 PEEREOF
 
         cat > "${cdir}/client.conf" << CLIEOF
-# Keenetic: interface WireguardX wireguard asc ${jc} ${jmin} ${jmax} ${s1} ${s2} ${h1} ${h2} ${h3} ${h4}
+$(_awg_client_header_comment)
 [Interface]
 PrivateKey = ${cli_priv}
 Address = ${cli_ip}/24
 DNS = ${client_dns}
-Jc = ${jc}
-Jmin = ${jmin}
-Jmax = ${jmax}
-S1 = ${s1}
-S2 = ${s2}
-H1 = ${h1}
-H2 = ${h2}
-H3 = ${h3}
-H4 = ${h4}
+MTU = ${tunnel_mtu}
+$(_awg_obf_conf_lines)
 
 [Peer]
 PublicKey = ${srv_pub}
@@ -688,21 +859,8 @@ TUNNEL_SUBNET="${tunnel_subnet}"
 TUNNEL_BASE="${tunnel_base}"
 CLIENT_DNS="${client_dns}"
 CLIENT_ALLOWED_IPS="${allowed}"
-JC="${jc}"
-JMIN="${jmin}"
-JMAX="${jmax}"
-S1="${s1}"
-S2="${s2}"
-H1="${h1}"
-H2="${h2}"
-H3="${h3}"
-H4="${h4}"
-S_MIN="${s_min}"
-S_MAX="${s_max}"
-JMIN_MIN="${jmin_min}"
-JMIN_MAX="${jmin_max}"
-JMAX_MIN="${jmax_min}"
-JMAX_MAX="${jmax_max}"
+TUNNEL_MTU="${tunnel_mtu}"
+$(_awg_obf_env_lines)
 ENVEOF
     chmod 600 "$(awg_iface_env "$iface")"
 
@@ -717,21 +875,8 @@ MAIN_IFACE="${main_iface}"
 AWG_IFACE="${iface}"
 CLIENT_DNS="${client_dns}"
 CLIENT_ALLOWED_IPS="${allowed}"
-JC="${jc}"
-JMIN="${jmin}"
-JMAX="${jmax}"
-S1="${s1}"
-S2="${s2}"
-H1="${h1}"
-H2="${h2}"
-H3="${h3}"
-H4="${h4}"
-S_MIN="${s_min}"
-S_MAX="${s_max}"
-JMIN_MIN="${jmin_min}"
-JMIN_MAX="${jmin_max}"
-JMAX_MIN="${jmax_min}"
-JMAX_MAX="${jmax_max}"
+TUNNEL_MTU="${tunnel_mtu}"
+$(_awg_obf_env_lines)
 LEGEOF
     chmod 600 "${AWG_SETUP_DIR}/server.env"
 
@@ -765,23 +910,43 @@ LEGEOF
     awg_ver=$(awg --version 2>/dev/null | head -1 || echo "")
     book_write ".awg.installed" "true" bool
     book_write ".awg.version" "$awg_ver"
+    book_write ".awg.protocol_version" "$AWG_VER"
     book_write ".system.main_iface" "$main_iface"
     book_write ".system.server_ip" "$endpoint_ip"
 
     # - итог -
+    local _ver_label="AmneziaWG ${AWG_VER}"
+    [[ "$AWG_VER" == "wg" ]] && _ver_label="WireGuard (vanilla)"
     echo ""
-    echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════${NC}"
-    echo -e "  ${GREEN}${BOLD}AmneziaWG установлен!${NC}"
-    echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}${BOLD}====================================================${NC}"
+    echo -e "  ${GREEN}${BOLD}${_ver_label} установлен!${NC}"
+    echo -e "${GREEN}${BOLD}====================================================${NC}"
     echo ""
     echo -e "  ${BOLD}Конфиги клиентов:${NC}"
     for cname in "${client_names[@]}"; do
-        echo -e "    ${CYAN}•${NC} ${clients_dir}/${cname}/client.conf"
+        echo -e "    ${CYAN}*${NC} ${clients_dir}/${cname}/client.conf"
     done
     echo ""
-    echo -e "  ${BOLD}Обфускация:${NC} Jc=${jc} Jmin=${jmin} Jmax=${jmax} S1=${s1} S2=${s2}"
-    echo -e "  H1=${h1} H2=${h2} H3=${h3} H4=${h4}"
-    echo ""
+    if [[ "$AWG_VER" != "wg" ]]; then
+        echo -e "  ${BOLD}Обфускация:${NC} Jc=${OBF_JC} Jmin=${OBF_JMIN} Jmax=${OBF_JMAX} S1=${OBF_S1} S2=${OBF_S2}"
+        [[ -n "$OBF_S3" ]] && echo -e "  S3=${OBF_S3} S4=${OBF_S4}"
+        echo -e "  H1=${OBF_H1} H2=${OBF_H2} H3=${OBF_H3} H4=${OBF_H4}"
+        echo ""
+    fi
+
+    # - QR-коды клиентов -
+    local show_qr=""
+    ask_yn "Показать QR-коды клиентов?" "y" show_qr
+    if [[ "$show_qr" == "yes" ]]; then
+        for cname in "${client_names[@]}"; do
+            local _qcf="${clients_dir}/${cname}/client.conf"
+            if [[ -f "$_qcf" ]]; then
+                echo -e "  ${BOLD}-- ${cname} --${NC}"
+                _awg_show_qr "$_qcf" || break
+            fi
+        done
+    fi
+
     return 0
 }
 
@@ -797,23 +962,56 @@ awg_show_status() {
     if [[ -z "$ifaces" ]]; then print_warn "Нет настроенных интерфейсов"; return 0; fi
     for iface in $ifaces; do
         echo ""
-        local env_file desc="" port="" subnet=""
+        local env_file desc="" port="" subnet="" ver=""
         env_file=$(awg_iface_env "$iface")
         if [[ -f "$env_file" ]]; then
             desc=$(grep "^IFACE_DESC=" "$env_file" | cut -d'"' -f2 || true)
             port=$(grep "^SERVER_PORT=" "$env_file" | cut -d'"' -f2 || true)
             subnet=$(grep "^TUNNEL_SUBNET=" "$env_file" | cut -d'"' -f2 || true)
+            ver=$(grep "^AWG_VERSION=" "$env_file" | cut -d'"' -f2 || true)
         fi
+        [[ -z "$ver" ]] && ver="1.0"
+        local ver_label="AWG ${ver}"
+        [[ "$ver" == "wg" ]] && ver_label="WireGuard"
+
         if systemctl is-active --quiet "awg-quick@${iface}" 2>/dev/null; then
-            echo -e "  ${GREEN}●${NC} ${BOLD}${iface}${NC}  ${desc:+(${desc})}  порт ${port}  подсеть ${subnet}"
+            echo -e "  ${GREEN}(*)${NC} ${BOLD}${iface}${NC}  ${desc:+(${desc})}  ${ver_label}  порт ${port}  подсеть ${subnet}"
         else
-            echo -e "  ${RED}○${NC} ${BOLD}${iface}${NC}  ${desc:+(${desc})} [${YELLOW}остановлен${NC}]"
+            echo -e "  ${RED}( )${NC} ${BOLD}${iface}${NC}  ${desc:+(${desc})}  ${ver_label} [${YELLOW}остановлен${NC}]"
         fi
+
+        # - пиры: ключ, handshake, трафик -
         if command -v awg &>/dev/null; then
-            awg show "$iface" 2>/dev/null \
-                | grep -E "peer:|latest handshake|transfer" \
-                | sed 's/^/    /' || true
+            local _awg_out
+            _awg_out=$(awg show "$iface" 2>/dev/null || true)
+            if [[ -n "$_awg_out" ]]; then
+                local _peer="" _hs="" _tx="" _rx=""
+                while IFS= read -r line; do
+                    case "$line" in
+                        *peer:*)
+                            # - выводим предыдущий пир -
+                            if [[ -n "$_peer" ]]; then
+                                echo -e "    peer ${_peer:0:8}...  ${_hs:-never}  ^${_tx:-0}  v${_rx:-0}"
+                            fi
+                            _peer=$(echo "$line" | awk '{print $2}')
+                            _hs=""; _tx=""; _rx=""
+                            ;;
+                        *"latest handshake"*)
+                            _hs=$(echo "$line" | sed 's/.*latest handshake: //')
+                            ;;
+                        *transfer:*)
+                            _tx=$(echo "$line" | sed 's/.*transfer: //' | awk -F', ' '{print $1}')
+                            _rx=$(echo "$line" | sed 's/.*transfer: //' | awk -F', ' '{print $2}')
+                            ;;
+                    esac
+                done <<< "$_awg_out"
+                # - последний пир -
+                if [[ -n "$_peer" ]]; then
+                    echo -e "    peer ${_peer:0:8}...  ${_hs:-never}  ^${_tx:-0}  v${_rx:-0}"
+                fi
+            fi
         fi
+
         local clients
         clients=$(awg_get_client_list "$iface")
         if [[ -n "$clients" ]]; then
@@ -823,7 +1021,7 @@ awg_show_status() {
                 cdir="$(awg_iface_clients "$iface")/${name}"
                 [[ -f "${cdir}/client.conf" ]] && \
                     ip=$(grep "^Address" "${cdir}/client.conf" | awk '{print $3}' | head -1 || true)
-                echo -e "      ${CYAN}•${NC} ${name}  →  ${ip:-?}"
+                echo -e "      ${CYAN}*${NC} ${name}  ->  ${ip:-?}"
             done
         fi
     done
@@ -846,6 +1044,7 @@ awg_create_iface() {
 
     local iface=""
     while true; do
+        echo -e "  ${CYAN}Имя интерфейса — техническое название туннеля (строчные буквы и цифры, до 15 символов).${NC}"
         ask "Имя интерфейса" "$candidate" iface
         if ! [[ "$iface" =~ ^[a-z][a-z0-9]{0,14}$ ]]; then
             print_err "Строчные буквы и цифры, до 15 символов"; continue
@@ -856,7 +1055,8 @@ awg_create_iface() {
         break
     done
     local desc=""
-    ask "Описание (офис, дом, кафе)" "" desc
+    echo -e "  ${CYAN}Описание — для себя, чтобы помнить для чего этот туннель (например: офис, семья, роутер).${NC}"
+    ask "Описание" "" desc
     [[ -z "$desc" ]] && desc="$iface"
 
     # - читаем system.env для main_iface -
@@ -876,6 +1076,7 @@ awg_create_iface() {
 
     local port=1618
     while true; do
+        echo -e "  ${CYAN}UDP порт для этого туннеля (1-65535). Должен быть свободен и не совпадать с другими.${NC}"
         ask "UDP порт" "$port" port
         if ! validate_port "$port"; then print_err "Порт 1-65535"; continue; fi
         if ss -ulnp 2>/dev/null | grep -q ":${port} "; then print_warn "Занят"; continue; fi
@@ -955,29 +1156,35 @@ awg_create_iface() {
         esac
     done
 
-    # - обфускация -
-    local s_min=15 s_max=40 jmin_min=50 jmin_max=150 jmax_min=500 jmax_max=1000
-    local jc jmin jmax s1 s2 h1 h2 h3 h4
+    # - MTU туннеля -
+    local tunnel_mtu="1320"
     echo ""
-    local gen_obf=""
-    ask_yn "Сгенерировать параметры обфускации автоматически?" "y" gen_obf
-    if [[ "$gen_obf" == "yes" ]]; then
-        jc=$(rand_range 3 10)
-        s1=$(rand_range "$s_min" "$s_max")
-        local _att=0
-        while true; do
-            s2=$(rand_range "$s_min" "$s_max")
-            [[ $s2 -ne $(( s1 + 56 )) ]] && break; (( _att++ )); [[ $_att -gt 10 ]] && break
-        done
-        jmin=$(rand_range "$jmin_min" "$jmin_max"); jmax=$(rand_range "$jmax_min" "$jmax_max")
-        h1=$(rand_h); h2=$(rand_h); h3=$(rand_h); h4=$(rand_h)
-        while [[ "$h2" == "$h1" ]]; do h2=$(rand_h); done
-        while [[ "$h3" == "$h1" || "$h3" == "$h2" ]]; do h3=$(rand_h); done
-        while [[ "$h4" == "$h1" || "$h4" == "$h2" || "$h4" == "$h3" ]]; do h4=$(rand_h); done
+    echo -e "  ${BOLD}MTU туннеля:${NC}"
+    echo -e "  ${GREEN}1)${NC} 1280 - максимальная совместимость"
+    echo -e "  ${GREEN}2)${NC} 1320 - баланс (рекомендуется)"
+    echo -e "  ${GREEN}3)${NC} 1420 - максимальная скорость"
+    while true; do
+        echo -ne "  ${BOLD}Выбор?${NC} [2]: "; read -r mtu_ch
+        case "${mtu_ch:-2}" in
+            1) tunnel_mtu="1280"; break ;;
+            2) tunnel_mtu="1320"; break ;;
+            3) tunnel_mtu="1420"; break ;;
+            *) print_warn "1, 2 или 3" ;;
+        esac
+    done
+
+    # - версия протокола и обфускация -
+    _awg_ask_version
+    if [[ "$AWG_VER" == "wg" ]]; then
+        _awg_gen_obf_wg
     else
-        ask "Jc" "5" jc; ask "Jmin" "64" jmin; ask "Jmax" "1000" jmax
-        ask "S1" "20" s1; ask "S2" "20" s2
-        ask "H1" "1" h1; ask "H2" "2" h2; ask "H3" "3" h3; ask "H4" "4" h4
+        local gen_obf=""
+        ask_yn "Сгенерировать параметры обфускации автоматически?" "y" gen_obf
+        if [[ "$AWG_VER" == "2.0" ]]; then
+            _awg_gen_obf_v2 "$gen_obf"
+        else
+            _awg_gen_obf_v1 "$gen_obf"
+        fi
     fi
 
     # - генерация ключей и конфига -
@@ -995,17 +1202,10 @@ awg_create_iface() {
     cat > "$conf" << CONFEOF
 [Interface]
 Address = ${srv_tunnel_ip}/24
+MTU = ${tunnel_mtu}
 ListenPort = ${port}
 PrivateKey = ${srv_priv}
-Jc = ${jc}
-Jmin = ${jmin}
-Jmax = ${jmax}
-S1 = ${s1}
-S2 = ${s2}
-H1 = ${h1}
-H2 = ${h2}
-H3 = ${h3}
-H4 = ${h4}
+$(_awg_obf_conf_lines)
 PostUp = iptables -A FORWARD -i ${iface} -j ACCEPT; iptables -A FORWARD -o ${iface} -j ACCEPT; iptables -t nat -A POSTROUTING -o ${main_iface} -j MASQUERADE; iptables -t mangle -A FORWARD -o ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu; iptables -t mangle -A FORWARD -i ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 PostDown = iptables -D FORWARD -i ${iface} -j ACCEPT; iptables -D FORWARD -o ${iface} -j ACCEPT; iptables -t nat -D POSTROUTING -o ${main_iface} -j MASQUERADE; iptables -t mangle -D FORWARD -o ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu; iptables -t mangle -D FORWARD -i ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 CONFEOF
@@ -1023,21 +1223,8 @@ TUNNEL_SUBNET="${tunnel_subnet}"
 TUNNEL_BASE="${tunnel_base}"
 CLIENT_DNS="${dns}"
 CLIENT_ALLOWED_IPS="${allowed_ips}"
-JC="${jc}"
-JMIN="${jmin}"
-JMAX="${jmax}"
-S1="${s1}"
-S2="${s2}"
-H1="${h1}"
-H2="${h2}"
-H3="${h3}"
-H4="${h4}"
-S_MIN="${s_min}"
-S_MAX="${s_max}"
-JMIN_MIN="${jmin_min}"
-JMIN_MAX="${jmin_max}"
-JMAX_MIN="${jmax_min}"
-JMAX_MAX="${jmax_max}"
+TUNNEL_MTU="${tunnel_mtu}"
+$(_awg_obf_env_lines)
 ENVEOF
     chmod 600 "$(awg_iface_env "$iface")"
 
@@ -1066,16 +1253,18 @@ ENVEOF
         --arg desc "$desc" --arg ep "$endpoint_ip" \
         --argjson port "${port}" --arg tip "$srv_tunnel_ip" \
         --arg snet "$tunnel_subnet" --arg dns "$dns" --arg allowed "$allowed_ips" \
-        --argjson jc "${jc}" --argjson jmin "${jmin}" --argjson jmax "${jmax}" \
-        --argjson s1 "${s1}" --argjson s2 "${s2}" \
-        --argjson h1 "${h1}" --argjson h2 "${h2}" --argjson h3 "${h3}" --argjson h4 "${h4}" \
+        --arg ver "$AWG_VER" \
+        --arg s1 "${OBF_S1}" --arg s2 "${OBF_S2}" \
+        --arg s3 "${OBF_S3:-}" --arg s4 "${OBF_S4:-}" \
+        --arg h1 "${OBF_H1}" --arg h2 "${OBF_H2}" --arg h3 "${OBF_H3}" --arg h4 "${OBF_H4}" \
         '{"desc":$desc,"endpoint_ip":$ep,"port":$port,"server_tunnel_ip":$tip,
           "tunnel_subnet":$snet,"client_dns":$dns,"client_allowed_ips":$allowed,
-          "obfuscation":{"jc":$jc,"jmin":$jmin,"jmax":$jmax,"s1":$s1,"s2":$s2,"h1":$h1,"h2":$h2,"h3":$h3,"h4":$h4}}' 2>/dev/null || echo "{}")
+          "awg_version":$ver,
+          "obfuscation":{"s1":$s1,"s2":$s2,"s3":$s3,"s4":$s4,"h1":$h1,"h2":$h2,"h3":$h3,"h4":$h4}}' 2>/dev/null || echo "{}")
     book_write ".awg.installed" "true" bool
     book_write_obj ".awg.interfaces.${iface}" "$_iface_obj"
 
-    print_info "Добавь клиентов через меню Управление AWG → Добавить клиента"
+    print_info "Добавь клиентов через меню Управление AWG -> Добавить клиента"
     return 0
 }
 
@@ -1180,6 +1369,17 @@ awg_delete_iface() {
     awg_select_iface
     [[ -z "$AWG_ACTIVE_IFACE" ]] && return 0
     local iface="$AWG_ACTIVE_IFACE"
+
+    # - проверка что интерфейс реально существует -
+    local conf
+    conf=$(awg_iface_conf "$iface")
+    local env_file
+    env_file=$(awg_iface_env "$iface")
+    if [[ ! -f "$conf" ]] && [[ ! -f "$env_file" ]]; then
+        print_warn "Интерфейс '${iface}' не найден (конфиг и env отсутствуют)"
+        return 0
+    fi
+
     echo ""
     print_warn "Интерфейс '${iface}' будет полностью удалён!"
     local confirm=""
@@ -1188,8 +1388,6 @@ awg_delete_iface() {
 
     # - запоминаем порт до удаления env -
     local port=""
-    local env_file
-    env_file=$(awg_iface_env "$iface")
     [[ -f "$env_file" ]] && port=$(grep "^SERVER_PORT=" "$env_file" | cut -d'"' -f2)
 
     systemctl stop "awg-quick@${iface}" 2>/dev/null || true
@@ -1206,7 +1404,7 @@ awg_delete_iface() {
     fi
 
     # - book: удаляем запись интерфейса -
-    _book_ok && jq "del(.awg.interfaces.${iface})" "$_BOOK" > "${_BOOK}.tmp" 2>/dev/null \
+    _book_ok && jq --arg i "$iface" 'del(.awg.interfaces[$i])' "$_BOOK" > "${_BOOK}.tmp" 2>/dev/null \
         && mv "${_BOOK}.tmp" "$_BOOK" 2>/dev/null || rm -f "${_BOOK}.tmp"
 
     # - если интерфейсов не осталось, ставим installed=false -
@@ -1227,11 +1425,18 @@ awg_add_client() {
     env_file=$(awg_iface_env "$iface")
     # shellcheck disable=SC1090
     source "$env_file"
+    # - загружаем обфускацию из env в OBF_* для хелперов -
+    AWG_VER="${AWG_VERSION:-1.0}"
+    OBF_JC="$JC"; OBF_JMIN="$JMIN"; OBF_JMAX="$JMAX"
+    OBF_S1="$S1"; OBF_S2="$S2"; OBF_S3="${S3:-}"; OBF_S4="${S4:-}"
+    OBF_H1="$H1"; OBF_H2="$H2"; OBF_H3="$H3"; OBF_H4="$H4"
+    local tunnel_mtu="${TUNNEL_MTU:-1320}"
     local srv_pub
     srv_pub=$(cat "$(awg_iface_keys "$iface")/server.pub")
 
     local name=""
     while true; do
+        echo -e "  ${CYAN}Имя устройства — латиница, цифры, дефис, подчёркивание (например: iphone-vasya, laptop-work).${NC}"
         ask "Имя нового клиента" "" name
         if ! validate_name "$name"; then print_err "Буквы, цифры, дефис, подчёркивание"; continue; fi
         if awg_client_exists "$iface" "$name"; then print_err "'${name}' уже существует"; continue; fi
@@ -1282,20 +1487,13 @@ AllowedIPs = ${client_ip}/32
 PEEREOF
 
     cat > "${cdir}/client.conf" << CLIEOF
-# Keenetic: interface WireguardX wireguard asc ${JC} ${JMIN} ${JMAX} ${S1} ${S2} ${H1} ${H2} ${H3} ${H4}
+$(_awg_client_header_comment)
 [Interface]
 PrivateKey = ${cli_priv}
 Address = ${client_ip}/24
 DNS = ${client_dns}
-Jc = ${JC}
-Jmin = ${JMIN}
-Jmax = ${JMAX}
-S1 = ${S1}
-S2 = ${S2}
-H1 = ${H1}
-H2 = ${H2}
-H3 = ${H3}
-H4 = ${H4}
+MTU = ${tunnel_mtu}
+$(_awg_obf_conf_lines)
 
 [Peer]
 PublicKey = ${srv_pub}
@@ -1306,6 +1504,12 @@ CLIEOF
     chmod 600 "${cdir}/client.conf"
     print_ok "Клиент ${name} добавлен: IP ${client_ip}"
     print_info "Конфиг: ${cdir}/client.conf"
+
+    # - QR-код для мобильного клиента -
+    local show_qr=""
+    ask_yn "Показать QR-код?" "y" show_qr
+    [[ "$show_qr" == "yes" ]] && _awg_show_qr "${cdir}/client.conf"
+
     echo ""
     local do_restart=""
     ask_yn "Перезапустить ${iface}?" "y" do_restart
@@ -1322,7 +1526,7 @@ awg_show_client() {
     clients=$(awg_get_client_list "$iface")
     [[ -z "$clients" ]] && { print_warn "Нет клиентов на ${iface}"; return 0; }
     echo ""
-    for n in $clients; do echo -e "  ${CYAN}•${NC} ${n}"; done
+    for n in $clients; do echo -e "  ${CYAN}*${NC} ${n}"; done
     echo ""
     local name=""
     ask "Имя клиента" "" name
@@ -1330,11 +1534,17 @@ awg_show_client() {
     cfg="$(awg_iface_clients "$iface")/${name}/client.conf"
     [[ ! -f "$cfg" ]] && { print_err "Конфиг не найден: ${cfg}"; return 0; }
     echo ""
-    echo -e "${BOLD}── ${iface}/${name}/client.conf ──${NC}"
+    echo -e "${BOLD}-- ${iface}/${name}/client.conf --${NC}"
     cat "$cfg"
-    echo -e "${BOLD}──────────────────────────────────────${NC}"
+    echo -e "${BOLD}--------------------------------------${NC}"
     echo ""
     print_info "Файл: ${cfg}"
+
+    # - QR-код -
+    local show_qr=""
+    ask_yn "Показать QR-код?" "n" show_qr
+    [[ "$show_qr" == "yes" ]] && _awg_show_qr "$cfg"
+
     return 0
 }
 
@@ -1347,7 +1557,7 @@ awg_delete_client() {
     clients=$(awg_get_client_list "$iface")
     [[ -z "$clients" ]] && { print_warn "Нет клиентов на ${iface}"; return 0; }
     echo ""
-    for n in $clients; do echo -e "  ${CYAN}•${NC} ${n}"; done
+    for n in $clients; do echo -e "  ${CYAN}*${NC} ${n}"; done
     echo ""
     local name=""
     ask "Имя клиента для удаления" "" name
