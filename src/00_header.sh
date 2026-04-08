@@ -2,11 +2,26 @@
 # --> ЗАГОЛОВОК СКРИПТА <--
 # - The VPS of Eli v3.141: общие функции, переменные, book блок -
 
+# - проверка bash -
+if [ -z "$BASH_VERSION" ]; then
+    echo "Запусти через bash: bash $0" >&2
+    exit 1
+fi
+
 set -o pipefail
 export DEBIAN_FRONTEND=noninteractive
 
+# - защита от параллельного запуска -
+LOCKFILE="/var/run/eli-stack.lock"
+exec 200>"$LOCKFILE"
+if ! flock -n 200; then
+    echo "Скрипт уже запущен (lock: ${LOCKFILE})"
+    exit 1
+fi
+
 ELI_VERSION="3.141"
-ELI_CODENAME="The VPS of Eli"
+# shellcheck disable=SC2034
+ELI_CODENAME="The VPS of Eli" # - используется в баннере и book -
 
 # --> ЦВЕТА <--
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -14,14 +29,14 @@ CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
 # --> ФУНКЦИИ ВЫВОДА <--
 # - единый набор для всего скрипта -
-print_ok()      { echo -e "  ${GREEN}✓${NC} $1"; }
-print_warn()    { echo -e "  ${YELLOW}⚠${NC}  $1"; }
-print_err()     { echo -e "  ${RED}✗${NC} $1"; }
-print_info()    { echo -e "  ${CYAN}•${NC} $1"; }
+print_ok()      { echo -e "  ${GREEN}[OK]${NC} $1"; }
+print_warn()    { echo -e "  ${YELLOW}[!]${NC}  $1"; }
+print_err()     { echo -e "  ${RED}[X]${NC} $1"; }
+print_info()    { echo -e "  ${CYAN}*${NC} $1"; }
 print_section() {
     echo ""
-    echo -e "${CYAN}${BOLD}▶ $1${NC}"
-    echo -e "${CYAN}$(printf '─%.0s' {1..54})${NC}"
+    echo -e "${CYAN}${BOLD}>> $1${NC}"
+    echo -e "${CYAN}$(printf -- '-%.0s' {1..54})${NC}"
 }
 
 # --> ГЛАВНЫЙ ЗАГОЛОВОК <--
@@ -29,12 +44,12 @@ print_section() {
 eli_header() {
     clear
     echo -e "${BOLD}"
-    echo "╔═════════════════════════╗"
-    echo "║     The VPS of Eli      ║"
-    echo "║  scrp by ERITEK & Loo1  ║"
-    echo "║    Claude (Anthropic)   ║"
-    echo "║         v${ELI_VERSION}          ║"
-    echo "╚═════════════════════════╝"
+    echo "+=========================+"
+    echo "|     The VPS of Eli      |"
+    echo "|  scrp by ERITEK & Loo1  |"
+    echo "|    Claude (Anthropic)   |"
+    echo "|         v${ELI_VERSION}          |"
+    echo "+=========================+"
     echo -e "${NC}"
 }
 
@@ -44,9 +59,9 @@ eli_banner() {
     local title="$1"
     local desc="$2"
     echo ""
-    echo -e "  ${BOLD}${CYAN}══════════════════════════════════════════════${NC}"
+    echo -e "  ${BOLD}${CYAN}==============================================${NC}"
     echo -e "   ${BOLD}${title}${NC}"
-    echo -e "  ${BOLD}${CYAN}══════════════════════════════════════════════${NC}"
+    echo -e "  ${BOLD}${CYAN}==============================================${NC}"
     if [[ -n "$desc" ]]; then
         echo ""
         echo -e "  ${CYAN}${desc}${NC}"
@@ -124,6 +139,15 @@ rand_h() {
     printf '%u\n' $(( (RANDOM << 16 | RANDOM) % 2147483647 + 1 ))
 }
 
+# - диапазон H для AWG 2.0: возвращает "min-max" внутри сегмента [lo, hi] -
+rand_h_range() {
+    local lo="$1" hi="$2"
+    local mid=$(( (lo + hi) / 2 ))
+    local mn=$(( lo + RANDOM % (mid - lo + 1) ))
+    local mx=$(( mid + 1 + RANDOM % (hi - mid) ))
+    echo "${mn}-${mx}"
+}
+
 rand_range() {
     echo $(( RANDOM % ($2 - $1 + 1) + $1 ))
 }
@@ -155,13 +179,19 @@ rand_path() {
 # --> ПРОВЕРКА ПЕРЕСЕЧЕНИЯ ПОДСЕТЕЙ <--
 # - ВНИМАНИЕ: рассчитана на подсети вида 10.X.0.0/24 (схема AWG)
 # - сравнивает первые три октета, этого достаточно для автогенерируемых /24
+# - net2 может содержать несколько CIDR через пробел
 subnets_overlap() {
     local net1="$1" net2="$2"
     [[ -z "$net1" || -z "$net2" ]] && return 1
-    local base1 base2
+    local base1
     base1=$(echo "$net1" | cut -d'/' -f1 | sed 's/\.[0-9]*$//')
-    base2=$(echo "$net2" | cut -d'/' -f1 | sed 's/\.[0-9]*$//')
-    [[ "$base1" == "$base2" ]]
+    local cidr
+    for cidr in $net2; do
+        local base2
+        base2=$(echo "$cidr" | cut -d'/' -f1 | sed 's/\.[0-9]*$//')
+        [[ "$base1" == "$base2" ]] && return 0
+    done
+    return 1
 }
 
 # --> BOOK OF ELI <--
@@ -229,7 +259,12 @@ book_init() {
             "teamspeak":{"installed":false,"version":"","server_ip":"","voice_port":9987,"ft_port":30033,"threads":2,"priv_key":"","db_path":"/opt/teamspeak/tsserver.sqlitedb","installed_at":""},
             "mumble":{"installed":false,"version":"","server_ip":"","port":64738,"superuser_set":false,"installed_at":""},
             "unbound":{"installed":false,"listen_ips":[]},
-            "ufw":{"active":false}
+            "ufw":{"active":false},
+            "mtproto":{"instances":{}},
+            "socks5":{"instances":{}},
+            "hysteria2":{"installed":false,"port":0,"version":""},
+            "signal_proxy":{"installed":false,"domain":""},
+            "telegram_bot":{"enabled":false,"interval":0}
         }' > "$_BOOK"
     chmod 600 "$_BOOK"
     return 0
