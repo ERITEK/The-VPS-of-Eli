@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/26579460/README.md)
 # The VPS of Eli v3.141 2026
 
 **Один скрипт. Одно меню.**
