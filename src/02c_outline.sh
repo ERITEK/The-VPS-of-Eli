@@ -38,6 +38,7 @@ otl_install() {
     local api_port
     api_port=$(rand_port)
     while true; do
+        echo -e "  ${CYAN}Порт для управления Outline (через него работает Outline Manager). Случайный порт безопаснее.${NC}"
         ask "Порт management API" "$api_port" api_port
         validate_port "$api_port" && ! ss -tlnp 2>/dev/null | grep -q ":${api_port} " && break
         print_err "Порт некорректен или занят"
@@ -108,9 +109,9 @@ EOF
     book_write ".outline.installed_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     echo ""
-    echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}${BOLD}====================================================${NC}"
     echo -e "  ${GREEN}${BOLD}Outline установлен!${NC}"
-    echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}${BOLD}====================================================${NC}"
     echo ""
     echo -e "  ${BOLD}Ключ для Outline Manager:${NC}"
     echo -e "    ${CYAN}${api_json}${NC}"
@@ -169,6 +170,7 @@ otl_add_key() {
     local api_url; api_url=$(otl_get_api_url 2>/dev/null || echo "")
     [[ -z "$api_url" ]] && { print_err "apiUrl не найден"; return 0; }
     local key_name=""
+    echo -e "  ${CYAN}Имя ключа — для кого этот ключ (например: мама, коллега-Вася). Можно оставить пустым.${NC}"
     echo -ne "  ${BOLD}Имя ключа:${NC} "; read -r key_name
     local result
     result=$(curl -fsk --connect-timeout 5 -X POST "${api_url}/access-keys" 2>/dev/null || echo "")
