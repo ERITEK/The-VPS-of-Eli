@@ -8,7 +8,6 @@ TS_DIR="/opt/teamspeak"
 TS_DATA_DIR="${TS_DIR}/data"
 TS_LOG_DIR="/var/log/teamspeak"
 TS_BIN="${TS_DIR}/tsserver"
-TS_YAML="${TS_DIR}/config.yaml"
 TS_UNIT="/etc/systemd/system/teamspeak.service"
 TS_USER="teamspeak"
 TS_DB="${TS_DIR}/tsserver.sqlitedb"
@@ -73,18 +72,22 @@ ts_install() {
     else threads=$(( vcpus * 2 )); [[ "$threads" -gt 16 ]] && threads=16; fi
 
     while true; do
+        echo -e "  ${CYAN}Основной порт для голосовой связи (UDP). Стандарт: 9987. Клиенты подключаются по нему.${NC}"
         ask "Голосовой порт (UDP)" "$voice_port" voice_port
         validate_port "$voice_port" || { print_err "Порт 1-65535"; continue; }
         ! ss -ulnp 2>/dev/null | grep -q ":${voice_port} " && break
         print_warn "Занят"
     done
     while true; do
+        echo -e "  ${CYAN}Порт для передачи файлов между участниками (TCP). Стандарт: 30033.${NC}"
         ask "Порт файлового трансфера (TCP)" "$ft_port" ft_port
         validate_port "$ft_port" || { print_err "Порт 1-65535"; continue; }
         ! ss -tlnp 2>/dev/null | grep -q ":${ft_port} " && break
         print_warn "Занят"
     done
-    ask "Голосовых потоков (1-16, vCPU: ${vcpus})" "$threads" threads
+    echo -e "  ${CYAN}Кол-во потоков обработки голоса (1-16). Больше потоков = больше одновременных разговоров.${NC}"
+    echo -e "  ${CYAN}Рекомендация для ${vcpus} vCPU: ${threads} потоков.${NC}"
+    ask "Голосовых потоков (1-16)" "$threads" threads
 
     # - скачивание -
     print_section "Скачивание"
@@ -170,9 +173,9 @@ EOF
     book_write ".teamspeak.version" "$latest_ver"
 
     echo ""
-    echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}${BOLD}====================================================${NC}"
     echo -e "  ${GREEN}${BOLD}TeamSpeak 6 установлен!${NC}"
-    echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}${BOLD}====================================================${NC}"
     echo -e "  ${BOLD}Адрес:${NC} ${server_ip}:${voice_port}"
     echo -e "  ${BOLD}Ключ:${NC}  ${CYAN}${priv_key}${NC}"
     echo ""
@@ -210,7 +213,8 @@ ts_backup_db() {
     [[ ! -f "$TS_DB" ]] && { local _bdb; _bdb=$(book_read ".teamspeak.db_path"); [[ -f "$_bdb" ]] && TS_DB="$_bdb"; }
     [[ ! -f "$TS_DB" ]] && { print_err "БД не найдена"; return 0; }
     mkdir -p "$TS_BACKUP_DIR"
-    local bdir="${TS_BACKUP_DIR}/ts6_$(date +%Y%m%d_%H%M%S)"
+    local bdir
+    bdir="${TS_BACKUP_DIR}/ts6_$(date +%Y%m%d_%H%M%S)"
     mkdir -p "$bdir"
     cp -f "$TS_DB" "${bdir}/" 2>/dev/null || true
     cp -f "${TS_DB}-shm" "${bdir}/" 2>/dev/null || true
@@ -228,7 +232,7 @@ ts_update() {
     # - убираем префикс v для корректного сравнения -
     [[ "${cur#v}" == "${lat#v}" ]] && { print_ok "Актуальная версия: ${cur}"; return 0; }
     [[ -z "$url" ]] && { print_err "URL не получен"; return 0; }
-    local confirm=""; ask_yn "Обновить ${cur} → ${lat}?" "y" confirm
+    local confirm=""; ask_yn "Обновить ${cur} -> ${lat}?" "y" confirm
     [[ "$confirm" != "yes" ]] && return 0
     ts_backup_db || true
     systemctl stop teamspeak 2>/dev/null || true
