@@ -3,6 +3,8 @@
 
 MBL_CONF="/etc/mumble-server.ini"
 MBL_SERVICE="mumble-server"
+MBL_DB="/var/lib/mumble-server/mumble-server.sqlite"
+MBL_BACKUP_DIR="/etc/mumble-backups"
 
 mbl_installed() {
     systemctl is-active --quiet "$MBL_SERVICE" 2>/dev/null
@@ -22,6 +24,7 @@ mbl_install() {
     # - порт -
     local port="64738"
     while true; do
+        echo -e "  ${CYAN}Порт для голосовой связи (используется и UDP и TCP). Стандарт: 64738.${NC}"
         ask "Порт Mumble (UDP+TCP)" "$port" port
         validate_port "$port" || { print_err "Порт 1-65535"; continue; }
         break
@@ -86,9 +89,9 @@ mbl_install() {
     book_write ".mumble.installed_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     echo ""
-    echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}${BOLD}====================================================${NC}"
     echo -e "  ${GREEN}${BOLD}Mumble установлен!${NC}"
-    echo -e "${GREEN}${BOLD}════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}${BOLD}====================================================${NC}"
     echo -e "  ${BOLD}Адрес:${NC}       ${server_ip}:${port}"
     echo -e "  ${BOLD}Пароль:${NC}      ${srv_pass:-без пароля}"
     echo -e "  ${BOLD}SuperUser:${NC}   пароль задан (логин: SuperUser)"
@@ -127,10 +130,71 @@ mbl_show_creds() {
     return 0
 }
 
+mbl_backup() {
+    print_section "Бэкап Mumble"
+    local db="$MBL_DB"
+    # - ищем БД если путь по умолчанию не подходит -
+    if [[ ! -f "$db" ]]; then
+        db=$(find /var/lib/mumble-server /var/lib/mumble /var/lib/murmur \
+            -name "*.sqlite" -type f 2>/dev/null | head -1)
+    fi
+    [[ ! -f "$db" ]] && { print_err "БД Mumble не найдена"; return 0; }
+
+    mkdir -p "$MBL_BACKUP_DIR"
+    local bfile
+    bfile="${MBL_BACKUP_DIR}/mumble_$(date +%Y%m%d_%H%M%S).sqlite"
+    cp -f "$db" "$bfile" 2>/dev/null || { print_err "Не удалось скопировать БД"; return 1; }
+    chmod 600 "$bfile"
+    print_ok "Бэкап: ${bfile} ($(du -h "$bfile" | awk '{print $1}'))"
+    return 0
+}
+
+mbl_update() {
+    print_section "Обновление Mumble"
+    if ! dpkg -l | grep -q "mumble-server"; then
+        print_err "Mumble не установлен"
+        return 0
+    fi
+    local cur
+    cur=$(dpkg-query -W -f='${Version}' mumble-server 2>/dev/null || echo "?")
+    print_info "Текущая версия: ${cur}"
+
+    apt-get update -qq 2>/dev/null || true
+    local avail
+    avail=$(apt-cache policy mumble-server 2>/dev/null | grep "Candidate:" | awk '{print $2}')
+    if [[ "$cur" == "$avail" ]]; then
+        print_ok "Уже актуальная версия: ${cur}"
+        return 0
+    fi
+    print_info "Доступна: ${avail}"
+    local confirm=""
+    ask_yn "Обновить ${cur} -> ${avail}?" "y" confirm
+    [[ "$confirm" != "yes" ]] && return 0
+
+    mbl_backup || true
+    systemctl stop "$MBL_SERVICE" 2>/dev/null || true
+    if apt-get install -y -qq mumble-server 2>/dev/null; then
+        systemctl start "$MBL_SERVICE" 2>/dev/null || true
+        sleep 2
+        if systemctl is-active --quiet "$MBL_SERVICE" 2>/dev/null; then
+            local new_ver
+            new_ver=$(dpkg-query -W -f='${Version}' mumble-server 2>/dev/null || echo "?")
+            print_ok "Обновлён до ${new_ver}"
+        else
+            print_err "Не запустился после обновления"
+        fi
+    else
+        print_err "Ошибка apt install"
+        systemctl start "$MBL_SERVICE" 2>/dev/null || true
+    fi
+    return 0
+}
+
 mbl_delete() {
     print_section "Удаление Mumble"
     local confirm=""; ask_yn "Подтвердить?" "n" confirm
     [[ "$confirm" != "yes" ]] && return 0
+    mbl_backup || true
     systemctl stop "$MBL_SERVICE" 2>/dev/null || true
     systemctl disable "$MBL_SERVICE" 2>/dev/null || true
     apt-get purge -y -qq mumble-server 2>/dev/null || true
