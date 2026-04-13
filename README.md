@@ -16,7 +16,12 @@
 ## Быстрый старт
 
 ```bash
-curl -sL https://raw.githubusercontent.com/ERITEK/the-vps-of-eli/main/eli.sh -o eli.sh
+curl -fsSL https://raw.githubusercontent.com/ERITEK/The-VPS-of-Eli/main/the_vps_of_eli.sh -o eli.sh
+bash eli.sh
+```
+или
+```bash
+wget -O eli.sh https://raw.githubusercontent.com/ERITEK/The-VPS-of-Eli/main/the_vps_of_eli.sh
 bash eli.sh
 ```
 
