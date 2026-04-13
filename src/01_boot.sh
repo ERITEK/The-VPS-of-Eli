@@ -28,17 +28,36 @@ boot_update_system() {
 }
 
 # --> BOOT: УСТАНОВКА БАЗОВЫХ ПАКЕТОВ <--
-# - утилиты, jq (для book), unbound (настраивается позже) -
+# - утилиты, jq (для book), dkms + headers (для AWG), unbound (настраивается позже) -
 boot_install_packages() {
     print_section "Установка пакетов"
 
     if ! apt-get -y install -qq ufw wget curl nano tcpdump btop ca-certificates gnupg2 \
         lsof net-tools dnsutils htop iotop ncdu tmux unzip logrotate fail2ban \
-        python3 unbound jq cron; then
+        python3 unbound jq cron dkms; then
         print_err "Установка пакетов не удалась"
         return 1
     fi
     print_ok "Базовые пакеты установлены"
+
+    # --> BOOT: KERNEL HEADERS <--
+    # - нужны для DKMS (AmneziaWG). Ставим заранее, до установки AWG -
+    # - без headers DKMS не соберёт модуль ядра и AWG не заработает -
+    local kver
+    kver=$(uname -r)
+    if [[ -d "/lib/modules/${kver}/build" ]]; then
+        print_ok "Kernel headers уже установлены (${kver})"
+    else
+        print_info "Устанавливаю kernel headers для ${kver}..."
+        if apt-get -y install -qq "linux-headers-${kver}" 2>/dev/null; then
+            print_ok "linux-headers-${kver} установлен"
+        elif apt-get -y install -qq linux-headers-amd64 2>/dev/null; then
+            print_ok "linux-headers-amd64 установлен (метапакет)"
+        else
+            print_warn "Kernel headers не удалось установить"
+            print_warn "AWG может потребовать ручную установку headers или стандартное ядро"
+        fi
+    fi
 
     # - unbound ставим сейчас, но запускать будем позже через меню Unbound -
     systemctl stop unbound 2>/dev/null || true
@@ -498,7 +517,7 @@ boot_run() {
     6. Смена порта SSH (опционально, защита от сканеров)
     7. Настройка Fail2Ban (автоблокировка брутфорса SSH)
     8. Настройка файрвола UFW (правила будут добавлены, но не включены)
-    9. Инициализация книги (book_of_Eli — хранилище настроек стека)
+    9. Инициализация книги (book_of_Eli - хранилище настроек стека)
 
   После завершения потребуется перезагрузка (reboot).
   Время выполнения: 3-10 минут в зависимости от сервера."
