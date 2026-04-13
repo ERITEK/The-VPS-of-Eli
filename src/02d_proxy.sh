@@ -1,33 +1,29 @@
 # --> МОДУЛЬ: ПРОКСИ <--
-# - MTProto (Telegram), SOCKS5, Hysteria 2, Signal TLS Proxy -
-# - MTProto и SOCKS5: мультиинстанс через Docker -
-# - Hysteria 2: нативный бинарник, self-signed TLS -
-# - Signal: Docker, требует домен + Let's Encrypt -
+# - MTProto (Telegram) мультиинстанс + мультисекрет -
+# - SOCKS5 мультиинстанс -
+# - Hysteria 2 мультиинстанс + мультиюзер (userpass) -
+# - Signal TLS Proxy -
 
 # --> ОБЩИЕ ПЕРЕМЕННЫЕ <--
 MTP_DIR="/etc/mtproto"
 S5_DIR="/etc/socks5"
 HY2_DIR="/etc/hysteria"
 HY2_BIN="/usr/local/bin/hysteria"
-HY2_SERVICE="hysteria-server"
 SIG_ENV="/etc/signal-proxy/signal.env"
 SIG_DIR="/opt/signal-proxy"
 
 # ==========================================================================
-# --> MTPROTO PROXY (TELEGRAM) - МУЛЬТИИНСТАНС <--
+# --> MTPROTO PROXY (TELEGRAM) - МУЛЬТИИНСТАНС + МУЛЬТИСЕКРЕТ <--
 # ==========================================================================
 
-# - генерация 32-char hex секретного ключа -
 _mtp_gen_secret() {
     head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n'
 }
 
-# - конвертация домена в hex для Fake TLS ссылки -
 _mtp_domain_hex() {
     echo -n "$1" | od -An -tx1 | tr -d ' \n'
 }
 
-# - следующий свободный ID инстанса -
 _mtp_next_id() {
     local i=1
     while [[ -f "${MTP_DIR}/instance_${i}.env" ]]; do
@@ -36,136 +32,231 @@ _mtp_next_id() {
     echo "$i"
 }
 
+# - файл секретов инстанса (один секрет на строку) -
+_mtp_secrets_file() { echo "${MTP_DIR}/secrets_${1}.list"; }
+
+# - пересоздать контейнер со всеми секретами -
+_mtp_rebuild_container() {
+    local inst_id="$1"
+    local env_file="${MTP_DIR}/instance_${inst_id}.env"
+    [[ ! -f "$env_file" ]] && { print_err "env не найден: ${env_file}"; return 1; }
+    # shellcheck disable=SC1090
+    source "$env_file"
+
+    local secrets_file
+    secrets_file=$(_mtp_secrets_file "$inst_id")
+    if [[ ! -f "$secrets_file" ]] || [[ ! -s "$secrets_file" ]]; then
+        print_err "Нет секретов для инстанса #${inst_id}"; return 1
+    fi
+
+    docker stop "$CONTAINER" 2>/dev/null || true
+    docker rm "$CONTAINER" 2>/dev/null || true
+
+    local -a secret_args=()
+    while IFS= read -r secret; do
+        [[ -z "$secret" ]] && continue
+        secret_args+=(-s "$secret")
+    done < "$secrets_file"
+    [[ ${#secret_args[@]} -eq 0 ]] && { print_err "Секреты пусты"; return 1; }
+
+    local effective_tag="${AD_TAG:-00000000000000000000000000000000}"
+
+    if ! docker run -d \
+        --name "${CONTAINER}" \
+        --restart always \
+        --network host \
+        "seriyps/mtproto-proxy" \
+        -p "${PORT}" \
+        "${secret_args[@]}" \
+        -t "${effective_tag}" \
+        -a tls; then
+        print_err "Не удалось запустить контейнер ${CONTAINER}"; return 1
+    fi
+    sleep 2
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER}$"; then
+        print_ok "Контейнер ${CONTAINER} запущен (секретов: ${#secret_args[@]})"
+        return 0
+    else
+        print_err "Контейнер не запустился: docker logs ${CONTAINER}"; return 1
+    fi
+}
+
+_mtp_print_links() {
+    local ip="$1" port="$2" secret="$3" domain="$4"
+    local domain_hex
+    domain_hex=$(_mtp_domain_hex "$domain")
+    echo ""
+    echo -e "  ${BOLD}Ссылка Telegram (Fake TLS):${NC}"
+    echo -e "  ${CYAN}tg://proxy?server=${ip}&port=${port}&secret=ee${secret}${domain_hex}${NC}"
+    echo ""
+}
+
 # --> MTPROTO: ДОБАВИТЬ ИНСТАНС <--
 mtp_add() {
     print_section "Добавить MTProto Proxy"
-
     if ! command -v docker &>/dev/null; then
-        print_err "Docker не установлен. Запусти сначала: Меню -> 1. Старт"
-        return 1
+        print_err "Docker не установлен. Запусти: Меню -> 1. Старт"; return 1
     fi
 
-    # - IP сервера -
     local server_ip
     server_ip=$(curl -4 -fsSL --connect-timeout 5 ifconfig.me 2>/dev/null \
         || curl -4 -fsSL --connect-timeout 5 api.ipify.org 2>/dev/null || echo "")
-    [[ -z "$server_ip" ]] && { print_err "Не удалось определить внешний IP"; return 1; }
+    [[ -z "$server_ip" ]] && { print_err "Не удалось определить IP"; return 1; }
     print_ok "IP: ${server_ip}"
 
-    # - порт -
     local port=443
     while true; do
-        echo -e "  ${CYAN}Порт 443 и 8443 лучше всего маскируется под HTTPS.${NC}"
-        echo -e "  ${CYAN}Если 443/8443 занят, выбери другой (993,2053,5228).${NC}"
+        echo -e "  ${CYAN}Порт 443/8443 лучше маскируется под HTTPS.${NC}"
         ask "Порт" "$port" port
         if ! validate_port "$port"; then print_err "Порт 1-65535"; continue; fi
         if ss -tlnp 2>/dev/null | grep -q ":${port} " || \
            ss -ulnp 2>/dev/null | grep -q ":${port} "; then
-            print_warn "Порт ${port} занят"
-            continue
+            print_warn "Порт ${port} занят"; continue
         fi
         break
     done
 
-    # - Fake TLS domen -
     local tls_domain="fonts.googleapis.com"
-    echo ""
-    echo -e "  ${CYAN}Домен для маскировки Fake TLS.${NC}"
-    echo -e "  ${CYAN}DPI видит этот домен в SNI. Лучше выбирать CDN/облако.${NC}"
+    echo -e "  ${CYAN}Домен для маскировки Fake TLS (DPI видит его в SNI).${NC}"
     ask "Fake TLS domen" "$tls_domain" tls_domain
 
-    # - секрет -
     local secret
     secret=$(_mtp_gen_secret)
-    [[ -z "$secret" || ${#secret} -ne 32 ]] && { print_err "Ошибка генерации секретного ключа"; return 1; }
-    print_ok "Секрет сгенерирован"
+    [[ -z "$secret" || ${#secret} -ne 32 ]] && { print_err "Ошибка генерации ключа"; return 1; }
 
-    # - ad tag (опционально) -
     local ad_tag=""
-    echo ""
-    echo -e "  ${CYAN}Ad tag от @MTProxyBot (можно пропустить, нажми Enter).${NC}"
+    echo -e "  ${CYAN}Ad tag от @MTProxyBot (можно пропустить).${NC}"
     ask "Ad tag" "" ad_tag
 
-    # - ID инстанса -
     local inst_id
     inst_id=$(_mtp_next_id)
     local container="mtproto-${inst_id}"
 
-    # - запуск контейнера -
-    print_section "Запуск MTProto Proxy #${inst_id}"
-
-    # - seriyps/mtproto-proxy требует все параметры через CLI -
-    # - ad_tag обязателен, при отсутствии используем заглушку из нулей -
-    local effective_tag="${ad_tag:-00000000000000000000000000000000}"
-
-    local -a docker_cmd=(
-        docker run -d
-        --name "${container}"
-        --restart always
-        --network host
-        "seriyps/mtproto-proxy"
-        -p "${port}"
-        -s "${secret}"
-        -t "${effective_tag}"
-        -a tls
-    )
-
-    if ! "${docker_cmd[@]}"; then
-        print_err "Не удалось запустить контейнер"
-        return 1
-    fi
-    sleep 3
-
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${container}$"; then
-        print_ok "Контейнер ${container} запущен"
-    else
-        print_err "Контейнер не запустился: docker logs ${container}"
-        return 1
-    fi
-
-    # - UFW -
-    if command -v ufw &>/dev/null; then
-        ufw allow "${port}/tcp" comment "MTProto #${inst_id}" 2>/dev/null || true
-        print_ok "UFW: разрешён ${port}/tcp"
-    fi
-
-    # - env -
     mkdir -p "$MTP_DIR"; chmod 700 "$MTP_DIR"
     cat > "${MTP_DIR}/instance_${inst_id}.env" << MTPEOF
 SERVER_IP="${server_ip}"
 PORT="${port}"
-SECRET="${secret}"
 TLS_DOMAIN="${tls_domain}"
 AD_TAG="${ad_tag}"
 CONTAINER="${container}"
 MTPEOF
     chmod 600 "${MTP_DIR}/instance_${inst_id}.env"
 
-    # - book -
+    local sf
+    sf=$(_mtp_secrets_file "$inst_id")
+    echo "$secret" > "$sf"; chmod 600 "$sf"
+
+    print_section "Запуск MTProto #${inst_id}"
+    _mtp_rebuild_container "$inst_id" || return 1
+
+    if command -v ufw &>/dev/null; then
+        ufw allow "${port}/tcp" comment "MTProto #${inst_id}" 2>/dev/null || true
+        print_ok "UFW: ${port}/tcp"
+    fi
+
     book_write ".mtproto.instances.${inst_id}.port" "$port"
     book_write ".mtproto.instances.${inst_id}.tls_domain" "$tls_domain"
     book_write ".mtproto.instances.${inst_id}.container" "$container"
+    book_write ".mtproto.instances.${inst_id}.secret_count" "1" number
 
-    # - ссылки -
     _mtp_print_links "$server_ip" "$port" "$secret" "$tls_domain"
-
     return 0
 }
 
-# --> MTPROTO: ВЫВОД ССЫЛОК <--
-_mtp_print_links() {
-    local ip="$1" port="$2" secret="$3" domain="$4"
-    local domain_hex
-    domain_hex=$(_mtp_domain_hex "$domain")
-    local tls_link="tg://proxy?server=${ip}&port=${port}&secret=ee${secret}${domain_hex}"
+# --> MTPROTO: ВЫБОР ИНСТАНСА (хелпер) <--
+_mtp_select_instance() {
+    local envfiles=()
+    for envf in "${MTP_DIR}"/instance_*.env; do
+        [[ -f "$envf" ]] && envfiles+=("$envf")
+    done
+    [[ ${#envfiles[@]} -eq 0 ]] && { print_warn "MTProto не установлен"; echo ""; return; }
 
-    echo ""
-    echo -e "  ${BOLD}Ссылка для Telegram (Fake TLS):${NC}"
-    echo -e "  ${CYAN}${tls_link}${NC}"
-    echo ""
+    if [[ ${#envfiles[@]} -eq 1 ]]; then
+        echo "$(basename "${envfiles[0]}" | sed 's/instance_//;s/\.env//')"
+        return
+    fi
+    local i=1
+    for envf in "${envfiles[@]}"; do
+        # shellcheck disable=SC1090
+        source "$envf"
+        local _id; _id=$(basename "$envf" | sed 's/instance_//;s/\.env//')
+        echo -e "  ${GREEN}${i})${NC} #${_id}  port:${PORT}  ${CONTAINER}" >&2
+        i=$(( i + 1 ))
+    done
+    echo "" >&2
+    local sel=""
+    echo -ne "  ${BOLD}Номер инстанса:${NC} " >&2; read -r sel
+    if [[ ! "$sel" =~ ^[0-9]+$ ]] || [[ "$sel" -lt 1 ]] || [[ "$sel" -gt ${#envfiles[@]} ]]; then
+        echo ""; return
+    fi
+    echo "$(basename "${envfiles[$(( sel - 1 ))]}" | sed 's/instance_//;s/\.env//')"
 }
 
-# --> MTPROTO: СПИСОК ИНСТАНСОВ <--
+# --> MTPROTO: ДОБАВИТЬ СЕКРЕТ <--
+mtp_add_secret() {
+    print_section "Добавить секрет (пользователя)"
+    local inst_id
+    inst_id=$(_mtp_select_instance)
+    [[ -z "$inst_id" ]] && return 0
+
+    # shellcheck disable=SC1090
+    source "${MTP_DIR}/instance_${inst_id}.env"
+
+    local new_secret
+    new_secret=$(_mtp_gen_secret)
+    [[ -z "$new_secret" ]] && { print_err "Ошибка генерации"; return 1; }
+
+    local sf; sf=$(_mtp_secrets_file "$inst_id")
+    echo "$new_secret" >> "$sf"
+    local count; count=$(wc -l < "$sf")
+    print_ok "Секрет добавлен (#${inst_id}, всего: ${count})"
+
+    _mtp_rebuild_container "$inst_id" || return 1
+    book_write ".mtproto.instances.${inst_id}.secret_count" "$count" number
+    _mtp_print_links "$SERVER_IP" "$PORT" "$new_secret" "$TLS_DOMAIN"
+    return 0
+}
+
+# --> MTPROTO: УДАЛИТЬ СЕКРЕТ <--
+mtp_remove_secret() {
+    print_section "Удалить секрет"
+    local inst_id
+    inst_id=$(_mtp_select_instance)
+    [[ -z "$inst_id" ]] && return 0
+
+    # shellcheck disable=SC1090
+    source "${MTP_DIR}/instance_${inst_id}.env"
+
+    local sf; sf=$(_mtp_secrets_file "$inst_id")
+    [[ ! -f "$sf" || ! -s "$sf" ]] && { print_warn "Нет секретов"; return 0; }
+
+    local count; count=$(wc -l < "$sf")
+    [[ "$count" -le 1 ]] && { print_err "Последний секрет. Удали инстанс целиком."; return 0; }
+
+    echo ""
+    local i=1
+    while IFS= read -r secret; do
+        [[ -z "$secret" ]] && continue
+        local dh; dh=$(_mtp_domain_hex "$TLS_DOMAIN")
+        echo -e "  ${GREEN}${i})${NC} ${secret:0:8}...  tg://...secret=ee${secret:0:8}...${dh:0:8}..."
+        i=$(( i + 1 ))
+    done < "$sf"
+    echo ""
+    local sel=""
+    ask "Номер для удаления" "" sel
+    [[ ! "$sel" =~ ^[0-9]+$ ]] || [[ "$sel" -lt 1 ]] || [[ "$sel" -ge "$i" ]] \
+        && { print_warn "Неверный выбор"; return 0; }
+
+    sed -i "${sel}d" "$sf"
+    local new_count; new_count=$(wc -l < "$sf")
+    print_ok "Секрет удалён (осталось: ${new_count})"
+
+    _mtp_rebuild_container "$inst_id" || return 1
+    book_write ".mtproto.instances.${inst_id}.secret_count" "$new_count" number
+    return 0
+}
+
+# --> MTPROTO: СПИСОК <--
 mtp_list() {
     print_section "MTProto Proxy - список"
     local found=0
@@ -174,15 +265,29 @@ mtp_list() {
         found=1
         # shellcheck disable=SC1090
         source "$envf"
-        local inst_id
-        inst_id=$(basename "$envf" | sed 's/instance_//;s/\.env//')
+        local inst_id; inst_id=$(basename "$envf" | sed 's/instance_//;s/\.env//')
 
         if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER}$"; then
             echo -e "  ${GREEN}(*)${NC} ${BOLD}#${inst_id}${NC}  port:${PORT}  domen:${TLS_DOMAIN}"
         else
             echo -e "  ${RED}( )${NC} ${BOLD}#${inst_id}${NC}  port:${PORT}  [${YELLOW}остановлен${NC}]"
         fi
-        _mtp_print_links "$SERVER_IP" "$PORT" "$SECRET" "$TLS_DOMAIN"
+
+        local sf; sf=$(_mtp_secrets_file "$inst_id")
+        if [[ -f "$sf" && -s "$sf" ]]; then
+            local si=1
+            while IFS= read -r secret; do
+                [[ -z "$secret" ]] && continue
+                local dh; dh=$(_mtp_domain_hex "$TLS_DOMAIN")
+                echo -e "    ${CYAN}${si})${NC} tg://proxy?server=${SERVER_IP}&port=${PORT}&secret=ee${secret}${dh}"
+                si=$(( si + 1 ))
+            done < "$sf"
+        else
+            # - legacy: SECRET в env -
+            local ls=""; ls=$(grep "^SECRET=" "$envf" 2>/dev/null | cut -d'"' -f2 || true)
+            [[ -n "$ls" ]] && _mtp_print_links "$SERVER_IP" "$PORT" "$ls" "$TLS_DOMAIN"
+        fi
+        echo ""
     done
     [[ $found -eq 0 ]] && print_warn "MTProto Proxy не установлен"
     return 0
@@ -192,81 +297,71 @@ mtp_list() {
 mtp_remove() {
     print_section "Удалить MTProto Proxy"
     local envfiles=()
-    for envf in "${MTP_DIR}"/instance_*.env; do
-        [[ -f "$envf" ]] && envfiles+=("$envf")
-    done
-    if [[ ${#envfiles[@]} -eq 0 ]]; then
-        print_warn "MTProto Proxy не установлен"
-        return 0
-    fi
+    for envf in "${MTP_DIR}"/instance_*.env; do [[ -f "$envf" ]] && envfiles+=("$envf"); done
+    [[ ${#envfiles[@]} -eq 0 ]] && { print_warn "MTProto не установлен"; return 0; }
 
-    # - список -
     local i=1
     for envf in "${envfiles[@]}"; do
         # shellcheck disable=SC1090
         source "$envf"
-        local inst_id
-        inst_id=$(basename "$envf" | sed 's/instance_//;s/\.env//')
-        echo -e "  ${GREEN}${i})${NC} #${inst_id}  port:${PORT}  ${CONTAINER}"
+        local iid; iid=$(basename "$envf" | sed 's/instance_//;s/\.env//')
+        echo -e "  ${GREEN}${i})${NC} #${iid}  port:${PORT}  ${CONTAINER}"
         i=$(( i + 1 ))
     done
     echo ""
-    local sel=""
-    ask "Номер для удаления" "1" sel
-    if [[ ! "$sel" =~ ^[0-9]+$ ]] || [[ "$sel" -lt 1 ]] || [[ "$sel" -gt ${#envfiles[@]} ]]; then
-        print_warn "Неверный выбор"; return 0
-    fi
+    local sel=""; ask "Номер для удаления" "1" sel
+    [[ ! "$sel" =~ ^[0-9]+$ ]] || [[ "$sel" -lt 1 ]] || [[ "$sel" -gt ${#envfiles[@]} ]] \
+        && { print_warn "Неверный выбор"; return 0; }
 
     local envf="${envfiles[$(( sel - 1 ))]}"
     # shellcheck disable=SC1090
     source "$envf"
-    local inst_id
-    inst_id=$(basename "$envf" | sed 's/instance_//;s/\.env//')
+    local inst_id; inst_id=$(basename "$envf" | sed 's/instance_//;s/\.env//')
 
-    local confirm=""
-    ask_yn "Удалить MTProto #${inst_id} (порт ${PORT})?" "n" confirm
+    local confirm=""; ask_yn "Удалить MTProto #${inst_id} (порт ${PORT})?" "n" confirm
     [[ "$confirm" != "yes" ]] && { print_info "Отмена"; return 0; }
 
     docker stop "$CONTAINER" 2>/dev/null || true
     docker rm "$CONTAINER" 2>/dev/null || true
-    print_ok "Контейнер удалён"
+    [[ -n "$PORT" ]] && command -v ufw &>/dev/null && ufw delete allow "${PORT}/tcp" 2>/dev/null || true
 
-    if command -v ufw &>/dev/null && [[ -n "$PORT" ]]; then
-        ufw delete allow "${PORT}/tcp" 2>/dev/null || true
-        print_ok "UFW: закрыт ${PORT}/tcp"
-    fi
-
-    rm -f "$envf"
+    rm -f "$envf" "$(_mtp_secrets_file "$inst_id")"
     book_write ".mtproto.instances.${inst_id}" "null" bool
     print_ok "MTProto #${inst_id} удалён"
     return 0
 }
 
 # --> MTPROTO: МИГРАЦИЯ LEGACY <--
-# - ручной пункт: переименовывает старый mtproto-proxy в mtproto-1 -
 mtp_migrate() {
     print_section "Миграция legacy MTProto"
 
-    if [[ -f "${MTP_DIR}/instance_1.env" ]]; then
-        print_warn "instance_1.env уже существует, миграция не нужна"
-        return 0
-    fi
+    # - миграция SECRET -> secrets.list для существующих инстансов -
+    for envf in "${MTP_DIR}"/instance_*.env; do
+        [[ -f "$envf" ]] || continue
+        local iid; iid=$(basename "$envf" | sed 's/instance_//;s/\.env//')
+        local sf; sf=$(_mtp_secrets_file "$iid")
+        if [[ ! -f "$sf" ]]; then
+            local old_s=""; old_s=$(grep "^SECRET=" "$envf" | cut -d'"' -f2 || true)
+            if [[ -n "$old_s" ]]; then
+                echo "$old_s" > "$sf"; chmod 600 "$sf"
+                sed -i '/^SECRET=/d' "$envf"
+                print_ok "Секрет #${iid} мигрирован в secrets_${iid}.list"
+            fi
+        fi
+    done
 
+    # - миграция mtproto.env -> instance_1.env -
     local old_env="${MTP_DIR}/mtproto.env"
     local old_container="mtproto-proxy"
-
     if [[ ! -f "$old_env" ]] && ! docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${old_container}$"; then
-        print_warn "Старый MTProto не найден"
+        [[ ! -f "${MTP_DIR}/instance_1.env" ]] && print_warn "Старый MTProto не найден"
         return 0
     fi
 
-    if [[ -f "$old_env" ]]; then
-        # shellcheck disable=SC1090
-        source "$old_env"
-        print_info "Найден старый env: port=${PORT}, domen=${TLS_DOMAIN}"
-    fi
+    [[ -f "${MTP_DIR}/instance_1.env" ]] && { print_info "instance_1.env уже есть"; return 0; }
 
-    # - переименование контейнера -
+    [[ -f "$old_env" ]] && { source "$old_env"; print_info "Найден: port=${PORT}, domen=${TLS_DOMAIN}"; }
+
     if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${old_container}$"; then
         docker stop "$old_container" 2>/dev/null || true
         docker rename "$old_container" "mtproto-1" 2>/dev/null || true
@@ -274,15 +369,17 @@ mtp_migrate() {
         print_ok "Контейнер: mtproto-proxy -> mtproto-1"
     fi
 
-    # - переименование env -
     if [[ -f "$old_env" ]]; then
-        # - добавляем CONTAINER поле -
-        echo "CONTAINER=\"mtproto-1\"" >> "$old_env"
+        echo 'CONTAINER="mtproto-1"' >> "$old_env"
         mv "$old_env" "${MTP_DIR}/instance_1.env"
-        print_ok "Env: mtproto.env -> instance_1.env"
+        # - секрет в файл -
+        local os=""; os=$(grep "^SECRET=" "${MTP_DIR}/instance_1.env" | cut -d'"' -f2 || true)
+        if [[ -n "$os" ]]; then
+            echo "$os" > "$(_mtp_secrets_file "1")"; chmod 600 "$(_mtp_secrets_file "1")"
+            sed -i '/^SECRET=/d' "${MTP_DIR}/instance_1.env"
+        fi
+        print_ok "Миграция завершена"
     fi
-
-    print_ok "Миграция завершена"
     return 0
 }
 
@@ -462,214 +559,375 @@ s5_remove() {
 }
 
 # ==========================================================================
-# --> HYSTERIA 2 <--
+# --> HYSTERIA 2 - МУЛЬТИИНСТАНС + МУЛЬТИЮЗЕР <--
 # ==========================================================================
 
-# --> HY2: УСТАНОВКА <--
-hy2_install() {
-    print_section "Установка Hysteria 2"
+_hy2_next_id() {
+    local i=1
+    while [[ -d "${HY2_DIR}/instance_${i}" ]]; do i=$(( i + 1 )); done
+    echo "$i"
+}
+_hy2_inst_dir()   { echo "${HY2_DIR}/instance_${1}"; }
+_hy2_service()    { echo "hysteria-${1}"; }
+_hy2_users_file() { echo "${HY2_DIR}/instance_${1}/users.list"; }
 
-    if [[ -f "$HY2_BIN" ]] && systemctl is-active --quiet "$HY2_SERVICE" 2>/dev/null; then
-        print_warn "Hysteria 2 уже установлен и запущен"
-        return 0
+# - генерация config.yaml из env + users.list -
+_hy2_gen_config() {
+    local inst_id="$1"
+    local idir; idir=$(_hy2_inst_dir "$inst_id")
+    [[ ! -f "${idir}/hysteria.env" ]] && { print_err "env не найден"; return 1; }
+    # shellcheck disable=SC1090
+    source "${idir}/hysteria.env"
+
+    local uf; uf=$(_hy2_users_file "$inst_id")
+    [[ ! -f "$uf" || ! -s "$uf" ]] && { print_err "users.list пуст"; return 1; }
+
+    {
+        echo "listen: :${PORT}"
+        echo ""
+        echo "tls:"
+        echo "  cert: ${idir}/server.crt"
+        echo "  key: ${idir}/server.key"
+        echo ""
+        echo "auth:"
+        echo "  type: userpass"
+        echo "  userpass:"
+        while IFS=: read -r uname upass; do
+            [[ -z "$uname" || -z "$upass" ]] && continue
+            echo "    ${uname}: ${upass}"
+        done < "$uf"
+        echo ""
+        echo "masquerade:"
+        echo "  type: proxy"
+        echo "  proxy:"
+        echo "    url: https://www.google.com"
+        echo "    rewriteHost: true"
+    } > "${idir}/config.yaml"
+    chmod 600 "${idir}/config.yaml"
+    return 0
+}
+
+_hy2_print_uri() {
+    local ip="$1" port="$2" user="$3" pass="$4" inst_id="$5"
+    echo -e "    ${CYAN}hysteria2://${user}:${pass}@${ip}:${port}?insecure=1#hy2-${inst_id}-${user}${NC}"
+}
+
+# - миграция legacy: /etc/hysteria/{config.yaml,hysteria.env,...} -> instance_1 -
+_hy2_migrate_legacy() {
+    local old_env="${HY2_DIR}/hysteria.env"
+    [[ ! -f "$old_env" ]] && return 0
+    [[ -d "${HY2_DIR}/instance_1" ]] && return 0
+
+    print_info "Миграция legacy Hysteria 2..."
+    # shellcheck disable=SC1090
+    source "$old_env"
+    local idir="${HY2_DIR}/instance_1"
+    mkdir -p "$idir"; chmod 700 "$idir"
+
+    [[ -f "${HY2_DIR}/server.crt" ]] && mv "${HY2_DIR}/server.crt" "${idir}/server.crt"
+    [[ -f "${HY2_DIR}/server.key" ]] && mv "${HY2_DIR}/server.key" "${idir}/server.key"
+    mv "$old_env" "${idir}/hysteria.env"
+    [[ -f "${HY2_DIR}/config.yaml" ]] && rm -f "${HY2_DIR}/config.yaml"
+
+    echo "admin:${AUTH_PASS}" > "${idir}/users.list"; chmod 600 "${idir}/users.list"
+    _hy2_gen_config "1"
+
+    systemctl stop "hysteria-server" 2>/dev/null || true
+    systemctl disable "hysteria-server" 2>/dev/null || true
+    rm -f "/etc/systemd/system/hysteria-server.service"
+
+    cat > "/etc/systemd/system/hysteria-1.service" << HY2UNIT
+[Unit]
+Description=Hysteria 2 Server #1
+After=network.target
+[Service]
+Type=simple
+ExecStart=${HY2_BIN} server -c ${idir}/config.yaml
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+[Install]
+WantedBy=multi-user.target
+HY2UNIT
+    systemctl daemon-reload
+    systemctl enable "hysteria-1" 2>/dev/null || true
+    systemctl start "hysteria-1" 2>/dev/null || true
+    print_ok "Миграция: legacy -> instance_1 (admin:${AUTH_PASS})"
+    return 0
+}
+
+# - выбор инстанса (хелпер) -
+_hy2_select_instance() {
+    local dirs=()
+    for d in "${HY2_DIR}"/instance_*/; do [[ -d "$d" ]] && dirs+=("$d"); done
+    [[ ${#dirs[@]} -eq 0 ]] && { print_warn "Hysteria 2 не установлен" >&2; echo ""; return; }
+    if [[ ${#dirs[@]} -eq 1 ]]; then
+        echo "$(basename "${dirs[0]}" | sed 's/instance_//')"; return
     fi
+    local i=1
+    for d in "${dirs[@]}"; do
+        local _id; _id=$(basename "$d" | sed 's/instance_//')
+        local _p="?"; [[ -f "${d}/hysteria.env" ]] && _p=$(grep "^PORT=" "${d}/hysteria.env" | cut -d'"' -f2)
+        echo -e "  ${GREEN}${i})${NC} #${_id}  UDP:${_p}" >&2
+        i=$(( i + 1 ))
+    done
+    echo "" >&2
+    local sel=""; echo -ne "  ${BOLD}Номер инстанса:${NC} " >&2; read -r sel
+    [[ ! "$sel" =~ ^[0-9]+$ ]] || [[ "$sel" -lt 1 ]] || [[ "$sel" -gt ${#dirs[@]} ]] && { echo ""; return; }
+    echo "$(basename "${dirs[$(( sel - 1 ))]}" | sed 's/instance_//')"
+}
+
+# --> HY2: ДОБАВИТЬ ИНСТАНС <--
+hy2_add() {
+    print_section "Добавить инстанс Hysteria 2"
+    _hy2_migrate_legacy
+
+    if [[ ! -f "$HY2_BIN" ]]; then
+        print_info "Скачиваю Hysteria 2..."
+        local arch="amd64"; [[ "$(uname -m)" == "aarch64" ]] && arch="arm64"
+        local dl_url
+        dl_url=$(curl -fsSL "https://api.github.com/repos/apernet/hysteria/releases/latest" 2>/dev/null \
+            | jq -r ".assets[] | select(.name | test(\"hysteria-linux-${arch}$\")) | .browser_download_url" 2>/dev/null)
+        [[ -z "$dl_url" ]] && { print_err "Не нашёл ссылку"; return 1; }
+        curl -fsSL -o "$HY2_BIN" "$dl_url" || { print_err "Не скачал"; return 1; }
+        chmod +x "$HY2_BIN"
+    fi
+    local hy2_ver; hy2_ver=$("$HY2_BIN" version 2>/dev/null | head -1 || echo "?")
+    print_ok "Hysteria 2: ${hy2_ver}"
 
     local server_ip
     server_ip=$(curl -4 -fsSL --connect-timeout 5 ifconfig.me 2>/dev/null || echo "")
-    [[ -z "$server_ip" ]] && { print_err "Не удалось определить IP"; return 1; }
+    [[ -z "$server_ip" ]] && { print_err "Не определил IP"; return 1; }
 
-    # - скачивание бинарного файла -
-    print_info "Скачиваю Hysteria 2..."
-    local arch="amd64"
-    [[ "$(uname -m)" == "aarch64" ]] && arch="arm64"
-    local dl_url
-    dl_url=$(curl -fsSL "https://api.github.com/repos/apernet/hysteria/releases/latest" 2>/dev/null \
-        | jq -r ".assets[] | select(.name | test(\"hysteria-linux-${arch}$\")) | .browser_download_url" 2>/dev/null)
-
-    if [[ -z "$dl_url" ]]; then
-        print_err "Не удалось найти ссылку на скачивание"
-        return 1
-    fi
-
-    if ! curl -fsSL -o "$HY2_BIN" "$dl_url"; then
-        print_err "Не удалось скачать бинарник"
-        return 1
-    fi
-    chmod +x "$HY2_BIN"
-    local hy2_ver
-    hy2_ver=$("$HY2_BIN" version 2>/dev/null | head -1 || echo "?")
-    print_ok "Hysteria 2: ${hy2_ver}"
-
-    # - порт -
     local port=443
     while true; do
-        echo -e "  ${CYAN}UDP порт для Hysteria 2. Порт 443 лучше всего маскируется (похож на HTTPS/QUIC).${NC}"
-        ask "UDP порт Hysteria 2" "$port" port
-        if ! validate_port "$port"; then print_err "Порт 1-65535"; continue; fi
-        if ss -ulnp 2>/dev/null | grep -q ":${port} "; then
+        echo -e "  ${CYAN}UDP порт. 443 маскируется под QUIC/HTTP3.${NC}"
+        ask "UDP порт" "$port" port
+        if ! validate_port "$port"; then print_err "1-65535"; continue; fi
+        if ss -ulnp 2>/dev/null | grep -q ":${port} " || ss -tlnp 2>/dev/null | grep -q ":${port} "; then
             print_warn "Порт ${port} занят"; continue
         fi
         break
     done
 
-    # - пароль аутентификации -
-    local auth_pass
-    auth_pass=$(rand_str 24)
-    echo -e "  ${CYAN}Пароль для подключения клиентов. Сгенерирован автоматически — можешь изменить.${NC}"
-    ask "Пароль для клиентов" "$auth_pass" auth_pass
-    [[ -z "$auth_pass" ]] && { print_err "Пароль обязателен"; return 1; }
+    local first_user="" first_pass=""
+    first_pass=$(rand_str 24)
+    echo -e "  ${CYAN}Первый пользователь. Ещё можно добавить через меню.${NC}"
+    ask "Имя" "admin" first_user
+    ask "Пароль" "$first_pass" first_pass
+    [[ -z "$first_user" || -z "$first_pass" ]] && { print_err "Имя и пароль обязательны"; return 1; }
 
-    # - self-signed сертификат -
-    print_section "Генерация self-signed сертификата"
-    mkdir -p "$HY2_DIR"; chmod 700 "$HY2_DIR"
-    if ! openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
-        -keyout "${HY2_DIR}/server.key" \
-        -out "${HY2_DIR}/server.crt" \
-        -subj "/CN=hy2.local" -days 3650 2>/dev/null; then
-        print_err "Не удалось сгенерировать сертификат"
-        return 1
-    fi
-    chmod 600 "${HY2_DIR}/server.key" "${HY2_DIR}/server.crt"
-    print_ok "Сертификат: ${HY2_DIR}/server.crt (10 лет)"
+    local inst_id; inst_id=$(_hy2_next_id)
+    local idir; idir=$(_hy2_inst_dir "$inst_id")
+    local svc; svc=$(_hy2_service "$inst_id")
+    mkdir -p "$idir"; chmod 700 "$idir"
 
-    # - конфиг -
-    cat > "${HY2_DIR}/config.yaml" << HY2CONF
-listen: :${port}
+    print_info "Генерация self-signed сертификата..."
+    openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
+        -keyout "${idir}/server.key" -out "${idir}/server.crt" \
+        -subj "/CN=hy2-${inst_id}.local" -days 3650 2>/dev/null \
+        || { print_err "Ошибка сертификата"; return 1; }
+    chmod 600 "${idir}/server.key" "${idir}/server.crt"
 
-tls:
-  cert: ${HY2_DIR}/server.crt
-  key: ${HY2_DIR}/server.key
-
-auth:
-  type: password
-  password: ${auth_pass}
-
-masquerade:
-  type: proxy
-  proxy:
-    url: https://www.google.com
-    rewriteHost: true
-HY2CONF
-    chmod 600 "${HY2_DIR}/config.yaml"
-    print_ok "Конфиг: ${HY2_DIR}/config.yaml"
-
-    # - env -
-    cat > "${HY2_DIR}/hysteria.env" << HY2ENV
+    cat > "${idir}/hysteria.env" << HY2ENV
 SERVER_IP="${server_ip}"
 PORT="${port}"
-AUTH_PASS="${auth_pass}"
 VERSION="${hy2_ver}"
 HY2ENV
-    chmod 600 "${HY2_DIR}/hysteria.env"
+    chmod 600 "${idir}/hysteria.env"
 
-    # - systemd -
-    cat > "/etc/systemd/system/${HY2_SERVICE}.service" << HY2UNIT
+    echo "${first_user}:${first_pass}" > "${idir}/users.list"; chmod 600 "${idir}/users.list"
+    _hy2_gen_config "$inst_id" || return 1
+
+    cat > "/etc/systemd/system/${svc}.service" << HY2UNIT
 [Unit]
-Description=Hysteria 2 Server
+Description=Hysteria 2 Server #${inst_id}
 After=network.target
-
 [Service]
 Type=simple
-ExecStart=${HY2_BIN} server -c ${HY2_DIR}/config.yaml
+ExecStart=${HY2_BIN} server -c ${idir}/config.yaml
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
-
 [Install]
 WantedBy=multi-user.target
 HY2UNIT
-
     systemctl daemon-reload
-    systemctl enable "$HY2_SERVICE" 2>/dev/null
-    systemctl start "$HY2_SERVICE"
-    sleep 2
+    systemctl enable "$svc" 2>/dev/null; systemctl start "$svc"; sleep 2
+    systemctl is-active --quiet "$svc" && print_ok "Hysteria 2 #${inst_id} на UDP:${port}" \
+        || { print_err "Не запустился: journalctl -u ${svc} | tail -20"; return 1; }
 
-    if systemctl is-active --quiet "$HY2_SERVICE" 2>/dev/null; then
-        print_ok "Hysteria 2 запущен на UDP порт ${port}"
-    else
-        print_err "Не запустился: journalctl -u ${HY2_SERVICE} --no-pager | tail -20"
-        return 1
-    fi
+    command -v ufw &>/dev/null && { ufw allow "${port}/udp" comment "Hy2 #${inst_id}" 2>/dev/null || true; }
 
-    # - UFW -
-    if command -v ufw &>/dev/null; then
-        ufw allow "${port}/udp" comment "Hysteria 2" 2>/dev/null || true
-        print_ok "UFW: разрешён ${port}/udp"
-    fi
-
-    # - book -
     book_write ".hysteria2.installed" "true" bool
-    book_write ".hysteria2.port" "$port"
-    book_write ".hysteria2.version" "$hy2_ver"
+    book_write ".hysteria2.instances.${inst_id}.port" "$port" number
+    book_write ".hysteria2.instances.${inst_id}.user_count" "1" number
 
-    # - клиентский URI -
-    _hy2_print_uri "$server_ip" "$port" "$auth_pass"
-
+    echo ""
+    echo -e "  ${BOLD}URI:${NC}"
+    _hy2_print_uri "$server_ip" "$port" "$first_user" "$first_pass" "$inst_id"
+    echo -e "  ${BOLD}ВНИМАНИЕ:${NC} insecure=true обязателен (self-signed)"
+    echo ""
     return 0
 }
 
-# --> HY2: КЛИЕНТСКИЙ URI <--
-_hy2_print_uri() {
-    local ip="$1" port="$2" pass="$3"
-    local uri="hysteria2://${pass}@${ip}:${port}?insecure=1#hy2-eli"
-    echo ""
-    echo -e "  ${BOLD}Клиентский URI (для импорта):${NC}"
-    echo -e "  ${CYAN}${uri}${NC}"
-    echo ""
-    echo -e "  ${BOLD}ВНИМАНИЕ:${NC} клиент должен иметь insecure=true (self-signed сертификат)"
-    echo ""
+# --> HY2: СПИСОК <--
+hy2_list() {
+    print_section "Hysteria 2 - инстансы"
+    _hy2_migrate_legacy
+    local found=0
+    for idir in "${HY2_DIR}"/instance_*/; do
+        [[ -d "$idir" ]] || continue; found=1
+        local iid; iid=$(basename "$idir" | sed 's/instance_//')
+        [[ ! -f "${idir}/hysteria.env" ]] && continue
+        # shellcheck disable=SC1090
+        source "${idir}/hysteria.env"
+        local svc; svc=$(_hy2_service "$iid")
+        if systemctl is-active --quiet "$svc" 2>/dev/null; then
+            echo -e "  ${GREEN}(*)${NC} ${BOLD}#${iid}${NC}  UDP:${PORT}  ver:${VERSION}"
+        else
+            echo -e "  ${RED}( )${NC} ${BOLD}#${iid}${NC}  UDP:${PORT}  [${YELLOW}остановлен${NC}]"
+        fi
+        local uf; uf=$(_hy2_users_file "$iid")
+        if [[ -f "$uf" && -s "$uf" ]]; then
+            while IFS=: read -r un up; do
+                [[ -z "$un" || -z "$up" ]] && continue
+                _hy2_print_uri "$SERVER_IP" "$PORT" "$un" "$up" "$iid"
+            done < "$uf"
+        fi
+        echo ""
+    done
+    [[ $found -eq 0 ]] && print_warn "Hysteria 2 не установлен" \
+        || echo -e "  ${BOLD}insecure=true обязателен (self-signed)${NC}"
+    return 0
 }
 
-# --> HY2: СТАТУС <--
-hy2_status() {
-    print_section "Статус Hysteria 2"
-    if [[ ! -f "${HY2_DIR}/hysteria.env" ]]; then
-        print_warn "Hysteria 2 не установлен"
-        return 0
-    fi
+# --> HY2: ДОБАВИТЬ ПОЛЬЗОВАТЕЛЯ <--
+hy2_add_user() {
+    print_section "Добавить пользователя Hysteria 2"
+    _hy2_migrate_legacy
+    local inst_id; inst_id=$(_hy2_select_instance)
+    [[ -z "$inst_id" ]] && return 0
+
+    local idir; idir=$(_hy2_inst_dir "$inst_id")
     # shellcheck disable=SC1090
-    source "${HY2_DIR}/hysteria.env"
+    source "${idir}/hysteria.env"
+    local uf; uf=$(_hy2_users_file "$inst_id")
 
-    if systemctl is-active --quiet "$HY2_SERVICE" 2>/dev/null; then
-        echo -e "  ${GREEN}(*)${NC} ${BOLD}Hysteria 2${NC}  port:${PORT}  ver:${VERSION}"
-    else
-        echo -e "  ${RED}( )${NC} ${BOLD}Hysteria 2${NC} [${YELLOW}остановлен${NC}]"
-    fi
+    local uname="" upass=""
+    upass=$(rand_str 24)
+    while true; do
+        ask "Имя пользователя" "" uname
+        [[ -z "$uname" ]] && { print_err "Обязательно"; continue; }
+        grep -q "^${uname}:" "$uf" 2>/dev/null && { print_err "'${uname}' уже есть"; continue; }
+        break
+    done
+    ask "Пароль" "$upass" upass
+    [[ -z "$upass" ]] && { print_err "Обязательно"; return 1; }
 
-    _hy2_print_uri "$SERVER_IP" "$PORT" "$AUTH_PASS"
+    echo "${uname}:${upass}" >> "$uf"
+    local count; count=$(wc -l < "$uf")
+    print_ok "${uname} добавлен (#${inst_id}, всего: ${count})"
+
+    _hy2_gen_config "$inst_id" || return 1
+    local svc; svc=$(_hy2_service "$inst_id")
+    systemctl restart "$svc" 2>/dev/null; sleep 1
+    systemctl is-active --quiet "$svc" && print_ok "Перезапущен" || print_err "Не запустился"
+
+    book_write ".hysteria2.instances.${inst_id}.user_count" "$count" number
+    echo ""; _hy2_print_uri "$SERVER_IP" "$PORT" "$uname" "$upass" "$inst_id"; echo ""
     return 0
 }
 
-# --> HY2: УДАЛЕНИЕ <--
+# --> HY2: УДАЛИТЬ ПОЛЬЗОВАТЕЛЯ <--
+hy2_remove_user() {
+    print_section "Удалить пользователя Hysteria 2"
+    _hy2_migrate_legacy
+    local inst_id; inst_id=$(_hy2_select_instance)
+    [[ -z "$inst_id" ]] && return 0
+
+    local uf; uf=$(_hy2_users_file "$inst_id")
+    [[ ! -f "$uf" || ! -s "$uf" ]] && { print_warn "Нет пользователей"; return 0; }
+
+    local count; count=$(wc -l < "$uf")
+    [[ "$count" -le 1 ]] && { print_err "Последний. Удали инстанс целиком."; return 0; }
+
+    echo ""
+    local i=1
+    while IFS=: read -r un _; do
+        [[ -z "$un" ]] && continue
+        echo -e "  ${GREEN}${i})${NC} ${un}"; i=$(( i + 1 ))
+    done < "$uf"
+    echo ""
+    local sel=""; ask "Номер" "" sel
+    [[ ! "$sel" =~ ^[0-9]+$ ]] || [[ "$sel" -lt 1 ]] || [[ "$sel" -ge "$i" ]] \
+        && { print_warn "Неверный выбор"; return 0; }
+
+    local tname; tname=$(sed -n "${sel}p" "$uf" | cut -d: -f1)
+    local confirm=""; ask_yn "Удалить '${tname}'?" "n" confirm
+    [[ "$confirm" != "yes" ]] && return 0
+
+    sed -i "${sel}d" "$uf"
+    local nc; nc=$(wc -l < "$uf")
+    print_ok "${tname} удалён (осталось: ${nc})"
+
+    _hy2_gen_config "$inst_id" || return 1
+    local svc; svc=$(_hy2_service "$inst_id")
+    systemctl restart "$svc" 2>/dev/null; sleep 1
+    systemctl is-active --quiet "$svc" && print_ok "Перезапущен" || print_err "Не запустился"
+    book_write ".hysteria2.instances.${inst_id}.user_count" "$nc" number
+    return 0
+}
+
+# --> HY2: УДАЛИТЬ ИНСТАНС <--
 hy2_remove() {
-    print_section "Удаление Hysteria 2"
-    if [[ ! -f "${HY2_DIR}/hysteria.env" ]]; then
-        print_warn "Hysteria 2 не установлен"
-        return 0
-    fi
-    local confirm=""
-    ask_yn "Удалить Hysteria 2?" "n" confirm
-    [[ "$confirm" != "yes" ]] && { print_info "Отмена"; return 0; }
+    print_section "Удалить инстанс Hysteria 2"
+    _hy2_migrate_legacy
+    local dirs=()
+    for d in "${HY2_DIR}"/instance_*/; do [[ -d "$d" ]] && dirs+=("$d"); done
+    [[ ${#dirs[@]} -eq 0 ]] && { print_warn "Hysteria 2 не установлен"; return 0; }
 
-    # shellcheck disable=SC1090
-    source "${HY2_DIR}/hysteria.env"
+    local i=1
+    for d in "${dirs[@]}"; do
+        local _id; _id=$(basename "$d" | sed 's/instance_//')
+        local _p="?"; [[ -f "${d}/hysteria.env" ]] && _p=$(grep "^PORT=" "${d}/hysteria.env" | cut -d'"' -f2)
+        echo -e "  ${GREEN}${i})${NC} #${_id}  UDP:${_p}"; i=$(( i + 1 ))
+    done
+    echo ""
+    local sel=""; ask "Номер" "1" sel
+    [[ ! "$sel" =~ ^[0-9]+$ ]] || [[ "$sel" -lt 1 ]] || [[ "$sel" -gt ${#dirs[@]} ]] \
+        && { print_warn "Неверный выбор"; return 0; }
 
-    systemctl stop "$HY2_SERVICE" 2>/dev/null || true
-    systemctl disable "$HY2_SERVICE" 2>/dev/null || true
-    rm -f "/etc/systemd/system/${HY2_SERVICE}.service"
-    systemctl daemon-reload
+    local idir="${dirs[$(( sel - 1 ))]}"
+    local inst_id; inst_id=$(basename "$idir" | sed 's/instance_//')
+    local svc; svc=$(_hy2_service "$inst_id")
 
-    if command -v ufw &>/dev/null && [[ -n "$PORT" ]]; then
-        ufw delete allow "${PORT}/udp" 2>/dev/null || true
-    fi
+    local confirm=""; ask_yn "Удалить Hysteria 2 #${inst_id}?" "n" confirm
+    [[ "$confirm" != "yes" ]] && return 0
 
-    rm -rf "$HY2_DIR"
-    rm -f "$HY2_BIN"
+    local port=""
+    [[ -f "${idir}/hysteria.env" ]] && { source "${idir}/hysteria.env"; port="$PORT"; }
 
-    book_write ".hysteria2.installed" "false" bool
-    print_ok "Hysteria 2 удалён"
+    systemctl stop "$svc" 2>/dev/null || true
+    systemctl disable "$svc" 2>/dev/null || true
+    rm -f "/etc/systemd/system/${svc}.service"; systemctl daemon-reload
+    [[ -n "$port" ]] && command -v ufw &>/dev/null && ufw delete allow "${port}/udp" 2>/dev/null || true
+    rm -rf "${idir:?}"
+
+    _book_ok && jq --arg i "$inst_id" 'del(.hysteria2.instances[$i])' "$_BOOK" > "${_BOOK}.tmp" 2>/dev/null \
+        && mv "${_BOOK}.tmp" "$_BOOK" 2>/dev/null || rm -f "${_BOOK}.tmp"
+
+    local remaining=0
+    for dd in "${HY2_DIR}"/instance_*/; do [[ -d "$dd" ]] && remaining=$(( remaining + 1 )); done
+    [[ $remaining -eq 0 ]] && { book_write ".hysteria2.installed" "false" bool; rm -f "$HY2_BIN"; }
+
+    print_ok "Hysteria 2 #${inst_id} удалён"
     return 0
 }
+
+# --> HY2: BACKWARD COMPAT <--
+hy2_install() { hy2_add "$@"; }
+hy2_status()  { hy2_list "$@"; }
 
 # ==========================================================================
 # --> SIGNAL TLS PROXY <--
