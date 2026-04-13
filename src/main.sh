@@ -223,20 +223,24 @@ menu_mtp() {
         eli_banner "MTProto Proxy (Telegram)" \
             "Прокси специально для Telegram с маскировкой под HTTPS.
 
-  Как работает: запускается Docker-контейнер, который принимает соединения
-    от Telegram-клиентов и перенаправляет их на серверы Telegram.
-    DPI-системы видят обычный TLS-трафик к указанному домену (Fake TLS).
+  Как работает: Docker-контейнер принимает соединения от Telegram-клиентов
+    и перенаправляет их на серверы Telegram.
+    DPI видит обычный TLS-трафик к указанному домену (Fake TLS).
 
-  Мультиинстанс: можно запустить несколько прокси на разных портах
-    (например один на 443 для себя, другой на 8443 для друзей).
+  Мультиинстанс: несколько прокси на разных портах.
+  Мультисекрет: каждый инстанс может иметь несколько секретов —
+    каждый секрет = отдельная ссылка. Можно отозвать один секрет
+    не трогая остальных (по сути раздельные пользователи).
 
   После установки: скопируй ссылку tg://proxy и отправь тому, кому нужен
     доступ к Telegram. Ссылка вставляется прямо в Telegram-клиент."
 
         echo -e "  ${GREEN}1)${NC} Добавить инстанс"
         echo -e "  ${GREEN}2)${NC} Список и ссылки"
-        echo -e "  ${GREEN}3)${NC} Удалить инстанс"
-        echo -e "  ${GREEN}4)${NC} Миграция legacy (mtproto-proxy -> mtproto-1)"
+        echo -e "  ${GREEN}3)${NC} Добавить секрет (пользователя)"
+        echo -e "  ${GREEN}4)${NC} Удалить секрет"
+        echo -e "  ${GREEN}5)${NC} Удалить инстанс"
+        echo -e "  ${GREEN}6)${NC} Миграция legacy (mtproto-proxy -> mtproto-1)"
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
@@ -244,12 +248,14 @@ menu_mtp() {
         read -r choice
 
         case "$choice" in
-            1) mtp_add     || print_warn "Ошибка при добавлении MTProto" ;;
-            2) mtp_list    || print_warn "Ошибка при показе списка" ;;
-            3) mtp_remove  || print_warn "Ошибка при удалении MTProto" ;;
-            4) mtp_migrate || print_warn "Ошибка при миграции" ;;
+            1) mtp_add           || print_warn "Ошибка при добавлении MTProto" ;;
+            2) mtp_list          || print_warn "Ошибка при показе списка" ;;
+            3) mtp_add_secret    || print_warn "Ошибка при добавлении секрета" ;;
+            4) mtp_remove_secret || print_warn "Ошибка при удалении секрета" ;;
+            5) mtp_remove        || print_warn "Ошибка при удалении MTProto" ;;
+            6) mtp_migrate       || print_warn "Ошибка при миграции" ;;
             0) return 0 ;;
-            *) print_warn "Введите число от 0 до 4" ;;
+            *) print_warn "Введите число от 0 до 6" ;;
         esac
 
         eli_pause
@@ -307,15 +313,18 @@ menu_hy2() {
     с потерями пакетов. Маскируется под обычный HTTP/3 трафик.
     Использует self-signed сертификат (клиент должен разрешить insecure).
 
-  После установки: получишь URI для импорта в клиент (Hiddify, Nekobox,
-    v2rayNG). В настройках клиента нужно включить 'Allow Insecure'
-    или 'Skip Certificate Verify' — это нормально для self-signed TLS.
+  Мультиинстанс: можно создать несколько серверов на разных портах.
+  Мультиюзер: каждый инстанс поддерживает несколько пользователей
+    с раздельными логинами и паролями (userpass аутентификация).
 
-  Один инстанс на сервер, порт по умолчанию 443/UDP."
+  Клиенты: Hiddify, Nekobox, v2rayNG — импорт по URI.
+  В настройках включить Allow Insecure / Skip Certificate Verify."
 
-        echo -e "  ${GREEN}1)${NC} Установить"
-        echo -e "  ${GREEN}2)${NC} Статус и URI"
-        echo -e "  ${GREEN}3)${NC} Удалить"
+        echo -e "  ${GREEN}1)${NC} Добавить инстанс"
+        echo -e "  ${GREEN}2)${NC} Список (инстансы и пользователи)"
+        echo -e "  ${GREEN}3)${NC} Добавить пользователя"
+        echo -e "  ${GREEN}4)${NC} Удалить пользователя"
+        echo -e "  ${GREEN}5)${NC} Удалить инстанс"
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
@@ -323,11 +332,13 @@ menu_hy2() {
         read -r choice
 
         case "$choice" in
-            1) hy2_install || print_warn "Ошибка при установке Hysteria 2" ;;
-            2) hy2_status  || print_warn "Ошибка при показе статуса" ;;
-            3) hy2_remove  || print_warn "Ошибка при удалении Hysteria 2" ;;
+            1) hy2_add         || print_warn "Ошибка при добавлении Hysteria 2" ;;
+            2) hy2_list        || print_warn "Ошибка при показе статуса" ;;
+            3) hy2_add_user    || print_warn "Ошибка при добавлении пользователя" ;;
+            4) hy2_remove_user || print_warn "Ошибка при удалении пользователя" ;;
+            5) hy2_remove      || print_warn "Ошибка при удалении Hysteria 2" ;;
             0) return 0 ;;
-            *) print_warn "Введите число от 0 до 3" ;;
+            *) print_warn "Введите число от 0 до 5" ;;
         esac
 
         eli_pause
