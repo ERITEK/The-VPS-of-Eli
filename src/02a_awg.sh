@@ -47,9 +47,9 @@ _awg_gen_obf_common() {
         OBF_JMAX=$(rand_range 500 1000)
     else
         print_info "Правила: Jmin < Jmax, S1+56 != S2, H1-H4 разные"
-        echo -e "  ${CYAN}Jc — кол-во мусорных пакетов (больше = сложнее распознать VPN, но чуть больше трафика).${NC}"
-        echo -e "  ${CYAN}Jmin/Jmax — диапазон размера мусорных пакетов в байтах.${NC}"
-        echo -e "  ${CYAN}S1/S2 — сдвиг заголовков пакетов (влияет на маскировку, S1+56 не должно равняться S2).${NC}"
+        echo -e "  ${CYAN}Jc - кол-во мусорных пакетов (больше = сложнее распознать VPN, но чуть больше трафика).${NC}"
+        echo -e "  ${CYAN}Jmin/Jmax - диапазон размера мусорных пакетов в байтах.${NC}"
+        echo -e "  ${CYAN}S1/S2 - сдвиг заголовков пакетов (влияет на маскировку, S1+56 не должно равняться S2).${NC}"
         ask "Jc (3-10)" "5" OBF_JC; ask "Jmin (50-150)" "64" OBF_JMIN; ask "Jmax (500-1000)" "1000" OBF_JMAX
         ask "S1 (15-40)" "20" OBF_S1; ask "S2 (15-40, != S1+56)" "20" OBF_S2
     fi
@@ -66,7 +66,7 @@ _awg_gen_obf_v1() {
         while [[ "$OBF_H3" == "$OBF_H1" || "$OBF_H3" == "$OBF_H2" ]]; do OBF_H3=$(rand_h); done
         while [[ "$OBF_H4" == "$OBF_H1" || "$OBF_H4" == "$OBF_H2" || "$OBF_H4" == "$OBF_H3" ]]; do OBF_H4=$(rand_h); done
     else
-        echo -e "  ${CYAN}H1-H4 — магические числа в заголовках. Должны быть разными. Любые целые числа.${NC}"
+        echo -e "  ${CYAN}H1-H4 - магические числа в заголовках. Должны быть разными. Любые целые числа.${NC}"
         ask "H1" "1" OBF_H1; ask "H2" "2" OBF_H2; ask "H3" "3" OBF_H3; ask "H4" "4" OBF_H4
     fi
 }
@@ -92,9 +92,9 @@ _awg_gen_obf_v2() {
             _n=$(( _n + 1 ))
         done
     else
-        echo -e "  ${CYAN}S3/S4 — дополнительные сдвиги заголовков для AWG 2.0 (15-40).${NC}"
+        echo -e "  ${CYAN}S3/S4 - дополнительные сдвиги заголовков для AWG 2.0 (15-40).${NC}"
         ask "S3 (15-40)" "20" OBF_S3; ask "S4 (15-40)" "20" OBF_S4
-        echo -e "  ${CYAN}H1-H4 — диапазоны магических чисел в формате min-max.${NC}"
+        echo -e "  ${CYAN}H1-H4 - диапазоны магических чисел в формате min-max.${NC}"
         echo -e "  ${CYAN}Диапазоны не должны пересекаться между собой.${NC}"
         ask "H1 (min-max)" "1000-50000" OBF_H1
         ask "H2 (min-max)" "100000-500000" OBF_H2
@@ -438,8 +438,176 @@ MIGEOF
 }
 
 # =============================================================================
+# --> AWG: ENSURE KERNEL HEADERS <--
+# - гарантирует наличие headers для текущего ядра, без них DKMS не соберёт модуль -
+# - трёхступенчатый fallback: exact headers -> метапакет -> установка стандартного ядра -
+# - return 0 = headers есть, return 1 = headers нет и не удалось поставить, return 2 = нужен reboot -
+_awg_ensure_headers() {
+    local kver
+    kver=$(uname -r)
+
+    # - шаг 0: уже есть? -
+    if [[ -d "/lib/modules/${kver}/build" ]]; then
+        print_ok "Kernel headers: ${kver} (уже установлены)"
+        return 0
+    fi
+
+    # - шаг 1: точный пакет linux-headers-$(uname -r) -
+    print_info "Устанавливаю linux-headers-${kver}..."
+    if apt-get install -y -qq "linux-headers-${kver}" 2>/dev/null; then
+        print_ok "linux-headers-${kver} установлен"
+        return 0
+    fi
+    print_warn "Пакет linux-headers-${kver} не найден в репозитории"
+
+    # - шаг 2: метапакет linux-headers-amd64 (тянет headers для текущего stable ядра) -
+    print_info "Пробую метапакет linux-headers-amd64..."
+    if apt-get install -y -qq linux-headers-amd64 2>/dev/null; then
+        # - метапакет мог поставить headers для другой версии ядра -
+        if [[ -d "/lib/modules/${kver}/build" ]]; then
+            print_ok "linux-headers-amd64 -> headers для ${kver} появились"
+            return 0
+        fi
+        print_warn "Метапакет установлен, но headers для ${kver} всё ещё нет"
+        print_info "Вероятно ядро ${kver} нестандартное (провайдер или backport)"
+    fi
+
+    # - шаг 3: предложить установку стандартного ядра + reboot -
+    print_err "Kernel headers для ${kver} недоступны"
+    print_info "Для DKMS (AmneziaWG) нужны headers, которых нет для этого ядра."
+    print_info "Решение: установить стандартное ядро Debian + reboot."
+    echo ""
+    local fallback_pkg=""
+    apt-cache show linux-image-amd64 &>/dev/null && fallback_pkg="linux-image-amd64"
+    if [[ -z "$fallback_pkg" ]]; then
+        print_err "Метапакет linux-image-amd64 не найден в репозитории"
+        return 1
+    fi
+    local do_install=""
+    ask_yn "Установить стандартное ядро ${fallback_pkg} + headers?" "y" do_install
+    if [[ "$do_install" != "yes" ]]; then
+        print_warn "Без kernel headers AWG не заработает"
+        return 1
+    fi
+    apt-get install -y "$fallback_pkg" "linux-headers-amd64" || {
+        print_err "Не удалось установить ядро"
+        return 1
+    }
+    # - флаг: после reboot доустановить AWG модуль через DKMS -
+    mkdir -p "$AWG_SETUP_DIR"
+    echo "pending" > "${AWG_SETUP_DIR}/pending_dkms"
+    chmod 600 "${AWG_SETUP_DIR}/pending_dkms"
+    book_write ".awg.pending_dkms" "true" bool
+    print_ok "Стандартное ядро установлено"
+    print_warn "Нужен reboot. После перезагрузки запусти скрипт снова."
+    echo ""
+    local do_reboot=""
+    ask_yn "Перезагрузить сейчас?" "y" do_reboot
+    [[ "$do_reboot" == "yes" ]] && { print_info "Reboot..."; reboot; }
+    return 2
+}
+
+# --> AWG: ДОБАВИТЬ PPA И УСТАНОВИТЬ ПАКЕТ <--
+# - GPG ключ + sources.list + apt install amneziawg -
+_awg_install_ppa_package() {
+    local gpg_key="75c9dd72c799870e310542e24166f2c257290828"
+    local gpg_ok="no"
+    for ks in "keyserver.ubuntu.com" "keys.openpgp.org" "pgp.mit.edu"; do
+        print_info "Пробуем keyserver: ${ks}"
+        if gpg --keyserver "$ks" --keyserver-options timeout=10 \
+               --recv-keys "$gpg_key" 2>/dev/null; then
+            gpg_ok="yes"
+            print_ok "Ключ получен с ${ks}"
+            break
+        fi
+        print_warn "Не удалось: ${ks}"
+    done
+    if [[ "$gpg_ok" != "yes" ]]; then
+        print_err "Не удалось получить GPG-ключ ни с одного keyserver"
+        return 1
+    fi
+
+    gpg --export "$gpg_key" > /usr/share/keyrings/amnezia.gpg
+    rm -f /etc/apt/sources.list.d/amnezia.list \
+          /etc/apt/sources.list.d/amneziawg.list
+
+    cat > /etc/apt/sources.list.d/amnezia.list << 'REPOEOF'
+deb [signed-by=/usr/share/keyrings/amnezia.gpg] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main
+deb-src [signed-by=/usr/share/keyrings/amnezia.gpg] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main
+REPOEOF
+
+    if [[ -f /etc/apt/sources.list ]]; then
+        if ! grep -q "^deb-src" /etc/apt/sources.list; then
+            local _src_lines
+            _src_lines=$(grep "^deb " /etc/apt/sources.list | sed 's/^deb /deb-src /')
+            echo "$_src_lines" >> /etc/apt/sources.list
+        fi
+    fi
+
+    apt-get update -qq
+    if ! apt-get install -y amneziawg; then
+        print_err "Не удалось установить пакет amneziawg"
+        return 1
+    fi
+    print_ok "Пакет amneziawg установлен"
+    return 0
+}
+
+# --> AWG: ENSURE DKMS MODULE LOADED <--
+# - после установки пакета: dkms autoinstall + modprobe с диагностикой -
+_awg_ensure_module() {
+    local kver
+    kver=$(uname -r)
+
+    # - уже загружен? -
+    if lsmod 2>/dev/null | grep -q "^amneziawg"; then
+        print_ok "Модуль amneziawg уже загружен"
+        return 0
+    fi
+
+    # - попытка 1: просто modprobe -
+    if modprobe amneziawg 2>/dev/null; then
+        print_ok "Модуль amneziawg загружен"
+        return 0
+    fi
+
+    # - попытка 2: dkms autoinstall (пересоберёт если headers появились) -
+    print_info "modprobe не удался, пробую dkms autoinstall..."
+    dkms autoinstall 2>/dev/null || true
+
+    if modprobe amneziawg 2>/dev/null; then
+        print_ok "Модуль amneziawg загружен (после dkms autoinstall)"
+        return 0
+    fi
+
+    # - попытка 3: точечная пересборка DKMS -
+    local awg_dkms_ver=""
+    awg_dkms_ver=$(dkms status 2>/dev/null | grep -oP 'amneziawg/\K[^,: ]+' | head -1 || echo "")
+    if [[ -n "$awg_dkms_ver" ]]; then
+        print_info "DKMS: amneziawg/${awg_dkms_ver}, пересобираю для ${kver}..."
+        dkms remove "amneziawg/${awg_dkms_ver}" --all 2>/dev/null || true
+        dkms install "amneziawg/${awg_dkms_ver}" -k "$kver" 2>/dev/null || true
+        if modprobe amneziawg 2>/dev/null; then
+            print_ok "Модуль amneziawg загружен (после пересборки DKMS)"
+            return 0
+        fi
+    fi
+
+    # - диагностика -
+    local dkms_out
+    dkms_out=$(dkms status amneziawg 2>/dev/null || echo "нет данных")
+    print_err "Модуль amneziawg не загружается"
+    print_info "dkms status: ${dkms_out}"
+    if [[ ! -d "/lib/modules/${kver}/build" ]]; then
+        print_err "Kernel headers отсутствуют для ${kver} - DKMS не может собрать модуль"
+        print_info "Установи headers: apt install linux-headers-\$(uname -r)"
+    fi
+    return 1
+}
+
+# =============================================================================
 # --> AWG: УСТАНОВКА <--
-# - анализ системы, DKMS модуль, wireguard-tools, первый интерфейс и клиент -
+# - анализ системы, headers, DKMS модуль, wireguard-tools, первый интерфейс и клиент -
 # =============================================================================
 
 awg_install() {
@@ -459,22 +627,6 @@ awg_install() {
     kver=$(uname -r)
     arch=$(uname -m)
     print_ok "Ядро: ${kver}, арх: ${arch}"
-
-    local install_method=""
-
-    if lsmod 2>/dev/null | grep -q "^amneziawg" || \
-       [[ -f "/lib/modules/${kver}/extra/amneziawg.ko" ]] || \
-       [[ -f "/lib/modules/${kver}/updates/dkms/amneziawg.ko" ]]; then
-        install_method="already_installed"
-        print_ok "AmneziaWG уже установлен"
-    elif apt-cache show "linux-headers-${kver}" &>/dev/null || \
-         [[ -d "/lib/modules/${kver}/build" ]]; then
-        install_method="dkms_ppa"
-        print_ok "Метод: DKMS через PPA (стандартный)"
-    else
-        install_method="dkms_fallback"
-        print_warn "Кастомное ядро VPS-провайдера, headers недоступны"
-    fi
 
     # - определение основного интерфейса и внешнего IP -
     local main_iface
@@ -502,7 +654,6 @@ awg_install() {
     cat > "${AWG_SETUP_DIR}/system.env" << SYSEOF
 KVER="${kver}"
 ARCH="${arch}"
-INSTALL_METHOD="${install_method}"
 MAIN_IFACE="${main_iface}"
 SERVER_IP="${server_ip}"
 EXISTING_SUBNETS="${existing_subnets}"
@@ -514,90 +665,52 @@ SYSEOF
     apt-get update -qq || true
     apt-get install -y -qq curl gnupg2 dkms wireguard-tools || true
 
-    if [[ "$install_method" == "dkms_fallback" ]]; then
-        print_err "Кастомное ядро, headers недоступны"
-        print_info "Нужно установить стандартное ядро Debian, затем reboot"
-        local fallback_pkg=""
-        apt-cache show linux-image-amd64 &>/dev/null && fallback_pkg="linux-image-amd64"
-        if [[ -n "$fallback_pkg" ]]; then
-            local do_install=""
-            ask_yn "Установить стандартное ядро ${fallback_pkg}?" "y" do_install
-            if [[ "$do_install" == "yes" ]]; then
-                apt-get install -y "$fallback_pkg" "linux-headers-amd64" || true
-                # - флаг для healthcheck: после reboot доустановить AWG модуль -
-                echo "pending" > "${AWG_SETUP_DIR}/pending_dkms"
-                chmod 600 "${AWG_SETUP_DIR}/pending_dkms"
-                book_write ".awg.pending_dkms" "true" bool
-                print_warn "Ядро установлено."
-                print_info "После reboot healthcheck автоматически доустановит AWG модуль."
-                print_info "Затем запусти скрипт и продолжи настройку AWG."
-                echo ""
-                local do_reboot=""
-                ask_yn "Перезагрузить сейчас?" "y" do_reboot
-                [[ "$do_reboot" == "yes" ]] && { print_info "Reboot..."; reboot; }
-            fi
-        else
-            print_err "Метапакет linux-image-amd64 не найден в репозитории"
-        fi
-        return 1
+    # - проверяем: может модуль уже есть -
+    local already_installed="no"
+    if lsmod 2>/dev/null | grep -q "^amneziawg" || \
+       [[ -f "/lib/modules/${kver}/extra/amneziawg.ko" ]] || \
+       [[ -f "/lib/modules/${kver}/updates/dkms/amneziawg.ko" ]]; then
+        already_installed="yes"
+        print_ok "Модуль amneziawg обнаружен для текущего ядра"
     fi
 
-    if [[ "$install_method" == "already_installed" ]]; then
-        print_ok "Модуль amneziawg уже установлен, пропускаем"
+    if [[ "$already_installed" == "no" ]]; then
+        # --> ШАГ 1: KERNEL HEADERS (обязательно ДО установки amneziawg) <--
+        # - без headers DKMS не соберёт модуль, и пакет поставится без .ko файла -
+        print_section "Проверка kernel headers"
+        local hdr_rc=0
+        _awg_ensure_headers || hdr_rc=$?
+        if [[ $hdr_rc -eq 2 ]]; then
+            # - нужен reboot (установлено новое ядро) -
+            return 1
+        elif [[ $hdr_rc -ne 0 ]]; then
+            print_err "Не удалось обеспечить kernel headers"
+            print_info "AWG требует headers для сборки DKMS модуля"
+            return 1
+        fi
+
+        # --> ШАГ 2: PPA + ПАКЕТ amneziawg <--
+        print_section "Установка пакета AmneziaWG"
+        if ! _awg_install_ppa_package; then
+            return 1
+        fi
+
+        # --> ШАГ 3: ПРОВЕРКА ЧТО DKMS СОБРАЛ МОДУЛЬ <--
+        print_section "Проверка модуля ядра"
+        if ! _awg_ensure_module; then
+            print_err "Модуль amneziawg не удалось загрузить"
+            print_info "Попробуй: reboot, затем запусти скрипт снова"
+            return 1
+        fi
     else
-        # - добавляем PPA Amnezia -
-        local gpg_key="75c9dd72c799870e310542e24166f2c257290828"
-        local gpg_ok="no"
-        for ks in "keyserver.ubuntu.com" "keys.openpgp.org" "pgp.mit.edu"; do
-            print_info "Пробуем keyserver: ${ks}"
-            if gpg --keyserver "$ks" --keyserver-options timeout=10 \
-                   --recv-keys "$gpg_key" 2>/dev/null; then
-                gpg_ok="yes"
-                print_ok "Ключ получен с ${ks}"
-                break
-            fi
-            print_warn "Не удалось: ${ks}"
-        done
-        if [[ "$gpg_ok" != "yes" ]]; then
-            print_err "Не удалось получить GPG-ключ ни с одного keyserver"
-            return 1
+        # - модуль есть, но может быть не загружен -
+        if ! lsmod 2>/dev/null | grep -q "^amneziawg"; then
+            modprobe amneziawg 2>/dev/null || {
+                print_err "Модуль amneziawg не загружается"
+                return 1
+            }
         fi
-
-        gpg --export "$gpg_key" > /usr/share/keyrings/amnezia.gpg
-        rm -f /etc/apt/sources.list.d/amnezia.list \
-              /etc/apt/sources.list.d/amneziawg.list
-
-        cat > /etc/apt/sources.list.d/amnezia.list << 'REPOEOF'
-deb [signed-by=/usr/share/keyrings/amnezia.gpg] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main
-deb-src [signed-by=/usr/share/keyrings/amnezia.gpg] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main
-REPOEOF
-
-        if [[ -f /etc/apt/sources.list ]]; then
-            if ! grep -q "^deb-src" /etc/apt/sources.list; then
-                local _src_lines
-                _src_lines=$(grep "^deb " /etc/apt/sources.list | sed 's/^deb /deb-src /')
-                echo "$_src_lines" >> /etc/apt/sources.list
-            fi
-        fi
-
-        apt-get update -qq
-        if ! apt-get install -y amneziawg; then
-            print_err "Не удалось установить amneziawg"
-            return 1
-        fi
-        print_ok "amneziawg установлен"
-    fi
-
-    # - проверка модуля -
-    if ! modprobe amneziawg 2>/dev/null; then
-        local dkms_out
-        dkms_out=$(dkms status amneziawg 2>/dev/null || echo "")
-        if echo "$dkms_out" | grep -q "installed"; then
-            print_warn "Модуль установлен но не для текущего ядра, нужен reboot"
-            return 1
-        fi
-        print_err "Модуль amneziawg не загружен"
-        return 1
+        print_ok "Модуль amneziawg загружен"
     fi
 
     if ! command -v awg-quick &>/dev/null; then
@@ -750,7 +863,7 @@ REPOEOF
 
     # -- КЛИЕНТЫ --
     print_section "Клиенты"
-    echo -e "  ${CYAN}Клиент — это одно устройство (телефон, ноутбук, роутер).${NC}"
+    echo -e "  ${CYAN}Клиент - это одно устройство (телефон, ноутбук, роутер).${NC}"
     echo -e "  ${CYAN}Для каждого будет создан отдельный конфиг-файл с QR-кодом.${NC}"
     local client_count=""
     while true; do
@@ -1044,7 +1157,7 @@ awg_create_iface() {
 
     local iface=""
     while true; do
-        echo -e "  ${CYAN}Имя интерфейса — техническое название туннеля (строчные буквы и цифры, до 15 символов).${NC}"
+        echo -e "  ${CYAN}Имя интерфейса - техническое название туннеля (строчные буквы и цифры, до 15 символов).${NC}"
         ask "Имя интерфейса" "$candidate" iface
         if ! [[ "$iface" =~ ^[a-z][a-z0-9]{0,14}$ ]]; then
             print_err "Строчные буквы и цифры, до 15 символов"; continue
@@ -1055,7 +1168,7 @@ awg_create_iface() {
         break
     done
     local desc=""
-    echo -e "  ${CYAN}Описание — для себя, чтобы помнить для чего этот туннель (например: офис, семья, роутер).${NC}"
+    echo -e "  ${CYAN}Описание - для себя, чтобы помнить для чего этот туннель (например: офис, семья, роутер).${NC}"
     ask "Описание" "" desc
     [[ -z "$desc" ]] && desc="$iface"
 
@@ -1436,7 +1549,7 @@ awg_add_client() {
 
     local name=""
     while true; do
-        echo -e "  ${CYAN}Имя устройства — латиница, цифры, дефис, подчёркивание (например: iphone-vasya, laptop-work).${NC}"
+        echo -e "  ${CYAN}Имя устройства - латиница, цифры, дефис, подчёркивание (например: iphone-vasya, laptop-work).${NC}"
         ask "Имя нового клиента" "" name
         if ! validate_name "$name"; then print_err "Буквы, цифры, дефис, подчёркивание"; continue; fi
         if awg_client_exists "$iface" "$name"; then print_err "'${name}' уже существует"; continue; fi
