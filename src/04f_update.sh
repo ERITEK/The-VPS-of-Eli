@@ -60,12 +60,29 @@ update_scan() {
 
 update_apt() {
     print_section "Обновление системы (apt)"
+    local kver_before; kver_before=$(uname -r)
     apt-get update -qq || true
     apt-get -y upgrade || { print_err "apt upgrade завершился с ошибкой"; return 1; }
     apt-get -y autoremove -qq || true
     print_ok "Система обновлена"
+
+    # - если AWG установлен, обновляем headers и пересобираем DKMS -
+    if command -v awg &>/dev/null; then
+        local kver_now; kver_now=$(uname -r)
+        if [[ ! -d "/lib/modules/${kver_now}/build" ]]; then
+            print_info "Доустанавливаю kernel headers для ${kver_now} (нужно для AWG)..."
+            apt-get install -y -qq "linux-headers-${kver_now}" 2>/dev/null \
+                || apt-get install -y -qq linux-headers-amd64 2>/dev/null || true
+        fi
+        # - пересборка DKMS на случай обновления ядра -
+        dkms autoinstall 2>/dev/null || true
+    fi
+
     if [[ -f /var/run/reboot-required ]]; then
         print_warn "Требуется reboot для применения обновлений ядра"
+        if command -v awg &>/dev/null; then
+            print_info "После reboot: Prayer of Eli проверит модуль amneziawg"
+        fi
     fi
     return 0
 }
@@ -140,9 +157,22 @@ update_awg() {
         print_info "Остановлен: ${iface}"
     done
 
+    # - ensure headers перед обновлением (ядро могло обновиться) -
+    local kver; kver=$(uname -r)
+    if [[ ! -d "/lib/modules/${kver}/build" ]]; then
+        print_info "Kernel headers отсутствуют для ${kver}, устанавливаю..."
+        apt-get install -y -qq "linux-headers-${kver}" 2>/dev/null \
+            || apt-get install -y -qq linux-headers-amd64 2>/dev/null \
+            || print_warn "Headers не удалось установить"
+    fi
+
     apt-get update -qq || true
     apt-get install -y --only-upgrade amneziawg 2>/dev/null || true
-    modprobe amneziawg 2>/dev/null || print_warn "Модуль не загрузился, может понадобиться reboot"
+
+    # - ensure module после обновления -
+    if ! _awg_ensure_module 2>/dev/null; then
+        print_warn "Модуль не загрузился, может понадобиться reboot"
+    fi
 
     # - поднимаем интерфейсы -
     for iface in $ifaces; do
