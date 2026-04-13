@@ -34,11 +34,11 @@ prayer_run() {
 
   Что делает: проходит по всем установленным компонентам и сверяет
     то, что записано в книге (book_of_Eli.json) с тем, что реально
-    работает на сервере. Если находит расхождения — исправляет.
+    работает на сервере. Если находит расхождения - исправляет.
 
-  Примеры: если потерялся env-файл — восстановит из книги.
-    Если сменился IP сервера или ядро — обновит книгу.
-    Если сервис упал — покажет предупреждение.
+  Примеры: если потерялся env-файл - восстановит из книги.
+    Если сменился IP сервера или ядро - обновит книгу.
+    Если сервис упал - покажет предупреждение.
 
   Безопасен: не удаляет данные, не перезапускает сервисы.
     Только читает, сравнивает, дописывает и сообщает."
@@ -109,6 +109,30 @@ prayer_run() {
             _pr_updated "AWG: ${bv:-нет} -> $awg_ver"
             book_write ".awg.version" "$awg_ver"
         else _pr_found "AWG: $awg_ver"; fi
+
+        # - проверка что модуль ядра загружен (может слететь после обновления ядра) -
+        if lsmod 2>/dev/null | grep -q "^amneziawg"; then
+            _pr_found "Модуль amneziawg: загружен"
+        else
+            _pr_warn "Модуль amneziawg: НЕ загружен"
+            # - попытка восстановления -
+            if modprobe amneziawg 2>/dev/null; then
+                _pr_fixed "Модуль amneziawg: загружен через modprobe"
+            elif command -v dkms &>/dev/null; then
+                _pr_warn "Пробую dkms autoinstall..."
+                dkms autoinstall 2>/dev/null || true
+                if modprobe amneziawg 2>/dev/null; then
+                    _pr_fixed "Модуль amneziawg: загружен после dkms autoinstall"
+                else
+                    _pr_failed "Модуль amneziawg не загружается. Возможно нужны kernel headers или reboot"
+                    if [[ ! -d "/lib/modules/$(uname -r)/build" ]]; then
+                        _pr_failed "Kernel headers отсутствуют для $(uname -r)"
+                    fi
+                fi
+            else
+                _pr_failed "dkms не установлен, модуль amneziawg восстановить не удалось"
+            fi
+        fi
 
         for env_f in "${AWG_SETUP_DIR}"/iface_*.env; do
             [[ -f "$env_f" ]] || continue
