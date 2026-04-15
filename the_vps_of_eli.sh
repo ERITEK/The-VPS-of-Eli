@@ -3,7 +3,7 @@
 # The VPS of Eli v3.141
 # Мега-менеджер VPS стека: VPN, связь, обслуживание
 # scrp by ERITEK & Loo1, Claude (Anthropic)
-# Собран: 2026-04-13
+# Собран: 2026-04-15
 # =============================================================================
 
 
@@ -4788,13 +4788,40 @@ mbl_delete() {
 
 # === 04a_unbound.sh ===
 # --> МОДУЛЬ: UNBOUND DNS <--
-# - рекурсивный DNS резолвер, слушает на IP каждого AWG интерфейса -
+# - DNS резолвер для AWG клиентов, слушает на IP каждого AWG интерфейса -
+# - два режима: рекурсивный (приватный) и форвард (быстрый) -
 
 UNBOUND_CONF="/etc/unbound/unbound.conf.d/awg-dns.conf"
+UNBOUND_MODE_FILE="/etc/unbound/unbound.conf.d/.dns_mode"
 
 unbound_install() {
     print_section "Установка Unbound"
     command -v unbound &>/dev/null || apt-get install -y -qq unbound
+
+    # --> ВЫБОР РЕЖИМА DNS <--
+    echo ""
+    echo -e "  ${BOLD}Режим работы DNS:${NC}"
+    echo ""
+    echo -e "  ${GREEN}1)${NC} Рекурсивный (рекомендуется)"
+    echo -e "     ${CYAN}VPS сам резолвит домены по цепочке от корневых серверов.${NC}"
+    echo -e "     ${CYAN}Никто снаружи не видит полный список запросов.${NC}"
+    echo -e "     ${CYAN}Первый запрос чуть медленнее (100-500ms), дальше кэш.${NC}"
+    echo ""
+    echo -e "  ${GREEN}2)${NC} Форвард (Google / Cloudflare / Quad9)"
+    echo -e "     ${CYAN}VPS пересылает запросы на Google 8.8.8.8 / CF 1.1.1.1.${NC}"
+    echo -e "     ${CYAN}Быстрее за счёт их кэша, но они видят все домены.${NC}"
+    echo -e "     ${CYAN}Провайдер клиента всё равно ничего не видит (VPN).${NC}"
+    echo ""
+    local dns_mode="recursive"
+    while true; do
+        echo -ne "  ${BOLD}Выбор?${NC} [1]: "; read -r _dm
+        case "${_dm:-1}" in
+            1) dns_mode="recursive"; break ;;
+            2) dns_mode="forward"; break ;;
+            *) print_warn "1 или 2" ;;
+        esac
+    done
+    print_ok "Режим: ${dns_mode}"
 
     # - отключаем DNSStubListener + направляем resolved на Unbound -
     mkdir -p /etc/systemd/resolved.conf.d/
@@ -4820,7 +4847,7 @@ EOF
     done
     [[ ${#awg_ips[@]} -eq 0 ]] && print_warn "AWG интерфейсов не найдено, Unbound на 127.0.0.1"
 
-    # - генерация конфига -
+    # - генерация конфига: секция server (общая для обоих режимов) -
     local iface_lines="    interface: 127.0.0.1"
     for ip in "${awg_ips[@]}"; do iface_lines+=$'\n'"    interface: ${ip}"; done
 
@@ -4832,7 +4859,41 @@ EOF
     done
 
     mkdir -p /etc/unbound/unbound.conf.d/
-    cat > "$UNBOUND_CONF" << EOF
+
+    # - генерация конфига в зависимости от режима -
+    if [[ "$dns_mode" == "recursive" ]]; then
+        # - рекурсивный: VPS сам ходит root -> TLD -> NS, forward-zone отсутствует -
+        cat > "$UNBOUND_CONF" << EOF
+# - режим: рекурсивный -
+# - VPS сам резолвит домены, запросы не уходят на Google/CF -
+server:
+${iface_lines}
+    port: 53
+${access_lines}
+    access-control: 0.0.0.0/0 refuse
+    num-threads: 1
+    msg-cache-size: 8m
+    rrset-cache-size: 16m
+    cache-min-ttl: 300
+    cache-max-ttl: 86400
+    prefetch: yes
+    prefetch-key: yes
+    hide-identity: yes
+    hide-version: yes
+    harden-glue: yes
+    harden-dnssec-stripped: yes
+    use-caps-for-id: yes
+    val-clean-additional: yes
+    verbosity: 0
+    log-queries: no
+    root-hints: "/var/lib/unbound/root.hints"
+    auto-trust-anchor-file: "/var/lib/unbound/root.key"
+EOF
+    else
+        # - форвард: запросы на Google/CF/Quad9, быстрее но менее приватно -
+        cat > "$UNBOUND_CONF" << EOF
+# - режим: форвард через Google/Cloudflare/Quad9 -
+# - быстрее, но они видят все запрашиваемые домены -
 server:
 ${iface_lines}
     port: 53
@@ -4850,7 +4911,6 @@ ${access_lines}
     use-caps-for-id: yes
     verbosity: 0
     log-queries: no
-    root-hints: "/var/lib/unbound/root.hints"
 
 forward-zone:
     name: "."
@@ -4859,13 +4919,24 @@ forward-zone:
     forward-addr: 9.9.9.9
     forward-first: yes
 EOF
+    fi
 
-    # - root.hints -
+    # - сохраняем выбранный режим -
+    echo "$dns_mode" > "$UNBOUND_MODE_FILE"
+    chmod 600 "$UNBOUND_MODE_FILE"
+
+    # - root.hints (нужен для рекурсии, не мешает форварду) -
     if curl -fsSL --connect-timeout 10 "https://www.internic.net/domain/named.cache" \
         -o /var/lib/unbound/root.hints 2>/dev/null; then
         print_ok "root.hints обновлён"
     else
         print_warn "root.hints: internic.net недоступен, используем встроенный"
+    fi
+
+    # - DNSSEC anchor для рекурсии -
+    if [[ "$dns_mode" == "recursive" ]]; then
+        unbound-anchor -a /var/lib/unbound/root.key 2>/dev/null || true
+        chown unbound:unbound /var/lib/unbound/root.key 2>/dev/null || true
     fi
 
     # - проверка и запуск -
@@ -4876,8 +4947,9 @@ EOF
     fi
     systemctl enable unbound; systemctl restart unbound; sleep 2
     if systemctl is-active --quiet unbound; then
-        print_ok "Unbound запущен"
+        print_ok "Unbound запущен (${dns_mode})"
         book_write ".unbound.installed" "true" bool
+        book_write ".unbound.mode" "$dns_mode"
         local _ub_ips
         _ub_ips=$(printf '%s\n' "${awg_ips[@]}" 2>/dev/null | jq -R . | jq -s . 2>/dev/null || echo "[]")
         book_write_obj ".unbound.listen_ips" "$_ub_ips"
@@ -4888,9 +4960,9 @@ EOF
     # - тест -
     if command -v dig &>/dev/null; then
         local test_ip
-        test_ip=$(dig +short +time=3 google.com @127.0.0.1 2>/dev/null | grep -oP '^\d+\.\d+\.\d+\.\d+$' | head -1 || true)
+        test_ip=$(dig +short +time=5 google.com @127.0.0.1 2>/dev/null | grep -oP '^\d+\.\d+\.\d+\.\d+$' | head -1 || true)
         [[ -n "$test_ip" ]] && print_ok "Резолвинг: google.com -> ${test_ip}" \
-            || print_warn "Резолвинг не ответил"
+            || print_warn "Резолвинг не ответил (может нужно подождать, кэш пуст)"
     fi
 
     # - /etc/resolv.conf -
@@ -4909,7 +4981,7 @@ EOF
         print_ok "/etc/resolv.conf: 127.0.0.1 добавлен"
     fi
 
-    print_ok "Unbound настроен"
+    print_ok "Unbound настроен (${dns_mode})"
     return 0
 }
 
@@ -4918,6 +4990,21 @@ unbound_status() {
     if systemctl is-active --quiet unbound 2>/dev/null; then
         print_ok "Сервис: активен"
     else print_err "Сервис: не запущен"; return 0; fi
+
+    # - показываем текущий режим -
+    local mode="?"
+    if [[ -f "$UNBOUND_MODE_FILE" ]]; then
+        mode=$(cat "$UNBOUND_MODE_FILE")
+    elif [[ -f "$UNBOUND_CONF" ]]; then
+        # - определяем по конфигу: есть forward-zone = форвард -
+        grep -q "^forward-zone:" "$UNBOUND_CONF" 2>/dev/null && mode="forward" || mode="recursive"
+    fi
+    case "$mode" in
+        recursive) print_info "Режим: рекурсивный (приватный, VPS сам резолвит)" ;;
+        forward)   print_info "Режим: форвард (Google/CF/Quad9)" ;;
+        *)         print_info "Режим: неизвестен" ;;
+    esac
+
     if command -v dig &>/dev/null; then
         local r; r=$(dig +short +time=3 google.com @127.0.0.1 2>/dev/null | head -1 || true)
         [[ -n "$r" ]] && print_ok "Резолвинг: OK (${r})" || print_warn "Резолвинг: не ответил"
@@ -8172,14 +8259,17 @@ menu_unbound() {
         eli_banner "Unbound DNS" \
             "Свой DNS-резолвер для клиентов AmneziaWG.
 
-  Зачем: когда клиент подключён к VPN, его DNS-запросы (какие сайты он
-    открывает) по умолчанию идут на Google/Cloudflare. С Unbound они
-    остаются на твоём сервере - никто снаружи не видит запросы.
+  Зачем: без Unbound DNS-запросы клиентов VPN идут напрямую на публичные
+    серверы (Google/Cloudflare). Провайдер клиента их не видит (VPN),
+    но Google/CF видят все запрашиваемые домены.
 
-  Как работает: слушает на IP каждого AWG-туннеля (10.8.0.1 и т.д.)
-    и на localhost. Остальные сервисы (Outline, 3X-UI) используют
-    свои собственные DNS и не зависят от Unbound.
+  Два режима:
+    Рекурсивный - VPS сам резолвит домены от корневых серверов.
+      Никто снаружи не видит полный список запросов. Приватнее.
+      Первый запрос чуть медленнее (100-500ms), дальше кэш.
+    Форвард - пересылка на Google/CF/Quad9. Быстрее, менее приватно.
 
+  Слушает на IP каждого AWG-туннеля (10.8.0.1 и т.д.) и на localhost.
   Когда ставить: после создания хотя бы одного AWG интерфейса.
     Затем в настройках AWG выбери DNS -> Unbound."
 
