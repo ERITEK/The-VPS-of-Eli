@@ -5455,7 +5455,6 @@ ${access_lines}
     verbosity: 0
     log-queries: no
     root-hints: "/var/lib/unbound/root.hints"
-    auto-trust-anchor-file: "/var/lib/unbound/root.key"
 EOF
     else
         # - форвард: запросы на Google/CF/Quad9, быстрее но менее приватно -
