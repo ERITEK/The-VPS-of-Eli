@@ -8,24 +8,33 @@ AWG_ACTIVE_IFACE=""
 AWG_VER=""
 
 # --> AWG: ВЫБОР ВЕРСИИ ПРОТОКОЛА <--
-# - AWG 1.0 (classic) vs AWG 2.0 (ranged headers, S3/S4) vs WG vanilla -
+# - AWG 1.0 (H+S1/S2) vs AWG 1.5 (+ I1-I5) vs AWG 2.0 (+ ranged H, S3/S4, I1-I5) vs WG -
+# - P/S хелпа AWG написана идиотом, куском гуманитарного шлепка блядь -
 _awg_ask_version() {
     echo ""
     echo -e "  ${BOLD}Версия протокола:${NC}"
-    echo -e "  ${GREEN}1)${NC} AWG 1.0 (classic) - совместим с Keenetic 4.2+, OpenWrt, все клиенты"
-    echo -e "  ${GREEN}2)${NC} AWG 2.0 - улучшенная обфускация, ranged H, S3/S4"
-    echo -e "  ${GREEN}3)${NC} WireGuard (vanilla) - без обфускации, максимальная совместимость"
+    echo -e "  ${GREEN}1)${NC} AWG 1.0 (classic) - H1-H4 + S1/S2 + Jc/Jmin/Jmax"
+    echo -e "     ${CYAN}Совместим с Keenetic 4.2+, OpenWrt, все старые клиенты.${NC}"
+    echo -e "  ${GREEN}2)${NC} AWG 1.5 - + I1-I5 (signature chain/CPS)"
+    echo -e "     ${CYAN}Маскировка хендшейка под реальный протокол (QUIC/DNS).${NC}"
+    echo -e "  ${GREEN}3)${NC} AWG 2.0 - 1.5 + ranged H + S3/S4"
+    echo -e "     ${CYAN}Keenetic 5.1+, Amnezia 4.8.12.9+. Максимальная обфускация.${NC}"
+    echo -e "  ${GREEN}4)${NC} WireGuard vanilla - без обфускации"
+    echo -e "     ${CYAN}Совместим с любым WG клиентом.${NC}"
     while true; do
         echo -ne "  ${BOLD}Выбор?${NC} "; read -r _awg_ver_ch
         case "$_awg_ver_ch" in
             1) AWG_VER="1.0"; break ;;
-            2) AWG_VER="2.0"
-               print_warn "Проверь роутер на поддержку обфускации 2.0"
+            2) AWG_VER="1.5"
+               print_info "AWG 1.5 требует клиент с поддержкой I1-I5"
                break ;;
-            3) AWG_VER="wg"
+            3) AWG_VER="2.0"
+               print_info "AWG 2.0 требует Amnezia 4.8.12.9+ или AmneziaWG 2.0.0+"
+               break ;;
+            4) AWG_VER="wg"
                print_info "Обфускация отключена, все клиенты WireGuard совместимы"
                break ;;
-            *) print_warn "1, 2 или 3" ;;
+            *) print_warn "1, 2, 3 или 4" ;;
         esac
     done
 }
@@ -49,17 +58,98 @@ _awg_gen_obf_common() {
         print_info "Правила: Jmin < Jmax, S1+56 != S2, H1-H4 разные"
         echo -e "  ${CYAN}Jc - кол-во мусорных пакетов (больше = сложнее распознать VPN, но чуть больше трафика).${NC}"
         echo -e "  ${CYAN}Jmin/Jmax - диапазон размера мусорных пакетов в байтах.${NC}"
-        echo -e "  ${CYAN}S1/S2 - сдвиг заголовков пакетов (влияет на маскировку, S1+56 не должно равняться S2).${NC}"
+        echo -e "  ${CYAN}S1/S2 - сдвиг заголовков пакетов (влияет на маскировку, S1+56 не равно S2).${NC}"
         ask "Jc (3-10)" "5" OBF_JC; ask "Jmin (50-150)" "64" OBF_JMIN; ask "Jmax (500-1000)" "1000" OBF_JMAX
         ask "S1 (15-40)" "20" OBF_S1; ask "S2 (15-40, != S1+56)" "20" OBF_S2
     fi
 }
 
-# - AWG 1.0: H1-H4 одиночные значения -
+# --> AWG: ПРЕСЕТЫ CPS ДЛЯ I1 (реальные hex snapshots) <--
+# - I1 должен выглядеть как начало реального UDP-протокола для DPI-маскировки -
+# - взято из публичных примеров доки Amnezia и протокольных спецификаций -
+_awg_cps_preset_quic() {
+    # - QUIC Initial (RFC 9000) - маскирует под HTTP/3 -
+    echo "<b 0xc000000001><r 18><b 0x00><r 8><b 0x00040000040000000400><r 1100>"
+}
+
+_awg_cps_preset_dns() {
+    # - DNS query (example) - маскирует под обычный DNS запрос -
+    echo "<r 2><b 0x0100000100000000000003777777076578616d706c6503636f6d0000010001>"
+}
+
+_awg_cps_preset_stun() {
+    # - STUN binding request (RFC 5389) - маскирует под STUN (WebRTC) -
+    echo "<b 0x000100002112a442><r 12>"
+}
+
+# - случайная CPS-строка для I2-I5: разнообразные теги для энтропии -
+_awg_cps_random() {
+    local idx="$1"
+    case "$idx" in
+        2) echo "<r 32><t>" ;;
+        3) echo "<rd 16><r 24>" ;;
+        4) echo "<t><rc 20>" ;;
+        5) echo "<r $(rand_range 16 48)>" ;;
+        *) echo "<r 24>" ;;
+    esac
+}
+
+# --> AWG: ГЕНЕРАЦИЯ I1-I5 <--
+# - auto: гибрид - I1 из пресета QUIC/DNS/STUN, I2-I5 случайные теги -
+# - manual: запрос ручного ввода с возможностью "пропустить" через пустую строку -
+_awg_gen_i_packets() {
+    local auto="$1"
+    OBF_I1=""; OBF_I2=""; OBF_I3=""; OBF_I4=""; OBF_I5=""
+
+    if [[ "$auto" == "yes" ]]; then
+        # - гибрид: случайный пресет для I1, случайные CPS для I2-I5 -
+        local presets=("quic" "dns" "stun")
+        local p="${presets[$(( RANDOM % 3 ))]}"
+        case "$p" in
+            quic) OBF_I1=$(_awg_cps_preset_quic) ;;
+            dns)  OBF_I1=$(_awg_cps_preset_dns) ;;
+            stun) OBF_I1=$(_awg_cps_preset_stun) ;;
+        esac
+        OBF_I2=$(_awg_cps_random 2)
+        OBF_I3=$(_awg_cps_random 3)
+        OBF_I4=$(_awg_cps_random 4)
+        OBF_I5=$(_awg_cps_random 5)
+        print_info "I1 пресет: ${p}, I2-I5 случайные"
+    else
+        echo ""
+        echo -e "  ${CYAN}I1-I5 - signature chain (CPS). I1 обязателен (иначе AWG работает как 1.0).${NC}"
+        echo -e "  ${CYAN}Формат: <b 0xHEX> - статичные байты, <r N> - случайные, <rd N> - цифры, <rc N> - буквы, <t> - timestamp.${NC}"
+        echo -e "  ${CYAN}Оставь пустым для пропуска пакета. I1 пустой = отключение CPS целиком.${NC}"
+        echo ""
+        echo -e "  ${BOLD}Готовые пресеты для I1:${NC}"
+        echo -e "  ${GREEN}q)${NC} QUIC Initial (маскировка под HTTP/3)"
+        echo -e "  ${GREEN}d)${NC} DNS query (маскировка под DNS)"
+        echo -e "  ${GREEN}s)${NC} STUN (маскировка под WebRTC)"
+        echo -e "  ${GREEN}m)${NC} Ввести вручную"
+        local _ch=""
+        while true; do
+            echo -ne "  ${BOLD}Выбор для I1?${NC} [q]: "; read -r _ch
+            case "${_ch:-q}" in
+                q|Q) OBF_I1=$(_awg_cps_preset_quic); break ;;
+                d|D) OBF_I1=$(_awg_cps_preset_dns); break ;;
+                s|S) OBF_I1=$(_awg_cps_preset_stun); break ;;
+                m|M) ask "I1 (CPS)" "" OBF_I1; break ;;
+                *) print_warn "q, d, s или m" ;;
+            esac
+        done
+        ask "I2 (CPS, пусто = пропустить)" "$(_awg_cps_random 2)" OBF_I2
+        ask "I3 (CPS, пусто = пропустить)" "$(_awg_cps_random 3)" OBF_I3
+        ask "I4 (CPS, пусто = пропустить)" "$(_awg_cps_random 4)" OBF_I4
+        ask "I5 (CPS, пусто = пропустить)" "$(_awg_cps_random 5)" OBF_I5
+    fi
+}
+
+# - AWG 1.0: H1-H4 одиночные значения, без I1-I5 -
 _awg_gen_obf_v1() {
     local auto="$1"
     _awg_gen_obf_common "$auto"
     OBF_S3=""; OBF_S4=""
+    OBF_I1=""; OBF_I2=""; OBF_I3=""; OBF_I4=""; OBF_I5=""
     if [[ "$auto" == "yes" ]]; then
         OBF_H1=$(rand_h); OBF_H2=$(rand_h); OBF_H3=$(rand_h); OBF_H4=$(rand_h)
         while [[ "$OBF_H2" == "$OBF_H1" ]]; do OBF_H2=$(rand_h); done
@@ -71,7 +161,28 @@ _awg_gen_obf_v1() {
     fi
 }
 
-# - AWG 2.0: S3/S4 + H1-H4 диапазоны (min-max) -
+# - AWG 1.5: H1-H4 одиночные + I1-I5 -
+_awg_gen_obf_v15() {
+    local auto="$1"
+    _awg_gen_obf_v1 "$auto"
+    _awg_gen_i_packets "$auto"
+}
+
+# - проверка пересечения диапазонов "min-max": возвращает 0 если пересекаются -
+_awg_ranges_overlap() {
+    local a="$1" b="$2"
+    local a_lo a_hi b_lo b_hi
+    a_lo="${a%-*}"; a_hi="${a#*-}"
+    b_lo="${b%-*}"; b_hi="${b#*-}"
+    [[ -z "$a_lo" || -z "$b_lo" ]] && return 1
+    # - пересекаются если a_lo <= b_hi && b_lo <= a_hi -
+    if [[ "$a_lo" -le "$b_hi" && "$b_lo" -le "$a_hi" ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# - AWG 2.0: S3/S4 + ranged H1-H4 + I1-I5 -
 _awg_gen_obf_v2() {
     local auto="$1"
     _awg_gen_obf_common "$auto"
@@ -96,11 +207,33 @@ _awg_gen_obf_v2() {
         ask "S3 (15-40)" "20" OBF_S3; ask "S4 (15-40)" "20" OBF_S4
         echo -e "  ${CYAN}H1-H4 - диапазоны магических чисел в формате min-max.${NC}"
         echo -e "  ${CYAN}Диапазоны не должны пересекаться между собой.${NC}"
-        ask "H1 (min-max)" "1000-50000" OBF_H1
-        ask "H2 (min-max)" "100000-500000" OBF_H2
-        ask "H3 (min-max)" "1000000-5000000" OBF_H3
-        ask "H4 (min-max)" "10000000-50000000" OBF_H4
+        local _att=0
+        while true; do
+            ask "H1 (min-max)" "1000-50000" OBF_H1
+            ask "H2 (min-max)" "100000-500000" OBF_H2
+            ask "H3 (min-max)" "1000000-5000000" OBF_H3
+            ask "H4 (min-max)" "10000000-50000000" OBF_H4
+            # - проверяем все пары на пересечение -
+            local _overlap="no"
+            for _pair in "H1:H2" "H1:H3" "H1:H4" "H2:H3" "H2:H4" "H3:H4"; do
+                local _a="${_pair%:*}" _b="${_pair#*:}"
+                # - nameref: ссылки на OBF_H1..H4 без eval -
+                local -n _av_ref="OBF_${_a}"
+                local -n _bv_ref="OBF_${_b}"
+                if _awg_ranges_overlap "$_av_ref" "$_bv_ref"; then
+                    print_err "Диапазоны ${_a}(${_av_ref}) и ${_b}(${_bv_ref}) пересекаются"
+                    _overlap="yes"
+                    unset -n _av_ref _bv_ref
+                    break
+                fi
+                unset -n _av_ref _bv_ref
+            done
+            [[ "$_overlap" == "no" ]] && break
+            (( _att++ )); [[ $_att -ge 3 ]] && { print_warn "Оставляю как есть"; break; }
+        done
     fi
+    # - I1-I5 для v2 -
+    _awg_gen_i_packets "$auto"
 }
 
 # - WireGuard vanilla: все параметры обнулены, совместимость со стандартным WG -
@@ -108,10 +241,14 @@ _awg_gen_obf_wg() {
     OBF_JC=0; OBF_JMIN=0; OBF_JMAX=0
     OBF_S1=0; OBF_S2=0; OBF_S3=""; OBF_S4=""
     OBF_H1=1; OBF_H2=2; OBF_H3=3; OBF_H4=4
+    OBF_I1=""; OBF_I2=""; OBF_I3=""; OBF_I4=""; OBF_I5=""
 }
 
 # - блок обфускации для .conf (server и client) -
 _awg_obf_conf_lines() {
+    if [[ "${AWG_VER}" == "wg" ]]; then
+        return 0
+    fi
     echo "Jc = ${OBF_JC}"
     echo "Jmin = ${OBF_JMIN}"
     echo "Jmax = ${OBF_JMAX}"
@@ -123,6 +260,12 @@ _awg_obf_conf_lines() {
     echo "H2 = ${OBF_H2}"
     echo "H3 = ${OBF_H3}"
     echo "H4 = ${OBF_H4}"
+    [[ -n "$OBF_I1" ]] && echo "I1 = ${OBF_I1}"
+    [[ -n "$OBF_I2" ]] && echo "I2 = ${OBF_I2}"
+    [[ -n "$OBF_I3" ]] && echo "I3 = ${OBF_I3}"
+    [[ -n "$OBF_I4" ]] && echo "I4 = ${OBF_I4}"
+    [[ -n "$OBF_I5" ]] && echo "I5 = ${OBF_I5}"
+    return 0
 }
 
 # - блок обфускации для env файла -
@@ -139,17 +282,31 @@ _awg_obf_env_lines() {
     echo "H2=\"${OBF_H2}\""
     echo "H3=\"${OBF_H3}\""
     echo "H4=\"${OBF_H4}\""
+    # - I1-I5 экранируем двойные кавычки внутри CPS-строк для безопасного source -
+    [[ -n "$OBF_I1" ]] && echo "I1=\"${OBF_I1//\"/\\\"}\""
+    [[ -n "$OBF_I2" ]] && echo "I2=\"${OBF_I2//\"/\\\"}\""
+    [[ -n "$OBF_I3" ]] && echo "I3=\"${OBF_I3//\"/\\\"}\""
+    [[ -n "$OBF_I4" ]] && echo "I4=\"${OBF_I4//\"/\\\"}\""
+    [[ -n "$OBF_I5" ]] && echo "I5=\"${OBF_I5//\"/\\\"}\""
+    return 0
 }
 
-# - заголовок Keenetic asc (только 1.0) или предупреждение (2.0) или WG -
+# - заголовок-комментарий для клиентского .conf -
 _awg_client_header_comment() {
-    if [[ "$AWG_VER" == "1.0" ]]; then
-        echo "# Keenetic: interface WireguardX wireguard asc ${OBF_JC} ${OBF_JMIN} ${OBF_JMAX} ${OBF_S1} ${OBF_S2} ${OBF_H1} ${OBF_H2} ${OBF_H3} ${OBF_H4}"
-    elif [[ "$AWG_VER" == "2.0" ]]; then
-        echo "# AWG 2.0 - Keenetic 4.2 не поддерживает S3/S4 и ranged H"
-    else
-        echo "# WireGuard vanilla - совместим с любым WG клиентом"
-    fi
+    case "$AWG_VER" in
+        1.0)
+            echo "# AWG 1.0 - Keenetic 4.2+: interface WireguardX wireguard asc ${OBF_JC} ${OBF_JMIN} ${OBF_JMAX} ${OBF_S1} ${OBF_S2} ${OBF_H1} ${OBF_H2} ${OBF_H3} ${OBF_H4}"
+            ;;
+        1.5)
+            echo "# AWG 1.5 - требует клиент с I1-I5 (Amnezia 4.x+, AmneziaWG 1.5+)"
+            ;;
+        2.0)
+            echo "# AWG 2.0 - требует Amnezia 4.8.12.9+ или AmneziaWG 2.0.0+"
+            ;;
+        wg)
+            echo "# WireGuard vanilla - совместим с любым WG клиентом"
+            ;;
+    esac
 }
 
 # --> AWG: QR-КОД КЛИЕНТСКОГО КОНФИГА <--
@@ -225,84 +382,141 @@ awg_next_free_ip() {
 }
 
 # --> AWG: УДАЛЕНИЕ PEER ИЗ КОНФИГА ПО ПУБЛИЧНОМУ КЛЮЧУ <--
+# - awk без зависимостей: буферизуем блоки [Peer], пропускаем совпавший -
 awg_remove_peer_by_pubkey() {
     local conf="$1" pub_key="$2"
-    if ! command -v python3 &>/dev/null; then
-        print_err "python3 не найден"
-        print_info "Установи через: Меню -> 1. Старт (boot_run ставит python3)"
-        return 1
-    fi
     local tmpfile
     tmpfile=$(mktemp)
-    python3 - "$conf" "$pub_key" "$tmpfile" << 'PYEOF'
-import sys
-conf_path, target_pub, out_path = sys.argv[1], sys.argv[2].strip(), sys.argv[3]
-with open(conf_path) as f:
-    lines = f.readlines()
-result, i = [], 0
-while i < len(lines):
-    line = lines[i]
-    if line.strip() == "[Peer]":
-        block, j = [line], i + 1
-        while j < len(lines):
-            if lines[j].strip().startswith("["): break
-            block.append(lines[j]); j += 1
-        pub = next((l.split("=",1)[1].strip() for l in block if l.strip().startswith("PublicKey")), "")
-        if pub == target_pub:
-            if result and result[-1].strip() == "": result.pop()
-            i = j; continue
-        result.extend(block); i = j; continue
-    result.append(line); i += 1
-with open(out_path, "w") as f:
-    f.writelines(result)
-PYEOF
+    # - потоковая awk логика: буфер только для [Peer], остальное печатается сразу -
+    # - pending[] копит пустые строки чтобы срезать их если следом идёт удаляемый блок -
+    awk -v target="$pub_key" '
+        function flush_buffer() {
+            if (!buf_active) return
+            has_match = 0
+            for (i = 1; i <= buf_len; i++) {
+                if (buf[i] ~ /^[[:space:]]*PublicKey[[:space:]]*=/) {
+                    split(buf[i], a, "=")
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", a[2])
+                    if (a[2] == target) { has_match = 1; break }
+                }
+            }
+            if (has_match) {
+                # - срезаем накопленные пустые строки перед удаляемым блоком -
+                while (pending_len > 0 && pending[pending_len] ~ /^[[:space:]]*$/) pending_len--
+            } else {
+                # - сначала выплюнем pending, потом сам блок -
+                for (i = 1; i <= pending_len; i++) print pending[i]
+                pending_len = 0
+                for (i = 1; i <= buf_len; i++) print buf[i]
+            }
+            buf_active = 0; buf_len = 0
+        }
+        BEGIN { buf_active = 0; buf_len = 0; pending_len = 0 }
+        /^\[Peer\][[:space:]]*$/ {
+            flush_buffer()
+            buf_active = 1
+            buf[++buf_len] = $0
+            next
+        }
+        /^\[/ {
+            flush_buffer()
+            for (i = 1; i <= pending_len; i++) print pending[i]
+            pending_len = 0
+            print
+            next
+        }
+        {
+            if (buf_active) {
+                buf[++buf_len] = $0
+            } else if ($0 ~ /^[[:space:]]*$/) {
+                pending[++pending_len] = $0
+            } else {
+                for (i = 1; i <= pending_len; i++) print pending[i]
+                pending_len = 0
+                print
+            }
+        }
+        END {
+            flush_buffer()
+            for (i = 1; i <= pending_len; i++) print pending[i]
+        }
+    ' "$conf" > "$tmpfile"
+
     if [[ -s "$tmpfile" ]]; then
         mv "$tmpfile" "$conf"; chmod 600 "$conf"
     else
-        print_err "Ошибка при обработке конфига"
+        print_err "Ошибка при обработке конфига (awk вернул пусто)"
         rm -f "$tmpfile"
         return 1
     fi
 }
 
 # --> AWG: УДАЛЕНИЕ PEER ПО ИМЕНИ (ФОЛБЕК) <--
+# - awk: ищем блок [Peer] с комментарием "# <name>" -
 awg_remove_peer_by_name() {
     local conf="$1" cname="$2"
-    if ! command -v python3 &>/dev/null; then
-        print_err "python3 не найден"
-        print_info "Установи через: Меню -> 1. Старт (boot_run ставит python3)"
-        return 1
-    fi
     local tmpfile
     tmpfile=$(mktemp)
-    python3 - "$conf" "$cname" "$tmpfile" << 'PYEOF'
-import sys
-conf_path, target_name, out_path = sys.argv[1], sys.argv[2].strip(), sys.argv[3]
-with open(conf_path) as f:
-    lines = f.readlines()
-result, i = [], 0
-while i < len(lines):
-    line = lines[i]
-    if line.strip() == "[Peer]":
-        block, j = [line], i + 1
-        while j < len(lines):
-            if lines[j].strip().startswith("["): break
-            block.append(lines[j]); j += 1
-        found = any(l.strip() == f"# {target_name}" for l in block)
-        if found:
-            if result and result[-1].strip() == "": result.pop()
-            i = j; continue
-        result.extend(block); i = j; continue
-    result.append(line); i += 1
-with open(out_path, "w") as f:
-    f.writelines(result)
-PYEOF
-    if [[ -s "$tmpfile" ]]; then
+    awk -v target="$cname" '
+        function flush_buffer() {
+            if (!buf_active) return
+            has_match = 0
+            for (i = 1; i <= buf_len; i++) {
+                line = buf[i]
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+                if (line == "# " target) { has_match = 1; break }
+            }
+            if (has_match) {
+                while (pending_len > 0 && pending[pending_len] ~ /^[[:space:]]*$/) pending_len--
+                found = 1
+            } else {
+                for (i = 1; i <= pending_len; i++) print pending[i]
+                pending_len = 0
+                for (i = 1; i <= buf_len; i++) print buf[i]
+            }
+            buf_active = 0; buf_len = 0
+        }
+        BEGIN { buf_active = 0; buf_len = 0; pending_len = 0; found = 0 }
+        /^\[Peer\][[:space:]]*$/ {
+            flush_buffer()
+            buf_active = 1
+            buf[++buf_len] = $0
+            next
+        }
+        /^\[/ {
+            flush_buffer()
+            for (i = 1; i <= pending_len; i++) print pending[i]
+            pending_len = 0
+            print
+            next
+        }
+        {
+            if (buf_active) {
+                buf[++buf_len] = $0
+            } else if ($0 ~ /^[[:space:]]*$/) {
+                pending[++pending_len] = $0
+            } else {
+                for (i = 1; i <= pending_len; i++) print pending[i]
+                pending_len = 0
+                print
+            }
+        }
+        END {
+            flush_buffer()
+            for (i = 1; i <= pending_len; i++) print pending[i]
+            exit (found ? 0 : 1)
+        }
+    ' "$conf" > "$tmpfile"
+    local awk_rc=$?
+
+    if [[ $awk_rc -eq 0 && -s "$tmpfile" ]]; then
         mv "$tmpfile" "$conf"; chmod 600 "$conf"
         print_ok "Блок [Peer] удалён по имени '${cname}'"
+        return 0
     else
         print_err "Не удалось найти блок '${cname}'"
         rm -f "$tmpfile"
+        return 1
     fi
 }
 
@@ -507,6 +721,24 @@ _awg_ensure_headers() {
     return 2
 }
 
+# --> AWG: ОПРЕДЕЛЕНИЕ UBUNTU CODENAME ДЛЯ PPA <--
+# - Amnezia PPA публикует под focal/jammy/noble, выбираем по Debian версии -
+# - Debian 11 → focal (glibc 2.31 совместимо) -
+# - Debian 12 → focal -
+# - Debian 13 → noble (для новых ядер 6.1+ и glibc 2.38+) -
+_awg_ppa_codename() {
+    local deb_ver=""
+    if [[ -f /etc/os-release ]]; then
+        deb_ver=$(grep "^VERSION_ID=" /etc/os-release | cut -d'"' -f2)
+    fi
+    case "$deb_ver" in
+        13|13.*) echo "noble" ;;
+        12|12.*) echo "focal" ;;
+        11|11.*) echo "focal" ;;
+        *) echo "focal" ;;
+    esac
+}
+
 # --> AWG: ДОБАВИТЬ PPA И УСТАНОВИТЬ ПАКЕТ <--
 # - GPG ключ + sources.list + apt install amneziawg -
 _awg_install_ppa_package() {
@@ -531,24 +763,55 @@ _awg_install_ppa_package() {
     rm -f /etc/apt/sources.list.d/amnezia.list \
           /etc/apt/sources.list.d/amneziawg.list
 
-    cat > /etc/apt/sources.list.d/amnezia.list << 'REPOEOF'
-deb [signed-by=/usr/share/keyrings/amnezia.gpg] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main
-deb-src [signed-by=/usr/share/keyrings/amnezia.gpg] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main
+    local ppa_codename
+    ppa_codename=$(_awg_ppa_codename)
+    print_info "PPA codename: ${ppa_codename}"
+
+    cat > /etc/apt/sources.list.d/amnezia.list << REPOEOF
+deb [signed-by=/usr/share/keyrings/amnezia.gpg] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu ${ppa_codename} main
+deb-src [signed-by=/usr/share/keyrings/amnezia.gpg] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu ${ppa_codename} main
 REPOEOF
 
+    # - бэкап sources.list перед модификацией для возможности rollback -
+    local src_list_bak=""
+    local src_modified="no"
     if [[ -f /etc/apt/sources.list ]]; then
         if ! grep -q "^deb-src" /etc/apt/sources.list; then
+            src_list_bak="/etc/apt/sources.list.bak.awg.$(date +%s)"
+            cp /etc/apt/sources.list "$src_list_bak"
             local _src_lines
             _src_lines=$(grep "^deb " /etc/apt/sources.list | sed 's/^deb /deb-src /')
-            echo "$_src_lines" >> /etc/apt/sources.list
+            if [[ -n "$_src_lines" ]]; then
+                echo "$_src_lines" >> /etc/apt/sources.list
+                src_modified="yes"
+                print_info "sources.list: добавлены deb-src (бэкап: ${src_list_bak})"
+            fi
         fi
     fi
 
-    apt-get update -qq
-    if ! apt-get install -y amneziawg; then
-        print_err "Не удалось установить пакет amneziawg"
+    if ! apt-get update -qq; then
+        # - rollback sources.list при ошибке apt update -
+        if [[ "$src_modified" == "yes" && -f "$src_list_bak" ]]; then
+            mv "$src_list_bak" /etc/apt/sources.list
+            print_warn "apt update упал, sources.list восстановлен"
+        fi
+        rm -f /etc/apt/sources.list.d/amnezia.list
         return 1
     fi
+
+    if ! apt-get install -y amneziawg; then
+        print_err "Не удалось установить пакет amneziawg"
+        # - rollback при ошибке install -
+        if [[ "$src_modified" == "yes" && -f "$src_list_bak" ]]; then
+            mv "$src_list_bak" /etc/apt/sources.list
+            apt-get update -qq 2>/dev/null || true
+            print_warn "sources.list восстановлен (бэкап убран)"
+        fi
+        return 1
+    fi
+
+    # - успех, удаляем бэкап sources.list -
+    [[ -n "$src_list_bak" && -f "$src_list_bak" ]] && rm -f "$src_list_bak"
     print_ok "Пакет amneziawg установлен"
     return 0
 }
@@ -850,15 +1113,16 @@ SYSEOF
         print_section "Параметры обфускации"
         local obf_auto=""
         ask_yn "Сгенерировать параметры автоматически?" "y" obf_auto
-        if [[ "$AWG_VER" == "2.0" ]]; then
-            _awg_gen_obf_v2 "$obf_auto"
-        else
-            _awg_gen_obf_v1 "$obf_auto"
-        fi
+        case "$AWG_VER" in
+            2.0) _awg_gen_obf_v2  "$obf_auto" ;;
+            1.5) _awg_gen_obf_v15 "$obf_auto" ;;
+            *)   _awg_gen_obf_v1  "$obf_auto" ;;
+        esac
         print_ok "Параметры сгенерированы (AWG ${AWG_VER})"
         print_info "Jc=${OBF_JC} Jmin=${OBF_JMIN} Jmax=${OBF_JMAX} S1=${OBF_S1} S2=${OBF_S2}"
         [[ -n "$OBF_S3" ]] && print_info "S3=${OBF_S3} S4=${OBF_S4}"
         print_info "H1=${OBF_H1} H2=${OBF_H2} H3=${OBF_H3} H4=${OBF_H4}"
+        [[ -n "$OBF_I1" ]] && print_info "I1-I5: заданы (signature chain)"
     fi
 
     # -- КЛИЕНТЫ --
@@ -1293,11 +1557,11 @@ awg_create_iface() {
     else
         local gen_obf=""
         ask_yn "Сгенерировать параметры обфускации автоматически?" "y" gen_obf
-        if [[ "$AWG_VER" == "2.0" ]]; then
-            _awg_gen_obf_v2 "$gen_obf"
-        else
-            _awg_gen_obf_v1 "$gen_obf"
-        fi
+        case "$AWG_VER" in
+            2.0) _awg_gen_obf_v2  "$gen_obf" ;;
+            1.5) _awg_gen_obf_v15 "$gen_obf" ;;
+            *)   _awg_gen_obf_v1  "$gen_obf" ;;
+        esac
     fi
 
     # - генерация ключей и конфига -
@@ -1543,6 +1807,8 @@ awg_add_client() {
     OBF_JC="$JC"; OBF_JMIN="$JMIN"; OBF_JMAX="$JMAX"
     OBF_S1="$S1"; OBF_S2="$S2"; OBF_S3="${S3:-}"; OBF_S4="${S4:-}"
     OBF_H1="$H1"; OBF_H2="$H2"; OBF_H3="$H3"; OBF_H4="$H4"
+    OBF_I1="${I1:-}"; OBF_I2="${I2:-}"; OBF_I3="${I3:-}"
+    OBF_I4="${I4:-}"; OBF_I5="${I5:-}"
     local tunnel_mtu="${TUNNEL_MTU:-1320}"
     local srv_pub
     srv_pub=$(cat "$(awg_iface_keys "$iface")/server.pub")
