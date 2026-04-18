@@ -20,8 +20,14 @@ _mtp_gen_secret() {
     head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n'
 }
 
+# - guard на пустой домен, иначе tg-ссылка получит пустой хвост и клиент отвалит -
 _mtp_domain_hex() {
-    echo -n "$1" | od -An -tx1 | tr -d ' \n'
+    local d="$1"
+    if [[ -z "$d" ]]; then
+        # - fallback на www.google.com если пусто (для Fake TLS требуется SNI) -
+        d="www.google.com"
+    fi
+    echo -n "$d" | od -An -tx1 | tr -d ' \n'
 }
 
 _mtp_next_id() {
@@ -65,7 +71,7 @@ _mtp_rebuild_container() {
         --name "${CONTAINER}" \
         --restart always \
         --network host \
-        "seriyps/mtproto-proxy" \
+        "seriyps/mtproto-proxy:0.8.4" \
         -p "${PORT}" \
         "${secret_args[@]}" \
         -t "${effective_tag}" \
@@ -229,6 +235,10 @@ mtp_remove_secret() {
 
     local sf; sf=$(_mtp_secrets_file "$inst_id")
     [[ ! -f "$sf" || ! -s "$sf" ]] && { print_warn "Нет секретов"; return 0; }
+
+    # - sed -i "${sel}d" работает по физическим строкам, отображение пропускает пустые -
+    # - убираем пустые строки до выбора, чтобы нумерация совпадала-
+    sed -i '/^[[:space:]]*$/d' "$sf"
 
     local count; count=$(wc -l < "$sf")
     [[ "$count" -le 1 ]] && { print_err "Последний секрет. Удали инстанс целиком."; return 0; }
@@ -426,7 +436,7 @@ s5_add() {
     local user="" pass=""
     user="user$(rand_str 4)"
     pass="$(rand_str 16)"
-    echo -e "  ${CYAN}Логин и пароль для подключения к прокси. Сгенерированы автоматически — можешь изменить.${NC}"
+    echo -e "  ${CYAN}Логин и пароль для подключения к прокси. Сгенерированы автоматически их можно изменить.${NC}"
     ask "Логин" "$user" user
     ask "Пароль" "$pass" pass
     [[ -z "$user" || -z "$pass" ]] && { print_err "Логин и пароль обязательны"; return 1; }
@@ -443,7 +453,7 @@ s5_add() {
         -p "${port}:1080" \
         -e "PROXY_USER=${user}" \
         -e "PROXY_PASSWORD=${pass}" \
-        serjs/go-socks5-proxy; then
+        serjs/go-socks5-proxy:v0.0.4; then
         print_err "Не удалось запустить контейнер"
         return 1
     fi
@@ -629,6 +639,13 @@ _hy2_migrate_legacy() {
     mv "$old_env" "${idir}/hysteria.env"
     [[ -f "${HY2_DIR}/config.yaml" ]] && rm -f "${HY2_DIR}/config.yaml"
 
+    # - guard на пустой AUTH_PASS (иначе получаем "admin" без пароля) -
+    if [[ -z "${AUTH_PASS:-}" ]]; then
+        AUTH_PASS="$(rand_str 16)"
+        print_warn "AUTH_PASS в legacy env пуст, сгенерирован новый: ${AUTH_PASS}"
+        # - дописать в instance env, чтобы следующие перезапуски знали пароль -
+        echo "AUTH_PASS=\"${AUTH_PASS}\"" >> "${idir}/hysteria.env"
+    fi
     echo "admin:${AUTH_PASS}" > "${idir}/users.list"; chmod 600 "${idir}/users.list"
     _hy2_gen_config "1"
 
@@ -849,6 +866,9 @@ hy2_remove_user() {
     local uf; uf=$(_hy2_users_file "$inst_id")
     [[ ! -f "$uf" || ! -s "$uf" ]] && { print_warn "Нет пользователей"; return 0; }
 
+    # - чистим пустые строки, чтобы sel совпадал с sed номерами строк -
+    sed -i '/^[[:space:]]*$/d' "$uf"
+
     local count; count=$(wc -l < "$uf")
     [[ "$count" -le 1 ]] && { print_err "Последний. Удали инстанс целиком."; return 0; }
 
@@ -1024,7 +1044,16 @@ sig_install() {
 
     # - запуск -
     print_section "Запуск Signal Proxy"
-    if ! docker compose up --detach 2>/dev/null && ! docker-compose up --detach 2>/dev/null; then
+    # - логика `docker compose up && ! docker-compose up` была инвертирована -
+    # - true если compose v2 упал И v1 вернул 0 (бред ебаный?) -
+    # - юзаем v2, не получилось -> юзаем v1, если оба мимо -> fail -
+    local sig_up_ok="no"
+    if docker compose up --detach 2>/dev/null; then
+        sig_up_ok="yes"
+    elif docker-compose up --detach 2>/dev/null; then
+        sig_up_ok="yes"
+    fi
+    if [[ "$sig_up_ok" != "yes" ]]; then
         print_err "Не удалось запустить Signal Proxy"
         return 1
     fi
