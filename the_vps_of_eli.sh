@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
-# The VPS of Eli v3.141
+# The VPS of Eli v3.236
 # Мега-менеджер VPS стека: VPN, связь, обслуживание
 # scrp by ERITEK & Loo1, Claude (Anthropic)
-# Собран: 2026-04-15
+# Собран: 2026-04-18 release
 # =============================================================================
 
 
 # === 00_header.sh ===
 # --> ЗАГОЛОВОК СКРИПТА <--
-# - The VPS of Eli v3.141: общие функции, переменные, book блок -
+# - The VPS of Eli v3.236: общие функции, переменные, book блок -
 
 # - проверка bash -
 if [ -z "$BASH_VERSION" ]; then
@@ -28,7 +28,7 @@ if ! flock -n 200; then
     exit 1
 fi
 
-ELI_VERSION="3.141"
+ELI_VERSION="3.236"
 # shellcheck disable=SC2034
 ELI_CODENAME="The VPS of Eli" # - используется в баннере и book -
 
@@ -144,6 +144,15 @@ cidr_base() {
 
 # --> РАНДОМ <--
 # - генерация случайных значений для обфускации и портов -
+_rand_bits30() {
+    local span="$1"
+    [[ -z "$span" || "$span" -le 0 ]] && { echo 0; return; }
+    local r
+    r=$(od -An -N4 -tu4 < /dev/urandom 2>/dev/null | tr -d ' ')
+    [[ -z "$r" ]] && r=$(( (RANDOM << 15) | RANDOM ))
+    echo $(( r % span ))
+}
+
 rand_h() {
     printf '%u\n' $(( (RANDOM << 16 | RANDOM) % 2147483647 + 1 ))
 }
@@ -151,25 +160,41 @@ rand_h() {
 # - диапазон H для AWG 2.0: возвращает "min-max" внутри сегмента [lo, hi] -
 rand_h_range() {
     local lo="$1" hi="$2"
+    if [[ -z "$lo" || -z "$hi" || "$lo" -ge "$hi" ]]; then
+        echo "${lo:-0}-${hi:-0}"; return 1
+    fi
     local mid=$(( (lo + hi) / 2 ))
-    local mn=$(( lo + RANDOM % (mid - lo + 1) ))
-    local mx=$(( mid + 1 + RANDOM % (hi - mid) ))
+    local span_lo=$(( mid - lo + 1 ))
+    local span_hi=$(( hi - mid ))
+    local mn=$(( lo + $(_rand_bits30 "$span_lo") ))
+    local mx=$(( mid + 1 + $(_rand_bits30 "$span_hi") ))
     echo "${mn}-${mx}"
 }
 
+# - guard на $1 > $2, иначе RANDOM % 0 -> shell падает -
 rand_range() {
-    echo $(( RANDOM % ($2 - $1 + 1) + $1 ))
+    local lo="$1" hi="$2"
+    if [[ -z "$lo" || -z "$hi" ]]; then echo 0; return 1; fi
+    if [[ "$lo" -gt "$hi" ]]; then local t="$lo"; lo="$hi"; hi="$t"; fi
+    [[ "$lo" -eq "$hi" ]] && { echo "$lo"; return 0; }
+    echo $(( RANDOM % (hi - lo + 1) + lo ))
 }
 
+# - таймаут 100 попыток -
 rand_port() {
     local low="${1:-10000}" high="${2:-60000}" port
-    while true; do
+    local attempts=0 max_attempts=100
+    while (( attempts < max_attempts )); do
         port=$(( RANDOM % (high - low + 1) + low ))
         if ! ss -ulnp 2>/dev/null | grep -q ":${port} " && \
            ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
-            echo "$port"; return
+            echo "$port"; return 0
         fi
+        (( attempts++ ))
     done
+    # - исчерпали попытки, возвращаем последний сгенерированный -
+    echo "$port"
+    return 1
 }
 
 rand_str() {
@@ -189,9 +214,17 @@ rand_path() {
 # - ВНИМАНИЕ: рассчитана на подсети вида 10.X.0.0/24 (схема AWG)
 # - сравнивает первые три октета, этого достаточно для автогенерируемых /24
 # - net2 может содержать несколько CIDR через пробел
+# - при не-/24 выводим предупреждение в stderr -
 subnets_overlap() {
     local net1="$1" net2="$2"
     [[ -z "$net1" || -z "$net2" ]] && return 1
+    # - предупреждение если net1 не /24 -
+    if [[ "$net1" =~ /([0-9]+)$ ]]; then
+        local mask="${BASH_REMATCH[1]}"
+        if [[ "$mask" != "24" ]]; then
+            echo "  WARN: subnets_overlap рассчитана на /24, net1=${net1} (маска /${mask})" >&2
+        fi
+    fi
     local base1
     base1=$(echo "$net1" | cut -d'/' -f1 | sed 's/\.[0-9]*$//')
     local cidr
@@ -506,10 +539,11 @@ net.ipv4.tcp_congestion_control=bbr
 EOBBR
     print_ok "99-bbr.conf записан"
 
-    # - conntrack_max = 5% RAM / 300 байт на запись -
+    # - conntrack_max = 5% RAM / 300 байт на запись, минимум 65536 -
     local ram_mb conntrack_max
     ram_mb=$(free -m | awk '/^Mem:/{print $2}')
     conntrack_max=$(( ram_mb * 1024 * 1024 * 5 / 100 / 300 ))
+    [[ "$conntrack_max" -lt 65536 ]] && conntrack_max=65536
     print_info "RAM: ${ram_mb} MB -> nf_conntrack_max = ${conntrack_max}"
 
     # - VPN tune -
@@ -659,7 +693,7 @@ boot_setup_fd_limits() {
 
     # - limits.conf: для PAM сессий (SSH, su) -
     # - ВНИМАНИЕ: проверяем строго по паттерну "* soft nofile" -
-    # - слово "nofile" есть в системных комментариях файла, grep без якоря даёт ложный результат -
+    # - grep без якоря даёт ложный результат -
     if ! grep -qE "^\*[[:space:]]+soft[[:space:]]+nofile" /etc/security/limits.conf 2>/dev/null; then
         cat >> /etc/security/limits.conf << 'EOLIMITS'
 # VPS Stack: file descriptors для VPN + Docker
@@ -809,7 +843,7 @@ boot_run() {
     9. Инициализация книги (book_of_Eli - хранилище настроек стека)
 
   После завершения потребуется перезагрузка (reboot).
-  Время выполнения: 3-10 минут в зависимости от сервера."
+  Время выполнения: 3-5 минут в зависимости от сервера."
 
     local confirm=""
     ask_yn "Запустить первичную настройку?" "y" confirm
@@ -873,24 +907,33 @@ AWG_ACTIVE_IFACE=""
 AWG_VER=""
 
 # --> AWG: ВЫБОР ВЕРСИИ ПРОТОКОЛА <--
-# - AWG 1.0 (classic) vs AWG 2.0 (ranged headers, S3/S4) vs WG vanilla -
+# - AWG 1.0 (H+S1/S2) vs AWG 1.5 (+ I1-I5) vs AWG 2.0 (+ ranged H, S3/S4, I1-I5) vs WG -
+# - P/S хелпа AWG написана идиотом, куском гуманитарного шлепка блядь -
 _awg_ask_version() {
     echo ""
     echo -e "  ${BOLD}Версия протокола:${NC}"
-    echo -e "  ${GREEN}1)${NC} AWG 1.0 (classic) - совместим с Keenetic 4.2+, OpenWrt, все клиенты"
-    echo -e "  ${GREEN}2)${NC} AWG 2.0 - улучшенная обфускация, ranged H, S3/S4"
-    echo -e "  ${GREEN}3)${NC} WireGuard (vanilla) - без обфускации, максимальная совместимость"
+    echo -e "  ${GREEN}1)${NC} AWG 1.0 (classic) - H1-H4 + S1/S2 + Jc/Jmin/Jmax"
+    echo -e "     ${CYAN}Совместим с Keenetic 4.2+, OpenWrt, все старые клиенты.${NC}"
+    echo -e "  ${GREEN}2)${NC} AWG 1.5 - + I1-I5 (signature chain/CPS)"
+    echo -e "     ${CYAN}Маскировка хендшейка под реальный протокол (QUIC/DNS).${NC}"
+    echo -e "  ${GREEN}3)${NC} AWG 2.0 - 1.5 + ranged H + S3/S4"
+    echo -e "     ${CYAN}Keenetic 5.1+, Amnezia 4.8.12.9+. Максимальная обфускация.${NC}"
+    echo -e "  ${GREEN}4)${NC} WireGuard vanilla - без обфускации"
+    echo -e "     ${CYAN}Совместим с любым WG клиентом.${NC}"
     while true; do
         echo -ne "  ${BOLD}Выбор?${NC} "; read -r _awg_ver_ch
         case "$_awg_ver_ch" in
             1) AWG_VER="1.0"; break ;;
-            2) AWG_VER="2.0"
-               print_warn "Проверь роутер на поддержку обфускации 2.0"
+            2) AWG_VER="1.5"
+               print_info "AWG 1.5 требует клиент с поддержкой I1-I5"
                break ;;
-            3) AWG_VER="wg"
+            3) AWG_VER="2.0"
+               print_info "AWG 2.0 требует Amnezia 4.8.12.9+ или AmneziaWG 2.0.0+"
+               break ;;
+            4) AWG_VER="wg"
                print_info "Обфускация отключена, все клиенты WireGuard совместимы"
                break ;;
-            *) print_warn "1, 2 или 3" ;;
+            *) print_warn "1, 2, 3 или 4" ;;
         esac
     done
 }
@@ -914,17 +957,98 @@ _awg_gen_obf_common() {
         print_info "Правила: Jmin < Jmax, S1+56 != S2, H1-H4 разные"
         echo -e "  ${CYAN}Jc - кол-во мусорных пакетов (больше = сложнее распознать VPN, но чуть больше трафика).${NC}"
         echo -e "  ${CYAN}Jmin/Jmax - диапазон размера мусорных пакетов в байтах.${NC}"
-        echo -e "  ${CYAN}S1/S2 - сдвиг заголовков пакетов (влияет на маскировку, S1+56 не должно равняться S2).${NC}"
+        echo -e "  ${CYAN}S1/S2 - сдвиг заголовков пакетов (влияет на маскировку, S1+56 не равно S2).${NC}"
         ask "Jc (3-10)" "5" OBF_JC; ask "Jmin (50-150)" "64" OBF_JMIN; ask "Jmax (500-1000)" "1000" OBF_JMAX
         ask "S1 (15-40)" "20" OBF_S1; ask "S2 (15-40, != S1+56)" "20" OBF_S2
     fi
 }
 
-# - AWG 1.0: H1-H4 одиночные значения -
+# --> AWG: ПРЕСЕТЫ CPS ДЛЯ I1 (реальные hex snapshots) <--
+# - I1 должен выглядеть как начало реального UDP-протокола для DPI-маскировки -
+# - взято из публичных примеров доки Amnezia и протокольных спецификаций -
+_awg_cps_preset_quic() {
+    # - QUIC Initial (RFC 9000) - маскирует под HTTP/3 -
+    echo "<b 0xc000000001><r 18><b 0x00><r 8><b 0x00040000040000000400><r 1100>"
+}
+
+_awg_cps_preset_dns() {
+    # - DNS query (example) - маскирует под обычный DNS запрос -
+    echo "<r 2><b 0x0100000100000000000003777777076578616d706c6503636f6d0000010001>"
+}
+
+_awg_cps_preset_stun() {
+    # - STUN binding request (RFC 5389) - маскирует под STUN (WebRTC) -
+    echo "<b 0x000100002112a442><r 12>"
+}
+
+# - случайная CPS-строка для I2-I5: разнообразные теги для энтропии -
+_awg_cps_random() {
+    local idx="$1"
+    case "$idx" in
+        2) echo "<r 32><t>" ;;
+        3) echo "<rd 16><r 24>" ;;
+        4) echo "<t><rc 20>" ;;
+        5) echo "<r $(rand_range 16 48)>" ;;
+        *) echo "<r 24>" ;;
+    esac
+}
+
+# --> AWG: ГЕНЕРАЦИЯ I1-I5 <--
+# - auto: гибрид - I1 из пресета QUIC/DNS/STUN, I2-I5 случайные теги -
+# - manual: запрос ручного ввода с возможностью "пропустить" через пустую строку -
+_awg_gen_i_packets() {
+    local auto="$1"
+    OBF_I1=""; OBF_I2=""; OBF_I3=""; OBF_I4=""; OBF_I5=""
+
+    if [[ "$auto" == "yes" ]]; then
+        # - гибрид: случайный пресет для I1, случайные CPS для I2-I5 -
+        local presets=("quic" "dns" "stun")
+        local p="${presets[$(( RANDOM % 3 ))]}"
+        case "$p" in
+            quic) OBF_I1=$(_awg_cps_preset_quic) ;;
+            dns)  OBF_I1=$(_awg_cps_preset_dns) ;;
+            stun) OBF_I1=$(_awg_cps_preset_stun) ;;
+        esac
+        OBF_I2=$(_awg_cps_random 2)
+        OBF_I3=$(_awg_cps_random 3)
+        OBF_I4=$(_awg_cps_random 4)
+        OBF_I5=$(_awg_cps_random 5)
+        print_info "I1 пресет: ${p}, I2-I5 случайные"
+    else
+        echo ""
+        echo -e "  ${CYAN}I1-I5 - signature chain (CPS). I1 обязателен (иначе AWG работает как 1.0).${NC}"
+        echo -e "  ${CYAN}Формат: <b 0xHEX> - статичные байты, <r N> - случайные, <rd N> - цифры, <rc N> - буквы, <t> - timestamp.${NC}"
+        echo -e "  ${CYAN}Оставь пустым для пропуска пакета. I1 пустой = отключение CPS целиком.${NC}"
+        echo ""
+        echo -e "  ${BOLD}Готовые пресеты для I1:${NC}"
+        echo -e "  ${GREEN}q)${NC} QUIC Initial (маскировка под HTTP/3)"
+        echo -e "  ${GREEN}d)${NC} DNS query (маскировка под DNS)"
+        echo -e "  ${GREEN}s)${NC} STUN (маскировка под WebRTC)"
+        echo -e "  ${GREEN}m)${NC} Ввести вручную"
+        local _ch=""
+        while true; do
+            echo -ne "  ${BOLD}Выбор для I1?${NC} [q]: "; read -r _ch
+            case "${_ch:-q}" in
+                q|Q) OBF_I1=$(_awg_cps_preset_quic); break ;;
+                d|D) OBF_I1=$(_awg_cps_preset_dns); break ;;
+                s|S) OBF_I1=$(_awg_cps_preset_stun); break ;;
+                m|M) ask "I1 (CPS)" "" OBF_I1; break ;;
+                *) print_warn "q, d, s или m" ;;
+            esac
+        done
+        ask "I2 (CPS, пусто = пропустить)" "$(_awg_cps_random 2)" OBF_I2
+        ask "I3 (CPS, пусто = пропустить)" "$(_awg_cps_random 3)" OBF_I3
+        ask "I4 (CPS, пусто = пропустить)" "$(_awg_cps_random 4)" OBF_I4
+        ask "I5 (CPS, пусто = пропустить)" "$(_awg_cps_random 5)" OBF_I5
+    fi
+}
+
+# - AWG 1.0: H1-H4 одиночные значения, без I1-I5 -
 _awg_gen_obf_v1() {
     local auto="$1"
     _awg_gen_obf_common "$auto"
     OBF_S3=""; OBF_S4=""
+    OBF_I1=""; OBF_I2=""; OBF_I3=""; OBF_I4=""; OBF_I5=""
     if [[ "$auto" == "yes" ]]; then
         OBF_H1=$(rand_h); OBF_H2=$(rand_h); OBF_H3=$(rand_h); OBF_H4=$(rand_h)
         while [[ "$OBF_H2" == "$OBF_H1" ]]; do OBF_H2=$(rand_h); done
@@ -936,7 +1060,28 @@ _awg_gen_obf_v1() {
     fi
 }
 
-# - AWG 2.0: S3/S4 + H1-H4 диапазоны (min-max) -
+# - AWG 1.5: H1-H4 одиночные + I1-I5 -
+_awg_gen_obf_v15() {
+    local auto="$1"
+    _awg_gen_obf_v1 "$auto"
+    _awg_gen_i_packets "$auto"
+}
+
+# - проверка пересечения диапазонов "min-max": возвращает 0 если пересекаются -
+_awg_ranges_overlap() {
+    local a="$1" b="$2"
+    local a_lo a_hi b_lo b_hi
+    a_lo="${a%-*}"; a_hi="${a#*-}"
+    b_lo="${b%-*}"; b_hi="${b#*-}"
+    [[ -z "$a_lo" || -z "$b_lo" ]] && return 1
+    # - пересекаются если a_lo <= b_hi && b_lo <= a_hi -
+    if [[ "$a_lo" -le "$b_hi" && "$b_lo" -le "$a_hi" ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# - AWG 2.0: S3/S4 + ranged H1-H4 + I1-I5 -
 _awg_gen_obf_v2() {
     local auto="$1"
     _awg_gen_obf_common "$auto"
@@ -961,11 +1106,33 @@ _awg_gen_obf_v2() {
         ask "S3 (15-40)" "20" OBF_S3; ask "S4 (15-40)" "20" OBF_S4
         echo -e "  ${CYAN}H1-H4 - диапазоны магических чисел в формате min-max.${NC}"
         echo -e "  ${CYAN}Диапазоны не должны пересекаться между собой.${NC}"
-        ask "H1 (min-max)" "1000-50000" OBF_H1
-        ask "H2 (min-max)" "100000-500000" OBF_H2
-        ask "H3 (min-max)" "1000000-5000000" OBF_H3
-        ask "H4 (min-max)" "10000000-50000000" OBF_H4
+        local _att=0
+        while true; do
+            ask "H1 (min-max)" "1000-50000" OBF_H1
+            ask "H2 (min-max)" "100000-500000" OBF_H2
+            ask "H3 (min-max)" "1000000-5000000" OBF_H3
+            ask "H4 (min-max)" "10000000-50000000" OBF_H4
+            # - проверяем все пары на пересечение -
+            local _overlap="no"
+            for _pair in "H1:H2" "H1:H3" "H1:H4" "H2:H3" "H2:H4" "H3:H4"; do
+                local _a="${_pair%:*}" _b="${_pair#*:}"
+                # - nameref: ссылки на OBF_H1..H4 без eval -
+                local -n _av_ref="OBF_${_a}"
+                local -n _bv_ref="OBF_${_b}"
+                if _awg_ranges_overlap "$_av_ref" "$_bv_ref"; then
+                    print_err "Диапазоны ${_a}(${_av_ref}) и ${_b}(${_bv_ref}) пересекаются"
+                    _overlap="yes"
+                    unset -n _av_ref _bv_ref
+                    break
+                fi
+                unset -n _av_ref _bv_ref
+            done
+            [[ "$_overlap" == "no" ]] && break
+            (( _att++ )); [[ $_att -ge 3 ]] && { print_warn "Оставляю как есть"; break; }
+        done
     fi
+    # - I1-I5 для v2 -
+    _awg_gen_i_packets "$auto"
 }
 
 # - WireGuard vanilla: все параметры обнулены, совместимость со стандартным WG -
@@ -973,10 +1140,14 @@ _awg_gen_obf_wg() {
     OBF_JC=0; OBF_JMIN=0; OBF_JMAX=0
     OBF_S1=0; OBF_S2=0; OBF_S3=""; OBF_S4=""
     OBF_H1=1; OBF_H2=2; OBF_H3=3; OBF_H4=4
+    OBF_I1=""; OBF_I2=""; OBF_I3=""; OBF_I4=""; OBF_I5=""
 }
 
 # - блок обфускации для .conf (server и client) -
 _awg_obf_conf_lines() {
+    if [[ "${AWG_VER}" == "wg" ]]; then
+        return 0
+    fi
     echo "Jc = ${OBF_JC}"
     echo "Jmin = ${OBF_JMIN}"
     echo "Jmax = ${OBF_JMAX}"
@@ -988,6 +1159,12 @@ _awg_obf_conf_lines() {
     echo "H2 = ${OBF_H2}"
     echo "H3 = ${OBF_H3}"
     echo "H4 = ${OBF_H4}"
+    [[ -n "$OBF_I1" ]] && echo "I1 = ${OBF_I1}"
+    [[ -n "$OBF_I2" ]] && echo "I2 = ${OBF_I2}"
+    [[ -n "$OBF_I3" ]] && echo "I3 = ${OBF_I3}"
+    [[ -n "$OBF_I4" ]] && echo "I4 = ${OBF_I4}"
+    [[ -n "$OBF_I5" ]] && echo "I5 = ${OBF_I5}"
+    return 0
 }
 
 # - блок обфускации для env файла -
@@ -1004,17 +1181,31 @@ _awg_obf_env_lines() {
     echo "H2=\"${OBF_H2}\""
     echo "H3=\"${OBF_H3}\""
     echo "H4=\"${OBF_H4}\""
+    # - I1-I5 экранируем двойные кавычки внутри CPS-строк для безопасного source -
+    [[ -n "$OBF_I1" ]] && echo "I1=\"${OBF_I1//\"/\\\"}\""
+    [[ -n "$OBF_I2" ]] && echo "I2=\"${OBF_I2//\"/\\\"}\""
+    [[ -n "$OBF_I3" ]] && echo "I3=\"${OBF_I3//\"/\\\"}\""
+    [[ -n "$OBF_I4" ]] && echo "I4=\"${OBF_I4//\"/\\\"}\""
+    [[ -n "$OBF_I5" ]] && echo "I5=\"${OBF_I5//\"/\\\"}\""
+    return 0
 }
 
-# - заголовок Keenetic asc (только 1.0) или предупреждение (2.0) или WG -
+# - заголовок-комментарий для клиентского .conf -
 _awg_client_header_comment() {
-    if [[ "$AWG_VER" == "1.0" ]]; then
-        echo "# Keenetic: interface WireguardX wireguard asc ${OBF_JC} ${OBF_JMIN} ${OBF_JMAX} ${OBF_S1} ${OBF_S2} ${OBF_H1} ${OBF_H2} ${OBF_H3} ${OBF_H4}"
-    elif [[ "$AWG_VER" == "2.0" ]]; then
-        echo "# AWG 2.0 - Keenetic 4.2 не поддерживает S3/S4 и ranged H"
-    else
-        echo "# WireGuard vanilla - совместим с любым WG клиентом"
-    fi
+    case "$AWG_VER" in
+        1.0)
+            echo "# AWG 1.0 - Keenetic 4.2+: interface WireguardX wireguard asc ${OBF_JC} ${OBF_JMIN} ${OBF_JMAX} ${OBF_S1} ${OBF_S2} ${OBF_H1} ${OBF_H2} ${OBF_H3} ${OBF_H4}"
+            ;;
+        1.5)
+            echo "# AWG 1.5 - требует клиент с I1-I5 (Amnezia 4.x+, AmneziaWG 1.5+)"
+            ;;
+        2.0)
+            echo "# AWG 2.0 - требует Amnezia 4.8.12.9+ или AmneziaWG 2.0.0+"
+            ;;
+        wg)
+            echo "# WireGuard vanilla - совместим с любым WG клиентом"
+            ;;
+    esac
 }
 
 # --> AWG: QR-КОД КЛИЕНТСКОГО КОНФИГА <--
@@ -1090,84 +1281,141 @@ awg_next_free_ip() {
 }
 
 # --> AWG: УДАЛЕНИЕ PEER ИЗ КОНФИГА ПО ПУБЛИЧНОМУ КЛЮЧУ <--
+# - awk без зависимостей: буферизуем блоки [Peer], пропускаем совпавший -
 awg_remove_peer_by_pubkey() {
     local conf="$1" pub_key="$2"
-    if ! command -v python3 &>/dev/null; then
-        print_err "python3 не найден"
-        print_info "Установи через: Меню -> 1. Старт (boot_run ставит python3)"
-        return 1
-    fi
     local tmpfile
     tmpfile=$(mktemp)
-    python3 - "$conf" "$pub_key" "$tmpfile" << 'PYEOF'
-import sys
-conf_path, target_pub, out_path = sys.argv[1], sys.argv[2].strip(), sys.argv[3]
-with open(conf_path) as f:
-    lines = f.readlines()
-result, i = [], 0
-while i < len(lines):
-    line = lines[i]
-    if line.strip() == "[Peer]":
-        block, j = [line], i + 1
-        while j < len(lines):
-            if lines[j].strip().startswith("["): break
-            block.append(lines[j]); j += 1
-        pub = next((l.split("=",1)[1].strip() for l in block if l.strip().startswith("PublicKey")), "")
-        if pub == target_pub:
-            if result and result[-1].strip() == "": result.pop()
-            i = j; continue
-        result.extend(block); i = j; continue
-    result.append(line); i += 1
-with open(out_path, "w") as f:
-    f.writelines(result)
-PYEOF
+    # - потоковая awk логика: буфер только для [Peer], остальное печатается сразу -
+    # - pending[] копит пустые строки чтобы срезать их если следом идёт удаляемый блок -
+    awk -v target="$pub_key" '
+        function flush_buffer() {
+            if (!buf_active) return
+            has_match = 0
+            for (i = 1; i <= buf_len; i++) {
+                if (buf[i] ~ /^[[:space:]]*PublicKey[[:space:]]*=/) {
+                    split(buf[i], a, "=")
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", a[2])
+                    if (a[2] == target) { has_match = 1; break }
+                }
+            }
+            if (has_match) {
+                # - срезаем накопленные пустые строки перед удаляемым блоком -
+                while (pending_len > 0 && pending[pending_len] ~ /^[[:space:]]*$/) pending_len--
+            } else {
+                # - сначала выплюнем pending, потом сам блок -
+                for (i = 1; i <= pending_len; i++) print pending[i]
+                pending_len = 0
+                for (i = 1; i <= buf_len; i++) print buf[i]
+            }
+            buf_active = 0; buf_len = 0
+        }
+        BEGIN { buf_active = 0; buf_len = 0; pending_len = 0 }
+        /^\[Peer\][[:space:]]*$/ {
+            flush_buffer()
+            buf_active = 1
+            buf[++buf_len] = $0
+            next
+        }
+        /^\[/ {
+            flush_buffer()
+            for (i = 1; i <= pending_len; i++) print pending[i]
+            pending_len = 0
+            print
+            next
+        }
+        {
+            if (buf_active) {
+                buf[++buf_len] = $0
+            } else if ($0 ~ /^[[:space:]]*$/) {
+                pending[++pending_len] = $0
+            } else {
+                for (i = 1; i <= pending_len; i++) print pending[i]
+                pending_len = 0
+                print
+            }
+        }
+        END {
+            flush_buffer()
+            for (i = 1; i <= pending_len; i++) print pending[i]
+        }
+    ' "$conf" > "$tmpfile"
+
     if [[ -s "$tmpfile" ]]; then
         mv "$tmpfile" "$conf"; chmod 600 "$conf"
     else
-        print_err "Ошибка при обработке конфига"
+        print_err "Ошибка при обработке конфига (awk вернул пусто)"
         rm -f "$tmpfile"
         return 1
     fi
 }
 
 # --> AWG: УДАЛЕНИЕ PEER ПО ИМЕНИ (ФОЛБЕК) <--
+# - awk: ищем блок [Peer] с комментарием "# <name>" -
 awg_remove_peer_by_name() {
     local conf="$1" cname="$2"
-    if ! command -v python3 &>/dev/null; then
-        print_err "python3 не найден"
-        print_info "Установи через: Меню -> 1. Старт (boot_run ставит python3)"
-        return 1
-    fi
     local tmpfile
     tmpfile=$(mktemp)
-    python3 - "$conf" "$cname" "$tmpfile" << 'PYEOF'
-import sys
-conf_path, target_name, out_path = sys.argv[1], sys.argv[2].strip(), sys.argv[3]
-with open(conf_path) as f:
-    lines = f.readlines()
-result, i = [], 0
-while i < len(lines):
-    line = lines[i]
-    if line.strip() == "[Peer]":
-        block, j = [line], i + 1
-        while j < len(lines):
-            if lines[j].strip().startswith("["): break
-            block.append(lines[j]); j += 1
-        found = any(l.strip() == f"# {target_name}" for l in block)
-        if found:
-            if result and result[-1].strip() == "": result.pop()
-            i = j; continue
-        result.extend(block); i = j; continue
-    result.append(line); i += 1
-with open(out_path, "w") as f:
-    f.writelines(result)
-PYEOF
-    if [[ -s "$tmpfile" ]]; then
+    awk -v target="$cname" '
+        function flush_buffer() {
+            if (!buf_active) return
+            has_match = 0
+            for (i = 1; i <= buf_len; i++) {
+                line = buf[i]
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+                if (line == "# " target) { has_match = 1; break }
+            }
+            if (has_match) {
+                while (pending_len > 0 && pending[pending_len] ~ /^[[:space:]]*$/) pending_len--
+                found = 1
+            } else {
+                for (i = 1; i <= pending_len; i++) print pending[i]
+                pending_len = 0
+                for (i = 1; i <= buf_len; i++) print buf[i]
+            }
+            buf_active = 0; buf_len = 0
+        }
+        BEGIN { buf_active = 0; buf_len = 0; pending_len = 0; found = 0 }
+        /^\[Peer\][[:space:]]*$/ {
+            flush_buffer()
+            buf_active = 1
+            buf[++buf_len] = $0
+            next
+        }
+        /^\[/ {
+            flush_buffer()
+            for (i = 1; i <= pending_len; i++) print pending[i]
+            pending_len = 0
+            print
+            next
+        }
+        {
+            if (buf_active) {
+                buf[++buf_len] = $0
+            } else if ($0 ~ /^[[:space:]]*$/) {
+                pending[++pending_len] = $0
+            } else {
+                for (i = 1; i <= pending_len; i++) print pending[i]
+                pending_len = 0
+                print
+            }
+        }
+        END {
+            flush_buffer()
+            for (i = 1; i <= pending_len; i++) print pending[i]
+            exit (found ? 0 : 1)
+        }
+    ' "$conf" > "$tmpfile"
+    local awk_rc=$?
+
+    if [[ $awk_rc -eq 0 && -s "$tmpfile" ]]; then
         mv "$tmpfile" "$conf"; chmod 600 "$conf"
         print_ok "Блок [Peer] удалён по имени '${cname}'"
+        return 0
     else
         print_err "Не удалось найти блок '${cname}'"
         rm -f "$tmpfile"
+        return 1
     fi
 }
 
@@ -1372,6 +1620,24 @@ _awg_ensure_headers() {
     return 2
 }
 
+# --> AWG: ОПРЕДЕЛЕНИЕ UBUNTU CODENAME ДЛЯ PPA <--
+# - Amnezia PPA публикует под focal/jammy/noble, выбираем по Debian версии -
+# - Debian 11 → focal (glibc 2.31 совместимо) -
+# - Debian 12 → focal -
+# - Debian 13 → noble (для новых ядер 6.1+ и glibc 2.38+) -
+_awg_ppa_codename() {
+    local deb_ver=""
+    if [[ -f /etc/os-release ]]; then
+        deb_ver=$(grep "^VERSION_ID=" /etc/os-release | cut -d'"' -f2)
+    fi
+    case "$deb_ver" in
+        13|13.*) echo "noble" ;;
+        12|12.*) echo "focal" ;;
+        11|11.*) echo "focal" ;;
+        *) echo "focal" ;;
+    esac
+}
+
 # --> AWG: ДОБАВИТЬ PPA И УСТАНОВИТЬ ПАКЕТ <--
 # - GPG ключ + sources.list + apt install amneziawg -
 _awg_install_ppa_package() {
@@ -1396,24 +1662,55 @@ _awg_install_ppa_package() {
     rm -f /etc/apt/sources.list.d/amnezia.list \
           /etc/apt/sources.list.d/amneziawg.list
 
-    cat > /etc/apt/sources.list.d/amnezia.list << 'REPOEOF'
-deb [signed-by=/usr/share/keyrings/amnezia.gpg] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main
-deb-src [signed-by=/usr/share/keyrings/amnezia.gpg] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main
+    local ppa_codename
+    ppa_codename=$(_awg_ppa_codename)
+    print_info "PPA codename: ${ppa_codename}"
+
+    cat > /etc/apt/sources.list.d/amnezia.list << REPOEOF
+deb [signed-by=/usr/share/keyrings/amnezia.gpg] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu ${ppa_codename} main
+deb-src [signed-by=/usr/share/keyrings/amnezia.gpg] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu ${ppa_codename} main
 REPOEOF
 
+    # - бэкап sources.list перед модификацией для возможности rollback -
+    local src_list_bak=""
+    local src_modified="no"
     if [[ -f /etc/apt/sources.list ]]; then
         if ! grep -q "^deb-src" /etc/apt/sources.list; then
+            src_list_bak="/etc/apt/sources.list.bak.awg.$(date +%s)"
+            cp /etc/apt/sources.list "$src_list_bak"
             local _src_lines
             _src_lines=$(grep "^deb " /etc/apt/sources.list | sed 's/^deb /deb-src /')
-            echo "$_src_lines" >> /etc/apt/sources.list
+            if [[ -n "$_src_lines" ]]; then
+                echo "$_src_lines" >> /etc/apt/sources.list
+                src_modified="yes"
+                print_info "sources.list: добавлены deb-src (бэкап: ${src_list_bak})"
+            fi
         fi
     fi
 
-    apt-get update -qq
-    if ! apt-get install -y amneziawg; then
-        print_err "Не удалось установить пакет amneziawg"
+    if ! apt-get update -qq; then
+        # - rollback sources.list при ошибке apt update -
+        if [[ "$src_modified" == "yes" && -f "$src_list_bak" ]]; then
+            mv "$src_list_bak" /etc/apt/sources.list
+            print_warn "apt update упал, sources.list восстановлен"
+        fi
+        rm -f /etc/apt/sources.list.d/amnezia.list
         return 1
     fi
+
+    if ! apt-get install -y amneziawg; then
+        print_err "Не удалось установить пакет amneziawg"
+        # - rollback при ошибке install -
+        if [[ "$src_modified" == "yes" && -f "$src_list_bak" ]]; then
+            mv "$src_list_bak" /etc/apt/sources.list
+            apt-get update -qq 2>/dev/null || true
+            print_warn "sources.list восстановлен (бэкап убран)"
+        fi
+        return 1
+    fi
+
+    # - успех, удаляем бэкап sources.list -
+    [[ -n "$src_list_bak" && -f "$src_list_bak" ]] && rm -f "$src_list_bak"
     print_ok "Пакет amneziawg установлен"
     return 0
 }
@@ -1715,15 +2012,16 @@ SYSEOF
         print_section "Параметры обфускации"
         local obf_auto=""
         ask_yn "Сгенерировать параметры автоматически?" "y" obf_auto
-        if [[ "$AWG_VER" == "2.0" ]]; then
-            _awg_gen_obf_v2 "$obf_auto"
-        else
-            _awg_gen_obf_v1 "$obf_auto"
-        fi
+        case "$AWG_VER" in
+            2.0) _awg_gen_obf_v2  "$obf_auto" ;;
+            1.5) _awg_gen_obf_v15 "$obf_auto" ;;
+            *)   _awg_gen_obf_v1  "$obf_auto" ;;
+        esac
         print_ok "Параметры сгенерированы (AWG ${AWG_VER})"
         print_info "Jc=${OBF_JC} Jmin=${OBF_JMIN} Jmax=${OBF_JMAX} S1=${OBF_S1} S2=${OBF_S2}"
         [[ -n "$OBF_S3" ]] && print_info "S3=${OBF_S3} S4=${OBF_S4}"
         print_info "H1=${OBF_H1} H2=${OBF_H2} H3=${OBF_H3} H4=${OBF_H4}"
+        [[ -n "$OBF_I1" ]] && print_info "I1-I5: заданы (signature chain)"
     fi
 
     # -- КЛИЕНТЫ --
@@ -2158,11 +2456,11 @@ awg_create_iface() {
     else
         local gen_obf=""
         ask_yn "Сгенерировать параметры обфускации автоматически?" "y" gen_obf
-        if [[ "$AWG_VER" == "2.0" ]]; then
-            _awg_gen_obf_v2 "$gen_obf"
-        else
-            _awg_gen_obf_v1 "$gen_obf"
-        fi
+        case "$AWG_VER" in
+            2.0) _awg_gen_obf_v2  "$gen_obf" ;;
+            1.5) _awg_gen_obf_v15 "$gen_obf" ;;
+            *)   _awg_gen_obf_v1  "$gen_obf" ;;
+        esac
     fi
 
     # - генерация ключей и конфига -
@@ -2408,6 +2706,8 @@ awg_add_client() {
     OBF_JC="$JC"; OBF_JMIN="$JMIN"; OBF_JMAX="$JMAX"
     OBF_S1="$S1"; OBF_S2="$S2"; OBF_S3="${S3:-}"; OBF_S4="${S4:-}"
     OBF_H1="$H1"; OBF_H2="$H2"; OBF_H3="$H3"; OBF_H4="$H4"
+    OBF_I1="${I1:-}"; OBF_I2="${I2:-}"; OBF_I3="${I3:-}"
+    OBF_I4="${I4:-}"; OBF_I5="${I5:-}"
     local tunnel_mtu="${TUNNEL_MTU:-1320}"
     local srv_pub
     srv_pub=$(cat "$(awg_iface_keys "$iface")/server.pub")
@@ -2581,10 +2881,17 @@ XUI_BIN="${XUI_DIR}/x-ui"
 XUI_DB="${XUI_DIR}/db/x-ui.db"
 XUI_SERVICE="x-ui"
 XUI_UNIT="/etc/systemd/system/x-ui.service"
-XUI_INSTALL_URL="https://raw.githubusercontent.com/MHSanaei/3x-ui/main/install.sh"
 
+# - ветка master, используется как fallback для x-ui.sh и unit-файла -
+XUI_REPO_BRANCH="master"
+XUI_GITHUB_REPO="MHSanaei/3x-ui"
+XUI_RAW_URL="https://raw.githubusercontent.com/${XUI_GITHUB_REPO}/${XUI_REPO_BRANCH}"
+XUI_API_URL="https://api.github.com/repos/${XUI_GITHUB_REPO}/releases/latest"
+
+# - установка "на самом деле 'нет'" требует бинарь и unit -
+# - is-active проверяем отдельно через xui_running (иначе после падения сервиса нельзя переустановить) -
 xui_installed() {
-    [[ -f "$XUI_BIN" ]] || systemctl list-unit-files "$XUI_SERVICE" 2>/dev/null | grep -q "$XUI_SERVICE"
+    [[ -f "$XUI_BIN" ]] && systemctl list-unit-files "$XUI_SERVICE" 2>/dev/null | grep -q "$XUI_SERVICE"
 }
 
 xui_running() {
@@ -2594,6 +2901,126 @@ xui_running() {
 xui_get_param() {
     local key="$1"
     [[ -f "$XUI_ENV" ]] && grep -oP "^${key}=\"\K[^\"]+" "$XUI_ENV" | head -1 || true
+}
+
+# --> 3X-UI: АРХИТЕКТУРА ДЛЯ РЕЛИЗА <--
+_xui_arch() {
+    case "$(uname -m)" in
+        x86_64|amd64) echo "amd64" ;;
+        aarch64|arm64) echo "arm64" ;;
+        armv7*|armv7l) echo "armv7" ;;
+        armv6*) echo "armv6" ;;
+        armv5*) echo "armv5" ;;
+        i?86) echo "386" ;;
+        s390x) echo "s390x" ;;
+        *) echo "amd64" ;;
+    esac
+}
+
+# --> 3X-UI: ПОЛУЧИТЬ ССЫЛКУ НА РЕЛИЗ <--
+# - возвращает tag_version и URL на x-ui-linux-<arch>.tar.gz -
+# - результат в глобальных XUI_TAG / XUI_TARBALL_URL -
+_xui_fetch_release_info() {
+    local arch
+    arch=$(_xui_arch)
+    local tag
+    tag=$(curl -fsSL --connect-timeout 10 "$XUI_API_URL" 2>/dev/null \
+        | grep '"tag_name":' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+    if [[ -z "$tag" ]]; then
+        # - fallback через IPv4 -
+        tag=$(curl -4 -fsSL --connect-timeout 10 "$XUI_API_URL" 2>/dev/null \
+            | grep '"tag_name":' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+    fi
+    if [[ -z "$tag" ]]; then
+        print_err "Не удалось получить версию 3X-UI с GitHub API"
+        return 1
+    fi
+    XUI_TAG="$tag"
+    XUI_TARBALL_URL="https://github.com/${XUI_GITHUB_REPO}/releases/download/${tag}/x-ui-linux-${arch}.tar.gz"
+    return 0
+}
+
+# --> 3X-UI: СКАЧАТЬ И РАСПАКОВАТЬ tar.gz <--
+# - чистая установка без вызова upstream install.sh (там интерактивные prompts) -
+_xui_fetch_and_extract() {
+    local arch tmpdir tarball
+    arch=$(_xui_arch)
+    tmpdir=$(mktemp -d)
+    tarball="${tmpdir}/x-ui-linux-${arch}.tar.gz"
+
+    print_info "Скачиваем ${XUI_TAG} для ${arch}..."
+    if ! curl -4fLRo "$tarball" --connect-timeout 15 "$XUI_TARBALL_URL"; then
+        print_err "Не удалось скачать ${XUI_TARBALL_URL}"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # - чистим старую установку -
+    systemctl stop "$XUI_SERVICE" 2>/dev/null || true
+    rm -rf "$XUI_DIR"
+
+    # - распаковка в /usr/local, архив содержит папку x-ui/ -
+    if ! tar -xzf "$tarball" -C /usr/local/; then
+        print_err "Не удалось распаковать tar.gz"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+    rm -rf "$tmpdir"
+
+    [[ ! -d "$XUI_DIR" ]] && { print_err "После распаковки ${XUI_DIR} не найден"; return 1; }
+
+    chmod +x "${XUI_DIR}/x-ui" 2>/dev/null || true
+    chmod +x "${XUI_DIR}/x-ui.sh" 2>/dev/null || true
+    chmod +x "${XUI_DIR}/bin/xray-linux-${arch}" 2>/dev/null || true
+
+    # - для armv5/6/7 бинар переименовывается в xray-linux-arm -
+    case "$arch" in
+        armv5|armv6|armv7)
+            if [[ -f "${XUI_DIR}/bin/xray-linux-${arch}" ]]; then
+                mv -f "${XUI_DIR}/bin/xray-linux-${arch}" "${XUI_DIR}/bin/xray-linux-arm"
+                chmod +x "${XUI_DIR}/bin/xray-linux-arm"
+            fi
+            ;;
+    esac
+    return 0
+}
+
+# --> 3X-UI: УСТАНОВИТЬ CLI И UNIT <--
+_xui_install_cli_and_unit() {
+    # - x-ui.sh: сначала ищем в архиве, иначе качаем с GitHub raw -
+    if [[ -f "${XUI_DIR}/x-ui.sh" ]]; then
+        cp -f "${XUI_DIR}/x-ui.sh" /usr/bin/x-ui
+    else
+        curl -4fLRo /usr/bin/x-ui --connect-timeout 10 \
+            "${XUI_RAW_URL}/x-ui.sh" 2>/dev/null || true
+    fi
+    [[ -f /usr/bin/x-ui ]] && chmod +x /usr/bin/x-ui
+
+    # - systemd unit: сначала из архива (x-ui.service или x-ui.service.debian), иначе raw -
+    local unit_src=""
+    if [[ -f "${XUI_DIR}/x-ui.service" ]]; then
+        unit_src="${XUI_DIR}/x-ui.service"
+    elif [[ -f "${XUI_DIR}/x-ui.service.debian" ]]; then
+        unit_src="${XUI_DIR}/x-ui.service.debian"
+    fi
+
+    if [[ -n "$unit_src" ]]; then
+        cp -f "$unit_src" "$XUI_UNIT"
+    else
+        print_info "Unit не найден в архиве, качаем с GitHub..."
+        if ! curl -4fLRo "$XUI_UNIT" --connect-timeout 10 \
+             "${XUI_RAW_URL}/x-ui.service.debian"; then
+            print_err "Не удалось получить x-ui.service"
+            return 1
+        fi
+    fi
+
+    chown root:root "$XUI_UNIT"
+    chmod 644 "$XUI_UNIT"
+    mkdir -p /var/log/x-ui
+    systemctl daemon-reload
+    systemctl enable "$XUI_SERVICE" >/dev/null 2>&1
+    return 0
 }
 
 # --> 3X-UI: ПАТЧ NOFILE <--
@@ -2620,7 +3047,13 @@ xui_install() {
     print_section "Установка 3X-UI"
 
     if xui_installed 2>/dev/null; then
-        print_warn "3X-UI уже установлен и запущен"
+        if xui_running 2>/dev/null; then
+            print_warn "3X-UI уже установлен и запущен"
+        else
+            print_warn "3X-UI установлен, но не запущен"
+            print_info "Для восстановления: systemctl start ${XUI_SERVICE}"
+            print_info "Для переустановки: меню 3X-UI -> Переустановить"
+        fi
         return 0
     fi
 
@@ -2687,11 +3120,35 @@ xui_install() {
     print_ok "Логин: ${panel_user}"
 
     # - запуск установщика -
-    print_section "Запуск установщика"
+    print_section "Установка из релиза"
     mkdir -p "$XUI_ENV_DIR" "$XUI_BACKUP_DIR"
     chmod 700 "$XUI_ENV_DIR"
 
-    echo -e "n\n" | bash <(curl -Ls "$XUI_INSTALL_URL") || true
+    # - прямое скачивание tar.gz вместо upstream install.sh -
+    # - причина: install.sh на master имеет 2-3 интерактивных prompts (port/SSL/IPv6) -
+    # - и сам генерит webBasePath/username/password, игнорируя наши аргументы -
+    # - базовые зависимости (curl/tar/tzdata/socat/ca-certificates) -
+    apt-get install -y -qq curl tar tzdata socat ca-certificates 2>/dev/null || true
+
+    if ! _xui_fetch_release_info; then
+        print_err "Не удалось определить последний релиз 3X-UI"
+        return 1
+    fi
+    print_info "Версия: ${XUI_TAG}"
+
+    if ! _xui_fetch_and_extract; then
+        print_err "Не удалось скачать/распаковать 3X-UI"
+        return 1
+    fi
+
+    if ! _xui_install_cli_and_unit; then
+        print_err "Не удалось установить CLI/unit"
+        return 1
+    fi
+
+    # - первый запуск для инициализации БД (генерит дефолтные user/pass/path) -
+    systemctl start "$XUI_SERVICE" || true
+    sleep 3
 
     if [[ ! -f "$XUI_BIN" ]]; then
         print_err "Установка не удалась: ${XUI_BIN} не найден"
@@ -2699,10 +3156,11 @@ xui_install() {
     fi
     print_ok "3X-UI установлен"
 
-    # - настройка через CLI -
+    # - настройка через CLI: наши параметры применяются гарантированно -
     "$XUI_BIN" setting -port "$panel_port" >/dev/null 2>&1 || true
     "$XUI_BIN" setting -webBasePath "$panel_path" >/dev/null 2>&1 || true
     "$XUI_BIN" setting -username "$panel_user" -password "$panel_pass" >/dev/null 2>&1 || true
+    "$XUI_BIN" migrate >/dev/null 2>&1 || true
     systemctl restart "$XUI_SERVICE" 2>/dev/null || true
     sleep 3
 
@@ -2817,6 +3275,8 @@ xui_show_inbounds() {
 
     local cookie_jar
     cookie_jar=$(mktemp)
+    # - trap на cleanup cookie (в нём логин/пароль до ответа сервера) -
+    trap 'rm -f "$cookie_jar" 2>/dev/null' RETURN
     local login_result
     login_result=$(curl -sk --connect-timeout 5 -c "$cookie_jar" \
         -X POST "${base_url}/login" \
@@ -2831,6 +3291,7 @@ xui_show_inbounds() {
         -b "$cookie_jar" -c "$cookie_jar" \
         "${base_url}/panel/api/inbounds/list" 2>/dev/null || echo "")
     rm -f "$cookie_jar"
+    trap - RETURN
 
     if ! echo "$inbounds_result" | grep -q '"success":true'; then
         print_err "Не удалось получить inbound'ы"; return 0
@@ -2907,7 +3368,7 @@ xui_delete() {
 OTL_DIR="/etc/outline"
 OTL_ENV="${OTL_DIR}/outline.env"
 OTL_KEY="${OTL_DIR}/manager_key.json"
-OTL_INSTALL_URL="https://raw.githubusercontent.com/Jigsaw-Code/outline-server/master/src/server_manager/install_scripts/install_server.sh"
+OTL_INSTALL_URL="https://raw.githubusercontent.com/Jigsaw-Code/outline-apps/master/server_manager/install_scripts/install_server.sh"
 OTL_HEALTHCHECK="/usr/local/bin/outline-healthcheck.sh"
 
 otl_installed() {
@@ -2948,8 +3409,10 @@ otl_install() {
     done
 
     mkdir -p "$OTL_DIR"; chmod 700 "$OTL_DIR"
-    local install_log="/var/log/outline-install.log"
-    print_info "Запуск установщика Jigsaw..."
+    # - уникальный лог на каждый запуск, иначЕ tail -1 может вытащить apiUrl прошлой битой установки -
+    local install_log
+    install_log=$(mktemp /tmp/outline-install-XXXXXX.log)
+    print_info "Запуск установщика Jigsaw... (лог: ${install_log})"
 
     yes | bash <(curl -sSL "$OTL_INSTALL_URL") \
         --hostname "$server_ip" --api-port "$api_port" \
@@ -2959,7 +3422,9 @@ otl_install() {
     local api_json
     api_json=$(grep -oP '\{"apiUrl":"[^"]*","certSha256":"[^"]*"\}' "$install_log" | tail -1 || true)
     if [[ -z "$api_json" ]]; then
-        print_err "Не удалось извлечь apiUrl из лога"; return 1
+        print_err "Не удалось извлечь apiUrl из лога"
+        print_info "Лог: ${install_log}"
+        return 1
     fi
     local api_url cert_sha
     api_url=$(echo "$api_json" | grep -oP '"apiUrl":\s*"\K[^"]+')
@@ -3158,8 +3623,14 @@ _mtp_gen_secret() {
     head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n'
 }
 
+# - guard на пустой домен, иначе tg-ссылка получит пустой хвост и клиент отвалит -
 _mtp_domain_hex() {
-    echo -n "$1" | od -An -tx1 | tr -d ' \n'
+    local d="$1"
+    if [[ -z "$d" ]]; then
+        # - fallback на www.google.com если пусто (для Fake TLS требуется SNI) -
+        d="www.google.com"
+    fi
+    echo -n "$d" | od -An -tx1 | tr -d ' \n'
 }
 
 _mtp_next_id() {
@@ -3203,7 +3674,7 @@ _mtp_rebuild_container() {
         --name "${CONTAINER}" \
         --restart always \
         --network host \
-        "seriyps/mtproto-proxy" \
+        "seriyps/mtproto-proxy:0.8.4" \
         -p "${PORT}" \
         "${secret_args[@]}" \
         -t "${effective_tag}" \
@@ -3367,6 +3838,10 @@ mtp_remove_secret() {
 
     local sf; sf=$(_mtp_secrets_file "$inst_id")
     [[ ! -f "$sf" || ! -s "$sf" ]] && { print_warn "Нет секретов"; return 0; }
+
+    # - sed -i "${sel}d" работает по физическим строкам, отображение пропускает пустые -
+    # - убираем пустые строки до выбора, чтобы нумерация совпадала-
+    sed -i '/^[[:space:]]*$/d' "$sf"
 
     local count; count=$(wc -l < "$sf")
     [[ "$count" -le 1 ]] && { print_err "Последний секрет. Удали инстанс целиком."; return 0; }
@@ -3564,7 +4039,7 @@ s5_add() {
     local user="" pass=""
     user="user$(rand_str 4)"
     pass="$(rand_str 16)"
-    echo -e "  ${CYAN}Логин и пароль для подключения к прокси. Сгенерированы автоматически - можешь изменить.${NC}"
+    echo -e "  ${CYAN}Логин и пароль для подключения к прокси. Сгенерированы автоматически их можно изменить.${NC}"
     ask "Логин" "$user" user
     ask "Пароль" "$pass" pass
     [[ -z "$user" || -z "$pass" ]] && { print_err "Логин и пароль обязательны"; return 1; }
@@ -3581,7 +4056,7 @@ s5_add() {
         -p "${port}:1080" \
         -e "PROXY_USER=${user}" \
         -e "PROXY_PASSWORD=${pass}" \
-        serjs/go-socks5-proxy; then
+        serjs/go-socks5-proxy:v0.0.4; then
         print_err "Не удалось запустить контейнер"
         return 1
     fi
@@ -3767,6 +4242,13 @@ _hy2_migrate_legacy() {
     mv "$old_env" "${idir}/hysteria.env"
     [[ -f "${HY2_DIR}/config.yaml" ]] && rm -f "${HY2_DIR}/config.yaml"
 
+    # - guard на пустой AUTH_PASS (иначе получаем "admin" без пароля) -
+    if [[ -z "${AUTH_PASS:-}" ]]; then
+        AUTH_PASS="$(rand_str 16)"
+        print_warn "AUTH_PASS в legacy env пуст, сгенерирован новый: ${AUTH_PASS}"
+        # - дописать в instance env, чтобы следующие перезапуски знали пароль -
+        echo "AUTH_PASS=\"${AUTH_PASS}\"" >> "${idir}/hysteria.env"
+    fi
     echo "admin:${AUTH_PASS}" > "${idir}/users.list"; chmod 600 "${idir}/users.list"
     _hy2_gen_config "1"
 
@@ -3987,6 +4469,9 @@ hy2_remove_user() {
     local uf; uf=$(_hy2_users_file "$inst_id")
     [[ ! -f "$uf" || ! -s "$uf" ]] && { print_warn "Нет пользователей"; return 0; }
 
+    # - чистим пустые строки, чтобы sel совпадал с sed номерами строк -
+    sed -i '/^[[:space:]]*$/d' "$uf"
+
     local count; count=$(wc -l < "$uf")
     [[ "$count" -le 1 ]] && { print_err "Последний. Удали инстанс целиком."; return 0; }
 
@@ -4162,7 +4647,16 @@ sig_install() {
 
     # - запуск -
     print_section "Запуск Signal Proxy"
-    if ! docker compose up --detach 2>/dev/null && ! docker-compose up --detach 2>/dev/null; then
+    # - логика `docker compose up && ! docker-compose up` была инвертирована -
+    # - true если compose v2 упал И v1 вернул 0 (бред ебаный?) -
+    # - юзаем v2, не получилось -> юзаем v1, если оба мимо -> fail -
+    local sig_up_ok="no"
+    if docker compose up --detach 2>/dev/null; then
+        sig_up_ok="yes"
+    elif docker-compose up --detach 2>/dev/null; then
+        sig_up_ok="yes"
+    fi
+    if [[ "$sig_up_ok" != "yes" ]]; then
         print_err "Не удалось запустить Signal Proxy"
         return 1
     fi
@@ -4311,11 +4805,17 @@ TS_DB="${TS_DIR}/tsserver.sqlitedb"
 TS_GITHUB_API="https://api.github.com/repos/teamspeak/teamspeak6-server/releases/latest"
 
 ts_installed() {
-    [[ -f "$TS_BIN" ]] && systemctl is-active --quiet teamspeak 2>/dev/null
+    # - проверяем только наличие бинарника, не is-active -
+    # - иначЕ = сервис упал -> ts_installed=false -> ts_install перезапишет рабочую дирку -
+    [[ -f "$TS_BIN" ]]
+}
+
+ts_running() {
+    systemctl is-active --quiet teamspeak 2>/dev/null
 }
 
 ts_find_db() {
-    # Ищет *.sqlitedb в директории установки, обновляет переменную и env
+    # - Ищет *.sqlitedb в директории установки, обновляет переменную и env -
     local found
     found=$(find "$TS_DIR" "$TS_DATA_DIR" -name "*.sqlitedb" -type f 2>/dev/null | head -1)
     if [[ -n "$found" ]]; then
@@ -4335,14 +4835,32 @@ ts_get_version() {
     [[ -f "$TS_ENV" ]] && grep -oP '^TS_VERSION="\K[^"]+' "$TS_ENV" | head -1 || true
 }
 
+# - возвращает URL на архив с линуксовой сборкой -
+# - сначала ищем .tar.bz2 (текущий формат), fallback на .tar.gz (на случай смены) -
+# - возвращает формат через глобальный TS_ARCHIVE_FMT (bz2|gz) для выбора флага tar -
 ts_get_latest_url() {
-    # - парсим assets через jq: ищем linux_amd64 + .tar.bz2 -
-    local json
+    local json url
     json=$(curl -fsSL --connect-timeout 10 "$TS_GITHUB_API" 2>/dev/null || true)
-    [[ -z "$json" ]] && return
-    echo "$json" | jq -r \
-        '.assets | map(select((.name | contains("linux_amd64")) and (.name | endswith(".tar.bz2"))))[0].browser_download_url' \
-        2>/dev/null || true
+    [[ -z "$json" ]] && return 1
+    # - .tar.bz2 -
+    url=$(echo "$json" | jq -r \
+        '.assets | map(select((.name | contains("linux_amd64")) and (.name | endswith(".tar.bz2"))))[0].browser_download_url // empty' \
+        2>/dev/null)
+    if [[ -n "$url" && "$url" != "null" ]]; then
+        TS_ARCHIVE_FMT="bz2"
+        echo "$url"
+        return 0
+    fi
+    # - fallback .tar.gz -
+    url=$(echo "$json" | jq -r \
+        '.assets | map(select((.name | contains("linux_amd64")) and (.name | endswith(".tar.gz"))))[0].browser_download_url // empty' \
+        2>/dev/null)
+    if [[ -n "$url" && "$url" != "null" ]]; then
+        TS_ARCHIVE_FMT="gz"
+        echo "$url"
+        return 0
+    fi
+    return 1
 }
 
 ts_get_latest_version() {
@@ -4398,8 +4916,18 @@ ts_install() {
     mkdir -p "$TS_DIR" "$TS_DATA_DIR" "$TS_LOG_DIR" "$TS_ENV_DIR" "$TS_BACKUP_DIR"
 
     local tmpdir; tmpdir=$(mktemp -d)
-    curl -fsSL --connect-timeout 30 --max-time 120 "$download_url" -o "${tmpdir}/ts6.tar.bz2"
-    tar -xjf "${tmpdir}/ts6.tar.bz2" -C "$TS_DIR" --strip-components=1
+    # - выбор флага tar по формату (bz2|gz) - чтобы переживать будущие смены формата -
+    local tar_flag="j" archive_ext="tar.bz2"
+    if [[ "${TS_ARCHIVE_FMT:-bz2}" == "gz" ]]; then
+        tar_flag="z"
+        archive_ext="tar.gz"
+    fi
+    curl -fsSL --connect-timeout 30 --max-time 120 "$download_url" -o "${tmpdir}/ts6.${archive_ext}"
+    if ! tar -x${tar_flag}f "${tmpdir}/ts6.${archive_ext}" -C "$TS_DIR" --strip-components=1; then
+        print_err "Не удалось распаковать архив"
+        rm -rf "$tmpdir"
+        return 1
+    fi
     rm -rf "$tmpdir"
     chmod +x "$TS_BIN"
     chown -R "${TS_USER}:${TS_USER}" "$TS_DIR" "$TS_DATA_DIR" "$TS_LOG_DIR"
@@ -4534,8 +5062,14 @@ ts_update() {
     ts_backup_db || true
     systemctl stop teamspeak 2>/dev/null || true
     local tmpdir; tmpdir=$(mktemp -d)
-    curl -fsSL --connect-timeout 30 --max-time 120 "$url" -o "${tmpdir}/ts6.tar.bz2"
-    tar -xjf "${tmpdir}/ts6.tar.bz2" -C "$TS_DIR" --strip-components=1; rm -rf "$tmpdir"
+    # - выбор флага tar по формату -
+    local tar_flag="j" archive_ext="tar.bz2"
+    if [[ "${TS_ARCHIVE_FMT:-bz2}" == "gz" ]]; then
+        tar_flag="z"
+        archive_ext="tar.gz"
+    fi
+    curl -fsSL --connect-timeout 30 --max-time 120 "$url" -o "${tmpdir}/ts6.${archive_ext}"
+    tar -x${tar_flag}f "${tmpdir}/ts6.${archive_ext}" -C "$TS_DIR" --strip-components=1; rm -rf "$tmpdir"
     chmod +x "$TS_BIN"; chown -R "${TS_USER}:${TS_USER}" "$TS_DIR"
     systemctl start teamspeak; sleep 3
     systemctl is-active --quiet teamspeak && print_ok "Обновлён до ${lat}" || print_err "Не запустился"
@@ -4584,7 +5118,20 @@ MBL_DB="/var/lib/mumble-server/mumble-server.sqlite"
 MBL_BACKUP_DIR="/etc/mumble-backups"
 
 mbl_installed() {
-    systemctl is-active --quiet "$MBL_SERVICE" 2>/dev/null
+    # - проверяем наличие пакета, не is-active -
+    dpkg -l mumble-server 2>/dev/null | grep -q "^ii"
+}
+
+# - экранирование значения для sed-замены -
+# - sed: / как разделитель конфликтует с путями в паролях -
+# - & как back-reference, \ как escape, | как альтернатива разделителя -
+# - используем | как разделитель и экранируем обратный слэш, амперс, пайп -
+_mbl_sed_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"   # - \ -> \\ -
+    s="${s//&/\\&}"     # - & -> \& -
+    s="${s//|/\\|}"     # - | -> \| -
+    printf '%s' "$s"
 }
 
 mbl_install() {
@@ -4608,27 +5155,38 @@ mbl_install() {
     done
 
     # - пароль сервера (для подключения клиентов) -
+    # - read -rs чтобы пароль не светился в терминале -
     local srv_pass=""
     echo -ne "  ${BOLD}Пароль сервера (пустой = без пароля):${NC} "
-    read -r srv_pass
+    read -rs srv_pass
+    echo ""
 
-    # - пароль SuperUser (администратор) -
-    local su_pass=""
+    # - пароль SuperUser (администратор): двойной ввод с проверкой -
+    # - read -rs + подтверждение, минимум 6 символов -
+    local su_pass="" su_pass2=""
     while true; do
         echo -ne "  ${BOLD}Пароль SuperUser (мин. 6 символов):${NC} "
-        read -r su_pass
-        [[ ${#su_pass} -ge 6 ]] && break
-        print_err "Минимум 6 символов"
+        read -rs su_pass; echo ""
+        if [[ ${#su_pass} -lt 6 ]]; then
+            print_err "Минимум 6 символов"; continue
+        fi
+        echo -ne "  ${BOLD}Повторите пароль SuperUser:${NC} "
+        read -rs su_pass2; echo ""
+        if [[ "$su_pass" != "$su_pass2" ]]; then
+            print_err "Пароли не совпадают"; continue
+        fi
+        break
     done
 
     # - настройка конфига -
+    # - sed-escape для srv_pass, используем | как разделитель -
     if [[ -f "$MBL_CONF" ]]; then
-        sed -i "s/^;*port=.*/port=${port}/" "$MBL_CONF"
-        sed -i "s/^;*serverpassword=.*/serverpassword=${srv_pass}/" "$MBL_CONF"
-        # - welcometext -
-        sed -i 's/^;*welcometext=.*/welcometext="Welcome to Mumble Server"/' "$MBL_CONF"
-        # - bandwidth 72000 (хорошее качество, экономит трафик) -
-        sed -i 's/^;*bandwidth=.*/bandwidth=72000/' "$MBL_CONF"
+        local srv_pass_esc
+        srv_pass_esc=$(_mbl_sed_escape "$srv_pass")
+        sed -i "s|^;*port=.*|port=${port}|" "$MBL_CONF"
+        sed -i "s|^;*serverpassword=.*|serverpassword=${srv_pass_esc}|" "$MBL_CONF"
+        sed -i 's|^;*welcometext=.*|welcometext="Welcome to Mumble Server"|' "$MBL_CONF"
+        sed -i 's|^;*bandwidth=.*|bandwidth=72000|' "$MBL_CONF"
         print_ok "Конфиг настроен: ${MBL_CONF}"
     else
         print_warn "Конфиг не найден: ${MBL_CONF}"
@@ -4824,15 +5382,25 @@ unbound_install() {
     print_ok "Режим: ${dns_mode}"
 
     # - отключаем DNSStubListener + направляем resolved на Unbound -
-    mkdir -p /etc/systemd/resolved.conf.d/
-    cat > /etc/systemd/resolved.conf.d/no-stub.conf << 'EOF'
+    # - проверяем наличие systemd-resolved перед записью конфига и рестартом -
+    # - на минимальных установках Debian резолва может не быть -
+    if systemctl list-unit-files systemd-resolved.service 2>/dev/null | grep -q systemd-resolved; then
+        mkdir -p /etc/systemd/resolved.conf.d/
+        cat > /etc/systemd/resolved.conf.d/no-stub.conf << 'EOF'
 [Resolve]
 DNSStubListener=no
 DNS=127.0.0.1
 FallbackDNS=8.8.8.8
 EOF
-    systemctl restart systemd-resolved 2>/dev/null || true
-    print_ok "systemd-resolved: StubListener off, DNS -> 127.0.0.1"
+        if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+            systemctl restart systemd-resolved 2>/dev/null || true
+            print_ok "systemd-resolved: StubListener off, DNS -> 127.0.0.1"
+        else
+            print_info "systemd-resolved присутствует но не активен, drop-in создан"
+        fi
+    else
+        print_info "systemd-resolved не установлен -> пропускаем настройку StubListener"
+    fi
 
     # - собираем IP AWG интерфейсов -
     local awg_ips=() awg_ifaces=()
@@ -4891,6 +5459,8 @@ ${access_lines}
 EOF
     else
         # - форвард: запросы на Google/CF/Quad9, быстрее но менее приватно -
+        # - harden-dnssec-stripped отключён для forward-first режима -
+        # - иначЕ запросы к доменам без DNSSEC (а их дохуя) дают SERVFAIL -
         cat > "$UNBOUND_CONF" << EOF
 # - режим: форвард через Google/Cloudflare/Quad9 -
 # - быстрее, но они видят все запрашиваемые домены -
@@ -4907,8 +5477,8 @@ ${access_lines}
     hide-identity: yes
     hide-version: yes
     harden-glue: yes
-    harden-dnssec-stripped: yes
-    use-caps-for-id: yes
+    harden-dnssec-stripped: no
+    use-caps-for-id: no
     verbosity: 0
     log-queries: no
 
@@ -4928,16 +5498,17 @@ EOF
     # - root.hints (нужен для рекурсии, не мешает форварду) -
     if curl -fsSL --connect-timeout 10 "https://www.internic.net/domain/named.cache" \
         -o /var/lib/unbound/root.hints 2>/dev/null; then
+        # - chown чтобы unbound-пользователь в chroot смог прочитать -
+        chown unbound:unbound /var/lib/unbound/root.hints 2>/dev/null || true
         print_ok "root.hints обновлён"
     else
         print_warn "root.hints: internic.net недоступен, используем встроенный"
     fi
 
-    # - DNSSEC anchor для рекурсии -
-    if [[ "$dns_mode" == "recursive" ]]; then
-        unbound-anchor -a /var/lib/unbound/root.key 2>/dev/null || true
-        chown unbound:unbound /var/lib/unbound/root.key 2>/dev/null || true
-    fi
+    # - DNSSEC anchor: в Debian/Ubuntu unbound.service сам генерит root.key -
+    # - через ExecStartPre=/usr/libexec/unbound-helper root_trust_anchor_update. -
+    # - Наш вызов unbound-anchor дублировал якорь, получали "trust anchor presented twice". -
+    # - Не трогаем: если файл уже есть, ничего не делаем; если нет - unit создаст при старте -
 
     # - проверка и запуск -
     if unbound-checkconf "$UNBOUND_CONF" 2>/dev/null; then
@@ -5047,7 +5618,7 @@ diag_run() {
     открытые порты, MSS clamping, файрвол, journald, cron задачи.
 
   Результат: цветной отчёт в терминале + файлы TXT и HTML в /root/.
-    HTML отчёт можно скачать и открыть в браузере - там красивые таблицы
+    HTML отчёт можно скачать и открыть в браузере - там таблицы
     и светофор (красный/жёлтый/зелёный) с рекомендациями по каждой проблеме."
 
     _DG_RED=(); _DG_YELLOW=(); _DG_GREEN=()
@@ -5114,15 +5685,27 @@ diag_run() {
     # --> 3. КАНАЛ (10 точек с регионами) <--
     _dg_bandwidth() {
         D_BEST_SPEED="0"; D_BEST_HOST="?"
+        local bw_confirm=""
+        echo ""
+        echo -e "  ${YELLOW}Тест канала качает ~10 MB с каждой из 10 точек (~100 MB суммарно).${NC}"
+        echo -e "  ${YELLOW}На VPS с лимитом трафика стоит пропустить.${NC}"
+        ask_yn "Запустить тест канала?" "y" bw_confirm
+        if [[ "$bw_confirm" != "yes" ]]; then
+            print_info "Тест канала пропущен пользователем"
+            D_SPEED_RESULTS+=("__skipped__|skipped")
+            return 0
+        fi
         _bw() {
             local url="$1" host="$2" speed mbit
-            speed=$(curl -o /dev/null -s --connect-timeout 5 --max-time 15 -w "%{speed_download}" "$url" 2>/dev/null || echo "0")
+            # - --range 0-10485760 ограничивает скачивание 10 MB даже на быстром канале -
+            speed=$(curl -o /dev/null -s --connect-timeout 5 --max-time 15 \
+                --range 0-10485760 -w "%{speed_download}" "$url" 2>/dev/null || echo "0")
             mbit=$(awk "BEGIN {printf \"%.1f\", ${speed}/1024/1024*8}")
             echo -e "  ${CYAN}${host}:${NC} ${mbit} Мбит/с"
             D_SPEED_RESULTS+=("${host}|${mbit}")
             awk "BEGIN {exit !(${mbit}+0 > ${D_BEST_SPEED}+0)}" && { D_BEST_SPEED=$mbit; D_BEST_HOST="$host"; }
         }
-        print_info "Тестируем канал (10 точек)..."
+        print_info "Тестируем канал (10 точек по ~10 MB)..."
         echo -e "  ${BOLD}Европа:${NC}"; D_SPEED_RESULTS+=("__region__|Европа")
         _bw "http://speedtest.tele2.net/100MB.zip" "Tele2 (Швеция)"
         _bw "https://fra-de-ping.vultr.com/vultr.com.100MB.bin" "Vultr (Франкфурт)"
@@ -5306,6 +5889,11 @@ diag_run() {
 
     # --> 12-16: iptables, порты, диск, сервисы, обслуживание (как раньше) <--
     _dg_iptables() {
+        # - MSS clamping нужен только если есть AWG -
+        if [[ ${#D_AWG_DATA[@]} -eq 0 ]]; then
+            print_info "AWG не установлен, проверка MSS clamping пропущена"
+            return 0
+        fi
         local mangle; mangle=$(iptables -t mangle -L FORWARD -n -v 2>/dev/null | grep "TCPMSS" || echo "")
         [[ -n "$mangle" ]] && { print_ok "MSS clamping: активен"; _dg_green "MSS clamping в iptables"; echo "$mangle" | sed 's/^/    /'; } \
             || { print_warn "MSS: нет правил"; _dg_red "Нет MSS clamping в iptables|Перезапусти AWG интерфейсы"; }
@@ -5334,7 +5922,7 @@ diag_run() {
         done < <(ss -tulpn 2>/dev/null | tail -n +2)
     }
     _dg_disk() {
-        D_DISK_SPEED=$(dd if=/dev/zero of=/tmp/_disktest bs=1M count=128 conv=fdatasync 2>&1 | grep -oP '[0-9.]+ [MG]B/s' | tail -1 || echo "?")
+        D_DISK_SPEED=$(dd if=/dev/zero of=/tmp/_disktest bs=1M count=32 conv=fdatasync 2>&1 | grep -oP '[0-9.]+ [MG]B/s' | tail -1 || echo "?")
         rm -f /tmp/_disktest; print_ok "Запись: ${D_DISK_SPEED}"
         df -hT | grep -v "tmpfs\|overlay\|udev" | sed 's/^/  /'
         while read -r use mp; do local pct=${use%%%}
@@ -5348,7 +5936,23 @@ diag_run() {
             else st="н/у"; print_info "${label}: не установлен"; fi; D_SVC_TABLE+=("${label}|${st}"); }
         _sv "fail2ban" "Fail2Ban"; _sv "docker" "Docker"; _sv "x-ui" "3X-UI"
         _sv "teamspeak" "TeamSpeak"; _sv "mumble-server" "Mumble"; _sv "unbound" "Unbound"
-        _sv "hysteria-server" "Hysteria2"
+        # - Hysteria multi-instance hysteria-1/2/3 -
+        local hy2_units
+        hy2_units=$(systemctl list-unit-files 'hysteria-*.service' 2>/dev/null \
+            | awk '$1 ~ /^hysteria-[0-9]+\.service$/ {print $1}' | sort -u)
+        if [[ -n "$hy2_units" ]]; then
+            local _u
+            for _u in $hy2_units; do
+                _sv "${_u%.service}" "Hysteria2 (${_u%.service})"
+            done
+        else
+            # - fallback на legacy single unit -
+            if systemctl list-unit-files 2>/dev/null | grep -q "^hysteria-server"; then
+                _sv "hysteria-server" "Hysteria2 (legacy)"
+            else
+                print_info "Hysteria2: не установлен"; D_SVC_TABLE+=("Hysteria2|н/у")
+            fi
+        fi
         D_UFW=$(ufw status 2>/dev/null | grep -oP '^Status: \K\w+' || echo "?")
         [[ "$D_UFW" == "active" ]] && { print_ok "UFW: активен"; _dg_green "UFW активен"; } \
             || { print_warn "UFW: ${D_UFW}"; _dg_yellow "UFW не включён|ufw --force enable"; }
@@ -5378,9 +5982,17 @@ diag_run() {
         for envf in /etc/mtproto/instance_*.env; do
             [[ -f "$envf" ]] || continue
             mtp_count=$(( mtp_count + 1 ))
+            # - unset перед source, иначе переменные остаются от предыдущего инстанса -
+            unset CONTAINER PORT TLS_DOMAIN
             source "$envf" 2>/dev/null
             local inst_id; inst_id=$(basename "$envf" | sed 's/instance_//;s/\.env//')
-            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER:-}$"; then
+            # - guard на пустой CONTAINER (env может быть битым) -
+            if [[ -z "${CONTAINER:-}" ]]; then
+                print_err "MTProto #${inst_id}: CONTAINER пуст в env"
+                _dg_red "MTProto #${inst_id} битый env"
+                continue
+            fi
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER}$"; then
                 print_ok "MTProto #${inst_id}: port ${PORT} (${TLS_DOMAIN})"
                 _dg_green "MTProto #${inst_id} активен"
             else
@@ -5395,9 +6007,16 @@ diag_run() {
         for envf in /etc/socks5/instance_*.env; do
             [[ -f "$envf" ]] || continue
             s5_count=$(( s5_count + 1 ))
+            unset CONTAINER PORT
             source "$envf" 2>/dev/null
             local inst_id; inst_id=$(basename "$envf" | sed 's/instance_//;s/\.env//')
-            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER:-}$"; then
+            # - guard на пустой CONTAINER -
+            if [[ -z "${CONTAINER:-}" ]]; then
+                print_err "SOCKS5 #${inst_id}: CONTAINER пуст в env"
+                _dg_red "SOCKS5 #${inst_id} битый env"
+                continue
+            fi
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER}$"; then
                 print_ok "SOCKS5 #${inst_id}: port ${PORT}"
                 _dg_green "SOCKS5 #${inst_id} активен"
             else
@@ -5407,17 +6026,37 @@ diag_run() {
         done
         [[ $s5_count -eq 0 ]] && print_info "SOCKS5: не установлен"
 
-        # - Hysteria 2 -
-        if [[ -f /etc/hysteria/hysteria.env ]]; then
+        # - Hysteria 2: мультиинстанс + legacy fallback -
+        local hy2_count=0
+        for idir in /etc/hysteria/instance_*/; do
+            [[ -d "$idir" ]] || continue
+            local envf="${idir}hysteria.env"
+            [[ -f "$envf" ]] || continue
+            hy2_count=$(( hy2_count + 1 ))
+            unset PORT VERSION
+            source "$envf" 2>/dev/null
+            local inst_id; inst_id=$(basename "$idir" | sed 's/instance_//')
+            local svc="hysteria-${inst_id}"
+            if systemctl is-active --quiet "$svc" 2>/dev/null; then
+                print_ok "Hysteria 2 #${inst_id}: port ${PORT:-?} (ver ${VERSION:-?})"
+                _dg_green "Hysteria 2 #${inst_id} активен"
+            else
+                print_err "Hysteria 2 #${inst_id}: остановлен"
+                _dg_red "Hysteria 2 #${inst_id} остановлен|systemctl start ${svc}"
+            fi
+        done
+        # - legacy fallback: старый конфиг /etc/hysteria/hysteria.env -
+        if [[ $hy2_count -eq 0 && -f /etc/hysteria/hysteria.env ]]; then
+            unset PORT VERSION
             source /etc/hysteria/hysteria.env 2>/dev/null
             if systemctl is-active --quiet hysteria-server 2>/dev/null; then
-                print_ok "Hysteria 2: port ${PORT} (ver ${VERSION})"
-                _dg_green "Hysteria 2 активен"
+                print_ok "Hysteria 2 (legacy): port ${PORT:-?} (ver ${VERSION:-?})"
+                _dg_green "Hysteria 2 legacy активен"
             else
-                print_err "Hysteria 2: остановлен"
-                _dg_red "Hysteria 2 остановлен|systemctl start hysteria-server"
+                print_err "Hysteria 2 (legacy): остановлен"
+                _dg_red "Hysteria 2 legacy остановлен|systemctl start hysteria-server"
             fi
-        else
+        elif [[ $hy2_count -eq 0 ]]; then
             print_info "Hysteria 2: не установлен"
         fi
     }
@@ -5921,16 +6560,32 @@ prayer_run() {
             else _pr_warn "  Сервис: не активен"; fi
 
             local iobj
+            # - валидация: --argjson требует валидный JSON (число без пробелов/знаков) -
+            # - если env битый - подставляем дефолт, чтобы jq не упал -
+            local _p_port="${SERVER_PORT:-0}"; [[ "$_p_port" =~ ^[0-9]+$ ]] || _p_port=0
+            local _p_jc="${JC:-5}";    [[ "$_p_jc"   =~ ^[0-9]+$ ]] || _p_jc=5
+            local _p_jmin="${JMIN:-50}";  [[ "$_p_jmin" =~ ^[0-9]+$ ]] || _p_jmin=50
+            local _p_jmax="${JMAX:-1000}"; [[ "$_p_jmax" =~ ^[0-9]+$ ]] || _p_jmax=1000
+            local _p_s1="${S1:-0}";   [[ "$_p_s1"   =~ ^[0-9]+$ ]] || _p_s1=0
+            local _p_s2="${S2:-0}";   [[ "$_p_s2"   =~ ^[0-9]+$ ]] || _p_s2=0
             iobj=$(jq -n --arg desc "${IFACE_DESC:-}" --arg ep "${SERVER_ENDPOINT_IP:-}" \
-                --argjson port "${SERVER_PORT:-0}" --arg tip "${SERVER_TUNNEL_IP:-}" \
+                --argjson port "$_p_port" --arg tip "${SERVER_TUNNEL_IP:-}" \
                 --arg snet "${TUNNEL_SUBNET:-}" --arg dns "${CLIENT_DNS:-}" \
                 --arg allowed "${CLIENT_ALLOWED_IPS:-}" \
-                --argjson jc "${JC:-5}" --argjson jmin "${JMIN:-50}" --argjson jmax "${JMAX:-1000}" \
-                --argjson s1 "${S1:-0}" --argjson s2 "${S2:-0}" \
-                --argjson h1 "${H1:-1}" --argjson h2 "${H2:-2}" --argjson h3 "${H3:-3}" --argjson h4 "${H4:-4}" \
+                --arg awg_ver "${AWG_VERSION:-1.0}" \
+                --argjson jc "$_p_jc" --argjson jmin "$_p_jmin" --argjson jmax "$_p_jmax" \
+                --argjson s1 "$_p_s1" --argjson s2 "$_p_s2" \
+                --arg s3 "${S3:-}" --arg s4 "${S4:-}" \
+                --arg h1 "${H1:-1}" --arg h2 "${H2:-2}" --arg h3 "${H3:-3}" --arg h4 "${H4:-4}" \
+                --arg i1 "${I1:-}" --arg i2 "${I2:-}" --arg i3 "${I3:-}" \
+                --arg i4 "${I4:-}" --arg i5 "${I5:-}" \
                 '{"desc":$desc,"endpoint_ip":$ep,"port":$port,"server_tunnel_ip":$tip,
                   "tunnel_subnet":$snet,"client_dns":$dns,"client_allowed_ips":$allowed,
-                  "obfuscation":{"jc":$jc,"jmin":$jmin,"jmax":$jmax,"s1":$s1,"s2":$s2,"h1":$h1,"h2":$h2,"h3":$h3,"h4":$h4}}' 2>/dev/null || echo "{}")
+                  "awg_version":$awg_ver,
+                  "obfuscation":{"jc":$jc,"jmin":$jmin,"jmax":$jmax,
+                    "s1":$s1,"s2":$s2,"s3":$s3,"s4":$s4,
+                    "h1":$h1,"h2":$h2,"h3":$h3,"h4":$h4,
+                    "i1":$i1,"i2":$i2,"i3":$i3,"i4":$i4,"i5":$i5}}' 2>/dev/null || echo "{}")
             book_write_obj ".awg.interfaces.${iface}" "$iobj"
         done
     fi
@@ -6069,7 +6724,7 @@ EOF
         local mbl_ip; mbl_ip=$(book_read ".mumble.server_ip")
         [[ -z "$mbl_ip" ]] && { mbl_ip=$(curl -4 -fsSL --connect-timeout 5 ifconfig.me 2>/dev/null || echo ""); book_write ".mumble.server_ip" "$mbl_ip"; }
         _pr_found "Адрес: ${mbl_ip:-?}:${mbl_port:-64738}"
-    elif dpkg -l 2>/dev/null | grep -q "mumble-server"; then
+    elif dpkg -l mumble-server 2>/dev/null | grep -q "^ii"; then
         _pr_warn "mumble-server установлен но не запущен"
         book_write ".mumble.installed" "true" bool
     else
@@ -6516,15 +7171,48 @@ update_xui() {
         print_ok "Бэкап БД создан"
     }
 
-    echo -e "n\n" | bash <(curl -Ls "${XUI_INSTALL_URL:-https://raw.githubusercontent.com/MHSanaei/3x-ui/main/install.sh}") || true
+    # - прямое скачивание tar.gz -
+    # - upstream install.sh имеет prompts (port/SSL), которые зависнут -
+    # - сохраняем настройки/базу и обновляем только бинарь -
+    if ! _xui_fetch_release_info; then
+        print_err "Не удалось определить последний релиз 3X-UI"
+        return 1
+    fi
+    print_info "Новая версия: ${XUI_TAG}"
 
-    # - восстанавливаем LimitNOFILE патч -
+    # - сохраняем БД в tmp на случай если tar.gz содержит свой db/ -
+    local db_backup=""
+    if [[ -f "${XUI_DB:-/usr/local/x-ui/db/x-ui.db}" ]]; then
+        db_backup=$(mktemp)
+        cp -f "${XUI_DB}" "$db_backup"
+    fi
+
+    if ! _xui_fetch_and_extract; then
+        print_err "Не удалось скачать/распаковать 3X-UI"
+        [[ -n "$db_backup" && -f "$db_backup" ]] && rm -f "$db_backup"
+        return 1
+    fi
+
+    # - восстанавливаем БД если архив переписал db/ -
+    if [[ -n "$db_backup" && -f "$db_backup" ]]; then
+        mkdir -p "${XUI_DIR:-/usr/local/x-ui}/db"
+        cp -f "$db_backup" "${XUI_DB:-/usr/local/x-ui/db/x-ui.db}"
+        rm -f "$db_backup"
+        print_ok "БД сохранена"
+    fi
+
+    if ! _xui_install_cli_and_unit; then
+        print_err "Не удалось установить CLI/unit"
+        return 1
+    fi
+
     _xui_fix_nofile 2>/dev/null || true
     systemctl restart "${XUI_SERVICE:-x-ui}" 2>/dev/null || true
     sleep 3
     if systemctl is-active --quiet "${XUI_SERVICE:-x-ui}" 2>/dev/null; then
         local new_ver; new_ver=$("${XUI_BIN:-/usr/local/x-ui/x-ui}" -v 2>/dev/null | head -1 || echo "?")
-        print_ok "3X-UI обновлён: ${new_ver}"
+        print_ok "3X-UI обновлён: ${new_ver} (${XUI_TAG})"
+        book_write ".3xui.version" "${new_ver}"
     else
         print_err "3X-UI не запустился после обновления"
     fi
@@ -6839,7 +7527,7 @@ _check_svc "docker.service" "Docker"
 
 # --> ОСТАЛЬНЫЕ СЕРВИСЫ <--
 _check_svc "x-ui.service" "3X-UI"
-_check_svc "tsserver.service" "TeamSpeak"
+_check_svc "teamspeak.service" "TeamSpeak"
 
 # - Mumble: разные имена в Debian/Ubuntu -
 if systemctl list-unit-files murmurd.service 2>/dev/null | grep -q "enabled"; then
@@ -6888,8 +7576,16 @@ if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker 2>/de
     done
 fi
 
-# --> HYSTERIA 2 <--
-_check_svc "hysteria-server.service" "Hysteria2"
+# --> HYSTERIA 2 (МУЛЬТИИНСТАНС + legacy fallback) <--
+HY2_FOUND=0
+for _u in $(systemctl list-unit-files 'hysteria-*.service' 2>/dev/null \
+    | awk '$1 ~ /^hysteria-[0-9]+\.service$/ {print $1}' | sort -u); do
+    _check_svc "$_u" "Hysteria2 (${_u%.service})"
+    HY2_FOUND=1
+done
+if [[ $HY2_FOUND -eq 0 ]] && systemctl list-unit-files hysteria-server.service 2>/dev/null | grep -q "hysteria-server"; then
+    _check_svc "hysteria-server.service" "Hysteria2 (legacy)"
+fi
 
 # --> ИТОГ <--
 _log "=== done: fixes=${FIXES} fails=${FAILS} ==="
@@ -6937,8 +7633,8 @@ _tgbot_send() {
     local token="$1" chat_id="$2" text="$3"
     curl -fsSL --connect-timeout 10 --max-time 15 \
         "https://api.telegram.org/bot${token}/sendMessage" \
-        -d "chat_id=${chat_id}" \
-        -d "text=${text}" \
+        --data-urlencode "chat_id=${chat_id}" \
+        --data-urlencode "text=${text}" \
         -d "parse_mode=HTML" >/dev/null 2>&1
 }
 
@@ -6954,26 +7650,55 @@ tgbot_setup() {
 
     local token=""
     while true; do
-        echo -e "  ${CYAN}Токен бота - длинная строка вида 123456:ABC-DEF... Получишь от @BotFather после /newbot.${NC}"
+        echo -e "  ${CYAN}Токен бота - длинная строка вида 123456:ABC-DEF...${NC}"
         ask "Bot token" "" token
-        if [[ "$token" =~ ^[0-9]+:[a-zA-Z0-9_-]+$ ]]; then break; fi
+        if [[ "$token" =~ ^[0-9]+:[a-zA-Z0-9_-]+$ ]]; then
+            break
+        fi
         print_err "Формат: 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
     done
 
     local chat_id=""
     while true; do
-        echo -e "  ${CYAN}Chat ID - твой числовой ID в Telegram. Узнай через @userinfobot (напиши ему /start).${NC}"
+        echo -e "  ${CYAN}Chat ID - твой числовой ID в Telegram.${NC}"
         ask "Chat ID" "" chat_id
-        if [[ "$chat_id" =~ ^-?[0-9]+$ ]]; then break; fi
-        print_err "Числовой ID (может быть отрицательным для групп)"
+        if [[ "$chat_id" =~ ^-?[0-9]+$ ]]; then
+            break
+        fi
+        print_err "Числовой ID"
     done
 
-    # - тест -
+    local interval="15"
+    echo ""
+    echo -e "  ${CYAN}Интервал проверки (минут). Допустимые: 5, 15, 30, 60.${NC}"
+    ask "Интервал (минут)" "$interval" interval
+    case "$interval" in
+        5|15|30|60) ;;
+        *) print_warn "Используем 15 минут"; interval=15 ;;
+    esac
+
+    local server_name=""
+    while true; do
+        echo ""
+        echo -e "  ${CYAN}Задай имя этому серверу для алертов (Оставь пустым для системного hostname):${NC}"
+        ask "Имя сервера" "" server_name
+
+        [[ -z "$server_name" ]] && break
+
+        if [[ "$server_name" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            break
+        fi
+
+        print_err "Допустимы только буквы, цифры, точка, дефис и подчёркивание"
+    done
+
     print_info "Отправляю тестовое сообщение..."
-    local hostname
-    hostname=$(hostname)
-    if _tgbot_send "$token" "$chat_id" "[OK] <b>Eli Monitor</b> подключён к <code>${hostname}</code>"; then
-        print_ok "Сообщение отправлено - проверь Telegram"
+    local test_hostname="${server_name:-$(hostname)}"
+    local test_hostname_esc
+    test_hostname_esc=$(printf '%s' "$test_hostname" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
+
+    if _tgbot_send "$token" "$chat_id" "[OK] <b>Eli Monitor</b> подключён к <code>${test_hostname_esc}</code>"; then
+        print_ok "Сообщение отправлено"
     else
         print_err "Не удалось отправить. Проверь токен и chat_id"
         return 1
@@ -6981,102 +7706,100 @@ tgbot_setup() {
 
     local confirm=""
     ask_yn "Сообщение дошло?" "y" confirm
-    [[ "$confirm" != "yes" ]] && { print_info "Перепроверь токен/chat_id и попробуй снова"; return 0; }
+    [[ "$confirm" != "yes" ]] && { print_info "Перепроверь данные"; return 0; }
 
-    # - интервал -
-    local interval="15"
-    echo ""
-    echo -e "  ${CYAN}Как часто проверять сервер (в минутах). 15 - оптимально, 5 - чаще но больше нагрузки.${NC}"
-    echo -e "  ${CYAN}Допустимые значения: 5, 15, 30, 60.${NC}"
-    ask "Интервал (минут)" "$interval" interval
-    case "$interval" in
-        5|15|30|60) ;;
-        *) print_warn "Используем 15 минут"; interval=15 ;;
-    esac
-
-    # - сохраняем env -
     mkdir -p "$(dirname "$TGBOT_ENV")"
     cat > "$TGBOT_ENV" << TGEOF
 BOT_TOKEN="${token}"
 CHAT_ID="${chat_id}"
 INTERVAL="${interval}"
+SERVER_NAME="${server_name}"
 TGEOF
     chmod 600 "$TGBOT_ENV"
 
-    # - создаём скрипт мониторинга -
     cat > "$TGBOT_SCRIPT" << 'MONEOF'
 #!/usr/bin/env bash
 # - eli-tgbot-monitor: проверка стека, алерт в Telegram -
 
 ENV="/etc/vps-eli-stack/telegrambot.env"
+STATE_DIR="/var/lib/eli-tgbot-monitor"
+STATE_FILE="${STATE_DIR}/last_alert_hash"
+
 [ -f "$ENV" ] || exit 0
 # shellcheck disable=SC1090
 source "$ENV"
 
-HOSTNAME=$(hostname)
+SERVER_LABEL="${SERVER_NAME:-$(hostname)}"
 ALERTS=""
 ALERT_COUNT=0
 
+_html_escape() {
+    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
 _alert() {
-    ALERTS="${ALERTS}\n[!] $1"
+    ALERTS="${ALERTS}\n[!] $(_html_escape "$1")"
     ALERT_COUNT=$(( ALERT_COUNT + 1 ))
 }
 
-# - проверка сервиса: enabled но не active -
 _chk() {
     local svc="$1" label="$2"
-    if systemctl list-unit-files "$svc" 2>/dev/null | grep -q "enabled"; then
+    if systemctl list-unit-files "$svc" 2>/dev/null | grep -q 'enabled'; then
         if ! systemctl is-active --quiet "$svc" 2>/dev/null; then
             _alert "${label} не работает"
         fi
     fi
 }
 
-# - AWG интерфейсы -
 for unit in /etc/systemd/system/multi-user.target.wants/awg-quick@*.service; do
     [ -e "$unit" ] || continue
     iface=$(basename "$unit" | sed 's/^awg-quick@//;s/\.service$//')
     _chk "awg-quick@${iface}.service" "AWG ${iface}"
 done
 
-# - сервисы -
 _chk "docker.service" "Docker"
 _chk "x-ui.service" "3X-UI"
-_chk "tsserver.service" "TeamSpeak"
+_chk "teamspeak.service" "TeamSpeak"
 _chk "mumble-server.service" "Mumble"
 _chk "murmurd.service" "Mumble"
 _chk "unbound.service" "Unbound"
 _chk "fail2ban.service" "Fail2ban"
 
-# - Outline контейнеры -
 if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker 2>/dev/null; then
     for cn in shadowbox watchtower; do
-        if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "$cn"; then
-            if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "$cn"; then
+        if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -Fxq "$cn"; then
+            if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq "$cn"; then
                 _alert "Outline/${cn} остановлен"
             fi
         fi
     done
+
+    while read -r cn; do
+        [ -n "$cn" ] || continue
+        if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq "$cn"; then
+            _alert "${cn} остановлен"
+        fi
+    done < <(docker ps -a --format '{{.Names}}' 2>/dev/null | grep '^mtproto-')
+
+    while read -r cn; do
+        [ -n "$cn" ] || continue
+        if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq "$cn"; then
+            _alert "${cn} остановлен"
+        fi
+    done < <(docker ps -a --format '{{.Names}}' 2>/dev/null | grep '^socks5-')
 fi
 
-# - MTProto контейнеры (мультиинстанс) -
-for cn in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep "^mtproto-"); do
-    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${cn}$"; then
-        _alert "${cn} остановлен"
-    fi
-done
+HY2_FOUND=0
+while read -r unit_name; do
+    [ -n "$unit_name" ] || continue
+    _chk "$unit_name" "Hysteria2 (${unit_name%.service})"
+    HY2_FOUND=1
+done < <(systemctl list-unit-files 'hysteria-*.service' 2>/dev/null | awk '$1 ~ /^hysteria-[0-9]+\.service$/ {print $1}' | sort -u)
 
-# - SOCKS5 контейнеры (мультиинстанс) -
-for cn in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep "^socks5-"); do
-    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${cn}$"; then
-        _alert "${cn} остановлен"
-    fi
-done
+if [ "$HY2_FOUND" -eq 0 ] && systemctl list-unit-files hysteria-server.service 2>/dev/null | grep -q 'hysteria-server'; then
+    _chk "hysteria-server.service" "Hysteria2 (legacy)"
+fi
 
-# - Hysteria 2 -
-_chk "hysteria-server.service" "Hysteria2"
-
-# - диск -
 DISK_USE=$(df / | awk 'NR==2{print $5}' | tr -d '%')
 if [ "$DISK_USE" -gt 90 ] 2>/dev/null; then
     _alert "Диск / заполнен на ${DISK_USE}%"
@@ -7084,51 +7807,69 @@ elif [ "$DISK_USE" -gt 80 ] 2>/dev/null; then
     _alert "Диск / заполнен на ${DISK_USE}% (предупреждение)"
 fi
 
-# - RAM -
-MEM_AVAIL=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo "0")
+MEM_AVAIL=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo '0')
 if [ "$MEM_AVAIL" -lt 64 ] 2>/dev/null; then
     _alert "Свободно RAM: ${MEM_AVAIL} MB"
 fi
 
-# - fail2ban: много банов за час -
-if command -v fail2ban-client >/dev/null 2>&1; then
-    BAN_COUNT=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
+if command -v fail2ban-client >/dev/null 2>&1 && fail2ban-client status sshd >/dev/null 2>&1; then
+    BAN_COUNT=$(fail2ban-client status sshd 2>/dev/null | awk -F': ' '/Currently banned/ {print $2}')
     if [ "${BAN_COUNT:-0}" -gt 20 ] 2>/dev/null; then
         _alert "Fail2ban: ${BAN_COUNT} забаненных IP (SSH brute force)"
     fi
 fi
 
-# - отправка алерта если есть проблемы -
+mkdir -p "$STATE_DIR"
+
 if [ "$ALERT_COUNT" -gt 0 ]; then
-    MSG="[ALERT] <b>${HOSTNAME}</b> - ${ALERT_COUNT} проблем$(echo -e "$ALERTS")"
-    curl -fsSL --connect-timeout 10 --max-time 15 \
-        "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-        -d "chat_id=${CHAT_ID}" \
-        -d "text=${MSG}" \
-        -d "parse_mode=HTML" >/dev/null 2>&1
+    SERVER_LABEL_ESC=$(_html_escape "$SERVER_LABEL")
+    MSG="[ALERT] <b>${SERVER_LABEL_ESC}</b> - ${ALERT_COUNT} проблем$(echo -e "$ALERTS")"
+    ALERT_HASH=$(printf '%s' "$MSG" | sha256sum | awk '{print $1}')
+    LAST_HASH=$(cat "$STATE_FILE" 2>/dev/null || true)
+
+    if [ "$ALERT_HASH" != "$LAST_HASH" ]; then
+        if curl -fsSL --connect-timeout 10 --max-time 15 \
+            "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT_ID}" \
+            --data-urlencode "text=${MSG}" \
+            -d "parse_mode=HTML" >/dev/null 2>&1; then
+            printf '%s' "$ALERT_HASH" > "$STATE_FILE"
+        fi
+    fi
+else
+    rm -f "$STATE_FILE"
 fi
 MONEOF
     chmod +x "$TGBOT_SCRIPT"
     print_ok "Скрипт мониторинга: ${TGBOT_SCRIPT}"
 
-    # - cron -
-    local current_cron
-    current_cron=$(crontab -l 2>/dev/null || echo "")
-    local cron_entry="*/${interval} * * * * ${TGBOT_SCRIPT}"
-    # - удаляем старую запись если есть -
-    current_cron=$(echo "$current_cron" | grep -v "eli-tgbot-monitor" | grep -v "# Telegram monitor")
-    current_cron="${current_cron}"$'\n'"# Telegram monitor каждые ${interval} мин"$'\n'"${cron_entry}"
-    echo "$current_cron" | crontab -
-    print_ok "Cron: каждые ${interval} минут"
+    local tmp_cron
+    tmp_cron=$(mktemp) || {
+        print_err "Не удалось создать временный файл для cron"
+        return 1
+    }
 
-    # - book -
+    crontab -l 2>/dev/null | grep -v 'eli-tgbot-monitor' | grep -v '# Telegram monitor' > "$tmp_cron"
+    echo "# Telegram monitor каждые ${interval} мин" >> "$tmp_cron"
+    echo "*/${interval} * * * * ${TGBOT_SCRIPT}" >> "$tmp_cron"
+
+    if crontab "$tmp_cron"; then
+        print_ok "Cron: каждые ${interval} минут"
+    else
+        rm -f "$tmp_cron"
+        print_err "Не удалось установить cron задачу"
+        return 1
+    fi
+    rm -f "$tmp_cron"
+
     book_write ".telegram_bot.enabled" "true" bool
     book_write ".telegram_bot.interval" "$interval" number
 
     echo ""
     print_ok "Telegram мониторинг настроен"
-    print_info "Бот пришлёт сообщение только при обнаружении проблем"
-    print_info "Для мониторинга доступности VPS снаружи: uptimerobot.com"
+	print_info "Бот пришлёт сообщение только при обнаружении проблем"
+    print_info "Повтор одного и того же алерта не отправляется, пока состояние не изменится"
+	print_info "Для мониторинга доступности VPS снаружи: uptimerobot.com"
     return 0
 }
 
@@ -7142,21 +7883,22 @@ tgbot_test() {
     # shellcheck disable=SC1090
     source "$TGBOT_ENV"
 
-    # - запускаем скрипт мониторинга вручную -
-    print_info "Запускаю проверку..."
     bash "$TGBOT_SCRIPT" 2>/dev/null
 
-    # - отправляем тестовое сообщение в любом случае -
-    local hostname
-    hostname=$(hostname)
-    local disk_use mem_avail uptime_str
+    local test_hostname="${SERVER_NAME:-$(hostname)}"
+    local test_hostname_esc uptime_str uptime_str_esc
+    test_hostname_esc=$(printf '%s' "$test_hostname" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
+
+    local disk_use mem_avail
     disk_use=$(df / | awk 'NR==2{print $5}')
     mem_avail=$(awk '/MemAvailable/{printf "%.0f", $2/1024}' /proc/meminfo 2>/dev/null)
     uptime_str=$(uptime -p 2>/dev/null || uptime)
-    local msg="[STAT] <b>${hostname}</b> тест
+    uptime_str_esc=$(printf '%s' "$uptime_str" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
+
+    local msg="[STAT] <b>${test_hostname_esc}</b> тест
 Диск: ${disk_use}
 RAM свободно: ${mem_avail} MB
-Uptime: ${uptime_str}"
+Uptime: ${uptime_str_esc}"
 
     if _tgbot_send "$BOT_TOKEN" "$CHAT_ID" "$msg"; then
         print_ok "Тестовое сообщение отправлено"
@@ -7175,12 +7917,14 @@ tgbot_status() {
     fi
     # shellcheck disable=SC1090
     source "$TGBOT_ENV"
+
     echo -e "  ${GREEN}(*)${NC} ${BOLD}Telegram Monitor${NC}"
     echo -e "  Интервал: каждые ${INTERVAL} мин"
+    echo -e "  Имя сервера: ${SERVER_NAME:-$(hostname)}"
     echo -e "  Chat ID: ${CHAT_ID}"
     echo -e "  Скрипт: ${TGBOT_SCRIPT}"
 
-    if crontab -l 2>/dev/null | grep -q "eli-tgbot-monitor"; then
+    if crontab -l 2>/dev/null | grep -q 'eli-tgbot-monitor'; then
         print_ok "Cron задача активна"
     else
         print_warn "Cron задача не найдена"
@@ -7195,15 +7939,25 @@ tgbot_disable() {
     ask_yn "Отключить мониторинг?" "n" confirm
     [[ "$confirm" != "yes" ]] && return 0
 
-    # - удаляем cron -
-    local current_cron
-    current_cron=$(crontab -l 2>/dev/null || echo "")
-    current_cron=$(echo "$current_cron" | grep -v "eli-tgbot-monitor" | grep -v "# Telegram monitor")
-    echo "$current_cron" | crontab -
-    print_ok "Cron задача удалена"
+    local tmp_cron
+    tmp_cron=$(mktemp) || {
+        print_err "Не удалось создать временный файл для cron"
+        return 1
+    }
+
+    crontab -l 2>/dev/null | grep -v 'eli-tgbot-monitor' | grep -v '# Telegram monitor' > "$tmp_cron"
+    if crontab "$tmp_cron"; then
+        print_ok "Cron задача удалена"
+    else
+        rm -f "$tmp_cron"
+        print_err "Не удалось обновить cron"
+        return 1
+    fi
+    rm -f "$tmp_cron"
 
     rm -f "$TGBOT_SCRIPT"
     rm -f "$TGBOT_ENV"
+    rm -f /var/lib/eli-tgbot-monitor/last_alert_hash
     book_write ".telegram_bot.enabled" "false" bool
     print_ok "Telegram мониторинг отключён"
     return 0
@@ -7235,6 +7989,22 @@ backup_create() {
     local tmpdir
     tmpdir=$(mktemp -d "/tmp/eli-backup-${ts}-XXXX")
     local collected=0
+    local failed=0
+
+    # - хелпер с проверкой exit-кода cp -
+    # - успех = collected++, провал = failed++ и warn -
+    _bkp_cp() {
+        local src="$1" dst="$2" label="$3"
+        if cp -a "$src" "$dst" 2>/dev/null; then
+            print_ok "$label"
+            collected=$(( collected + 1 ))
+            return 0
+        else
+            print_warn "Не удалось: $label (${src} -> ${dst})"
+            failed=$(( failed + 1 ))
+            return 1
+        fi
+    }
 
     # - Book of Eli -
     if _bkp_add /etc/vps-eli-stack/book_of_Eli.json "${tmpdir}/book/book_of_Eli.json"; then
@@ -7244,94 +8014,102 @@ backup_create() {
 
     # - AWG: env, ключи, клиенты -
     if [[ -d /etc/awg-setup ]]; then
-        cp -a /etc/awg-setup "${tmpdir}/awg-setup" 2>/dev/null
-        print_ok "AWG setup (env, ключи, клиенты)"
-        collected=$(( collected + 1 ))
+        _bkp_cp /etc/awg-setup "${tmpdir}/awg-setup" "AWG setup (env, ключи, клиенты)"
     fi
     if [[ -d /etc/amnezia/amneziawg ]]; then
         mkdir -p "${tmpdir}/amnezia-conf"
-        cp -a /etc/amnezia/amneziawg/*.conf "${tmpdir}/amnezia-conf/" 2>/dev/null || true
-        local nconf
-        nconf=$(ls "${tmpdir}/amnezia-conf/"*.conf 2>/dev/null | wc -l)
-        [[ "$nconf" -gt 0 ]] && { print_ok "AWG конфиги (${nconf} шт)"; collected=$(( collected + 1 )); }
+        if cp -a /etc/amnezia/amneziawg/*.conf "${tmpdir}/amnezia-conf/" 2>/dev/null; then
+            local nconf
+            nconf=$(ls "${tmpdir}/amnezia-conf/"*.conf 2>/dev/null | wc -l)
+            if [[ "$nconf" -gt 0 ]]; then
+                print_ok "AWG конфиги (${nconf} шт)"
+                collected=$(( collected + 1 ))
+            fi
+        fi
     fi
 
     # - 3X-UI: env + db -
     if [[ -d /etc/3xui ]]; then
-        cp -a /etc/3xui "${tmpdir}/3xui-env" 2>/dev/null
-        print_ok "3X-UI env"
-        collected=$(( collected + 1 ))
+        _bkp_cp /etc/3xui "${tmpdir}/3xui-env" "3X-UI env"
     fi
     local xui_db=""
     xui_db=$(find /etc/x-ui /usr/local/x-ui -maxdepth 2 -name "x-ui.db" 2>/dev/null | head -1)
     if [[ -n "$xui_db" ]]; then
         mkdir -p "${tmpdir}/3xui-db"
-        cp -a "$xui_db" "${tmpdir}/3xui-db/x-ui.db" 2>/dev/null
-        print_ok "3X-UI база данных"
-        collected=$(( collected + 1 ))
+        _bkp_cp "$xui_db" "${tmpdir}/3xui-db/x-ui.db" "3X-UI база данных"
     fi
 
     # - Outline -
     if [[ -d /etc/outline ]]; then
-        cp -a /etc/outline "${tmpdir}/outline" 2>/dev/null
-        print_ok "Outline (env, manager key)"
-        collected=$(( collected + 1 ))
+        _bkp_cp /etc/outline "${tmpdir}/outline" "Outline (env, manager key)"
     fi
 
     # - TeamSpeak: env + SQLite WAL -
     if [[ -d /etc/teamspeak ]]; then
-        cp -a /etc/teamspeak "${tmpdir}/teamspeak-env" 2>/dev/null
-        print_ok "TeamSpeak env"
-        collected=$(( collected + 1 ))
+        _bkp_cp /etc/teamspeak "${tmpdir}/teamspeak-env" "TeamSpeak env"
     fi
     local ts_db=""
     ts_db=$(find /opt/teamspeak -name "*.sqlitedb" -type f 2>/dev/null | head -1)
     if [[ -n "$ts_db" ]]; then
         mkdir -p "${tmpdir}/teamspeak-db"
-        cp -a "${ts_db}" "${tmpdir}/teamspeak-db/" 2>/dev/null || true
+        local db_ok=0
+        cp -a "${ts_db}" "${tmpdir}/teamspeak-db/" 2>/dev/null && db_ok=1
         cp -a "${ts_db}-shm" "${tmpdir}/teamspeak-db/" 2>/dev/null || true
         cp -a "${ts_db}-wal" "${tmpdir}/teamspeak-db/" 2>/dev/null || true
-        print_ok "TeamSpeak SQLite (WAL)"
-        collected=$(( collected + 1 ))
+        if [[ "$db_ok" -eq 1 ]]; then
+            print_ok "TeamSpeak SQLite (WAL)"
+            collected=$(( collected + 1 ))
+        else
+            print_warn "TeamSpeak SQLite: копирование базы не удалось"
+            failed=$(( failed + 1 ))
+        fi
     fi
 
-    # - Mumble -
+    # - Mumble: конфиг + sqlite БД (ACL, каналы, регистрации) -
     for mcfg in /etc/mumble-server.ini /etc/murmur/murmur.ini /etc/mumble/mumble-server.ini; do
         if [[ -f "$mcfg" ]]; then
             mkdir -p "${tmpdir}/mumble"
-            cp -a "$mcfg" "${tmpdir}/mumble/" 2>/dev/null
-            print_ok "Mumble конфиг ($(basename "$mcfg"))"
-            collected=$(( collected + 1 ))
+            _bkp_cp "$mcfg" "${tmpdir}/mumble/" "Mumble конфиг ($(basename "$mcfg"))"
             break
         fi
     done
+    # - sqlite БД: варианты путей по дистрибутиву -
+    local mbl_db=""
+    for candidate in /var/lib/mumble-server/mumble-server.sqlite \
+                     /var/lib/mumble/mumble-server.sqlite \
+                     /var/lib/murmur/murmur.sqlite; do
+        if [[ -f "$candidate" ]]; then
+            mbl_db="$candidate"; break
+        fi
+    done
+    # - fallback: поиск по filesystem -
+    if [[ -z "$mbl_db" ]]; then
+        mbl_db=$(find /var/lib/mumble-server /var/lib/mumble /var/lib/murmur \
+            -maxdepth 2 -name "*.sqlite" -type f 2>/dev/null | head -1)
+    fi
+    if [[ -n "$mbl_db" && -f "$mbl_db" ]]; then
+        mkdir -p "${tmpdir}/mumble"
+        _bkp_cp "$mbl_db" "${tmpdir}/mumble/$(basename "$mbl_db")" "Mumble sqlite БД"
+    fi
 
     # - MTProto -
     if [[ -d /etc/mtproto ]]; then
-        cp -a /etc/mtproto "${tmpdir}/mtproto" 2>/dev/null
-        print_ok "MTProto env"
-        collected=$(( collected + 1 ))
+        _bkp_cp /etc/mtproto "${tmpdir}/mtproto" "MTProto env"
     fi
 
     # - Signal Proxy -
     if [[ -d /etc/signal-proxy ]]; then
-        cp -a /etc/signal-proxy "${tmpdir}/signal-proxy" 2>/dev/null
-        print_ok "Signal Proxy env"
-        collected=$(( collected + 1 ))
+        _bkp_cp /etc/signal-proxy "${tmpdir}/signal-proxy" "Signal Proxy env"
     fi
 
     # - SOCKS5 -
     if [[ -d /etc/socks5 ]]; then
-        cp -a /etc/socks5 "${tmpdir}/socks5" 2>/dev/null
-        print_ok "SOCKS5 env"
-        collected=$(( collected + 1 ))
+        _bkp_cp /etc/socks5 "${tmpdir}/socks5" "SOCKS5 env"
     fi
 
     # - Hysteria 2 -
     if [[ -d /etc/hysteria ]]; then
-        cp -a /etc/hysteria "${tmpdir}/hysteria" 2>/dev/null
-        print_ok "Hysteria 2 (konfig, sertifikat, env)"
-        collected=$(( collected + 1 ))
+        _bkp_cp /etc/hysteria "${tmpdir}/hysteria" "Hysteria 2 (config, сертификаты, env)"
     fi
 
     # - Системные конфиги -
@@ -7339,13 +8117,39 @@ backup_create() {
     _bkp_add /etc/ssh/sshd_config "${tmpdir}/system/sshd_config" && print_ok "sshd_config"
     _bkp_add /etc/sysctl.d/99-awg-forward.conf "${tmpdir}/system/99-awg-forward.conf" 2>/dev/null || true
 
+    # - systemd units: нужны для мульти-инстансов Hysteria2 и для нативно-установленных -
+    # - 3X-UI / TeamSpeak (на чистой машине после restore сервис не запустится без unit) -
+    mkdir -p "${tmpdir}/system/systemd"
+    local unit_count=0
+    for unit_glob in \
+        "/etc/systemd/system/hysteria-*.service" \
+        "/etc/systemd/system/x-ui.service" \
+        "/etc/systemd/system/teamspeak.service"; do
+        for u in $unit_glob; do
+            [[ -f "$u" ]] || continue
+            cp -a "$u" "${tmpdir}/system/systemd/" 2>/dev/null && unit_count=$(( unit_count + 1 ))
+        done
+    done
+    if [[ $unit_count -gt 0 ]]; then
+        print_ok "systemd units (${unit_count} шт)"
+        collected=$(( collected + 1 ))
+    else
+        rmdir "${tmpdir}/system/systemd" 2>/dev/null || true
+    fi
+
     # - UFW rules -
     if [[ -f /etc/ufw/user.rules ]]; then
         mkdir -p "${tmpdir}/ufw"
-        cp -a /etc/ufw/user.rules "${tmpdir}/ufw/" 2>/dev/null || true
+        local ufw_ok=0
+        cp -a /etc/ufw/user.rules "${tmpdir}/ufw/" 2>/dev/null && ufw_ok=1
         cp -a /etc/ufw/user6.rules "${tmpdir}/ufw/" 2>/dev/null || true
-        print_ok "UFW rules"
-        collected=$(( collected + 1 ))
+        if [[ "$ufw_ok" -eq 1 ]]; then
+            print_ok "UFW rules"
+            collected=$(( collected + 1 ))
+        else
+            print_warn "UFW rules: не скопированы"
+            failed=$(( failed + 1 ))
+        fi
     fi
 
     # - Crontab -
@@ -7353,12 +8157,19 @@ backup_create() {
     [[ -s "${tmpdir}/system/crontab.txt" ]] && print_ok "Crontab"
 
     # - метаданные -
+    # - debian_version и version_id для проверки совместимости при restore -
+    local _deb_ver="unknown"
+    [[ -f /etc/debian_version ]] && _deb_ver=$(cat /etc/debian_version 2>/dev/null | tr -d '\n')
+    local _version_id=""
+    [[ -f /etc/os-release ]] && _version_id=$(grep "^VERSION_ID=" /etc/os-release | cut -d'"' -f2)
     cat > "${tmpdir}/backup_meta.txt" << METAEOF
 backup_date="${ts}"
 hostname="$(hostname)"
 os="$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'"' -f2 || echo 'unknown')"
 kernel="$(uname -r)"
-eli_version="3.141"
+debian_version="${_deb_ver}"
+version_id="${_version_id}"
+eli_version="3.236"
 components=${collected}
 METAEOF
 
@@ -7383,6 +8194,7 @@ METAEOF
         echo -e "  ${BOLD}Файл:${NC} ${archive}"
         echo -e "  ${BOLD}Размер:${NC} ${size}"
         echo -e "  ${BOLD}Компонентов:${NC} ${collected}"
+        [[ "$failed" -gt 0 ]] && echo -e "  ${YELLOW}${BOLD}Ошибок копирования:${NC} ${failed}"
         echo ""
         echo -e "  ${CYAN}Скачать:${NC} scp root@$(curl -4 -fsSL --connect-timeout 3 ifconfig.me 2>/dev/null || echo 'IP'):${archive} ."
         echo ""
@@ -7417,8 +8229,9 @@ backup_list() {
 
 # --> ВОССТАНОВЛЕНИЕ: РАСКЛАДКА КОМПОНЕНТА <--
 # - останавливает сервис, копирует, запускает -
+# - mode: опциональный аргумент для явных прав (default: не трогать) -
 _bkp_restore_svc() {
-    local label="$1" svc="$2" src="$3" dst="$4"
+    local label="$1" svc="$2" src="$3" dst="$4" mode="${5:-}"
     if [[ ! -e "$src" ]]; then return 1; fi
     print_info "Восстанавливаю: ${label}"
     if [[ -n "$svc" ]]; then
@@ -7426,7 +8239,8 @@ _bkp_restore_svc() {
     fi
     mkdir -p "$(dirname "$dst")"
     cp -a "$src" "$dst" 2>/dev/null || { print_warn "Не удалось скопировать ${label}"; return 1; }
-    chmod 600 "$dst" 2>/dev/null || true
+    # - не меняем права если не указан mode (cp -a сохранит исходные из архива) -
+    [[ -n "$mode" ]] && chmod "$mode" "$dst" 2>/dev/null || true
     if [[ -n "$svc" ]]; then
         systemctl start "$svc" 2>/dev/null || true
     fi
@@ -7494,6 +8308,43 @@ backup_restore() {
     local root
     root=$(find "$tmpdir" -maxdepth 1 -mindepth 1 -type d | head -1)
     [[ -z "$root" ]] && root="$tmpdir"
+
+    # - проверка совместимости по backup_meta.txt -
+    # - сравниваем Debian version_id бэкапа и текущей системы -
+    # - предупреждаем -> несовпадение версий = возможные проблемы -
+    local meta="${root}/backup_meta.txt"
+    if [[ -f "$meta" ]]; then
+        local bk_vid="" bk_os="" bk_date="" bk_host=""
+        bk_vid=$(grep "^version_id=" "$meta" | cut -d'"' -f2 || true)
+        bk_os=$(grep "^os=" "$meta" | cut -d'"' -f2 || true)
+        bk_date=$(grep "^backup_date=" "$meta" | cut -d'"' -f2 || true)
+        bk_host=$(grep "^hostname=" "$meta" | cut -d'"' -f2 || true)
+
+        local cur_vid=""
+        [[ -f /etc/os-release ]] && cur_vid=$(grep "^VERSION_ID=" /etc/os-release | cut -d'"' -f2)
+
+        echo ""
+        echo -e "  ${BOLD}Метаданные бэкапа:${NC}"
+        [[ -n "$bk_date" ]] && echo -e "    Дата:    ${bk_date}"
+        [[ -n "$bk_host" ]] && echo -e "    Хост:    ${bk_host}"
+        [[ -n "$bk_os" ]]   && echo -e "    ОС:      ${bk_os}"
+        [[ -n "$bk_vid" ]]  && echo -e "    ver_id:  ${bk_vid}"
+        echo ""
+
+        if [[ -n "$bk_vid" && -n "$cur_vid" && "$bk_vid" != "$cur_vid" ]]; then
+            print_warn "Версия ОС отличается (бэкап: ${bk_vid}, текущая: ${cur_vid})"
+            print_warn "Возможны проблемы с пакетами/сервисами (AWG PPA codename, kernel)"
+            local compat_ok=""
+            ask_yn "Продолжить восстановление несмотря на это?" "n" compat_ok
+            if [[ "$compat_ok" != "yes" ]]; then
+                print_info "Отменено пользователем"
+                rm -rf "$tmpdir"
+                return 0
+            fi
+        fi
+    else
+        print_warn "backup_meta.txt не найден в архиве - восстанавливаю без проверки совместимости"
+    fi
 
     local restored=0
 
@@ -7572,7 +8423,7 @@ backup_restore() {
         restored=$(( restored + 1 ))
     fi
     if [[ -d "${root}/teamspeak-db" ]]; then
-        systemctl stop tsserver 2>/dev/null || true
+        systemctl stop teamspeak 2>/dev/null || true
         local ts_dst=""
         ts_dst=$(find /opt/teamspeak -name "*.sqlitedb" -type f 2>/dev/null | head -1)
         if [[ -n "$ts_dst" ]]; then
@@ -7580,24 +8431,67 @@ backup_restore() {
             ts_dir=$(dirname "$ts_dst")
             cp -a "${root}/teamspeak-db/"* "${ts_dir}/" 2>/dev/null || true
         fi
-        systemctl start tsserver 2>/dev/null || true
+        systemctl start teamspeak 2>/dev/null || true
         print_ok "TeamSpeak SQLite"
         restored=$(( restored + 1 ))
     fi
 
-    # - Mumble -
+    # - Mumble: конфиг + sqlite БД -
     if [[ -d "${root}/mumble" ]]; then
-        for mcfg in "${root}/mumble/"*; do
+        # - останавливаем сервис перед восстановлением -
+        local mbl_svc=""
+        if systemctl list-unit-files mumble-server.service 2>/dev/null | grep -q mumble-server; then
+            mbl_svc="mumble-server"
+        elif systemctl list-unit-files murmurd.service 2>/dev/null | grep -q murmurd; then
+            mbl_svc="murmurd"
+        fi
+        [[ -n "$mbl_svc" ]] && systemctl stop "$mbl_svc" 2>/dev/null || true
+
+        # - конфиг: ini файлы -
+        for mcfg in "${root}/mumble/"*.ini; do
+            [[ -f "$mcfg" ]] || continue
             local fname
             fname=$(basename "$mcfg")
             if [[ "$fname" == "mumble-server.ini" ]]; then
-                _bkp_restore_svc "Mumble" "mumble-server" "$mcfg" "/etc/mumble-server.ini" \
-                    || _bkp_restore_svc "Mumble" "murmurd" "$mcfg" "/etc/mumble-server.ini"
+                cp -a "$mcfg" /etc/mumble-server.ini 2>/dev/null || true
             elif [[ "$fname" == "murmur.ini" ]]; then
-                _bkp_restore_svc "Mumble" "murmurd" "$mcfg" "/etc/murmur/murmur.ini"
+                mkdir -p /etc/murmur
+                cp -a "$mcfg" /etc/murmur/murmur.ini 2>/dev/null || true
             fi
+            print_ok "Mumble конфиг (${fname})"
             restored=$(( restored + 1 ))
         done
+
+        # - sqlite БД: пути по приоритету mumble-server -> murmur -
+        for mdb in "${root}/mumble/"*.sqlite; do
+            [[ -f "$mdb" ]] || continue
+            local fname
+            fname=$(basename "$mdb")
+            local dst=""
+            if [[ -d /var/lib/mumble-server ]]; then
+                dst="/var/lib/mumble-server/${fname}"
+            elif [[ -d /var/lib/mumble ]]; then
+                dst="/var/lib/mumble/${fname}"
+            elif [[ -d /var/lib/murmur ]]; then
+                dst="/var/lib/murmur/${fname}"
+            fi
+            if [[ -n "$dst" ]]; then
+                cp -a "$mdb" "$dst" 2>/dev/null || true
+                # - владелец: если есть пакетный пользователь -
+                if id mumble-server &>/dev/null; then
+                    chown mumble-server:mumble-server "$dst" 2>/dev/null || true
+                elif id murmur &>/dev/null; then
+                    chown murmur:murmur "$dst" 2>/dev/null || true
+                fi
+                print_ok "Mumble sqlite БД"
+                restored=$(( restored + 1 ))
+            else
+                print_warn "Mumble: не нашёл куда восстановить БД"
+            fi
+            break
+        done
+
+        [[ -n "$mbl_svc" ]] && systemctl start "$mbl_svc" 2>/dev/null || true
     fi
 
     # - MTProto -
@@ -7627,15 +8521,54 @@ backup_restore() {
         restored=$(( restored + 1 ))
     fi
 
-    # - Hysteria 2 -
+    # - Hysteria 2: поддержка мультиинстанса и legacy -
     if [[ -d "${root}/hysteria" ]]; then
-        systemctl stop hysteria-server 2>/dev/null || true
+        # - останавливаем все hysteria-* юниты -
+        for u in /etc/systemd/system/hysteria-*.service /etc/systemd/system/hysteria-server.service; do
+            [[ -f "$u" ]] || continue
+            local svc_name
+            svc_name=$(basename "$u" | sed 's/\.service$//')
+            systemctl stop "$svc_name" 2>/dev/null || true
+        done
         mkdir -p /etc/hysteria; chmod 700 /etc/hysteria
         cp -a "${root}/hysteria/"* /etc/hysteria/ 2>/dev/null || true
         find /etc/hysteria -type f -exec chmod 600 {} \;
-        systemctl start hysteria-server 2>/dev/null || true
-        print_ok "Hysteria 2 (konfig, sertifikat, env)"
+        print_ok "Hysteria 2 (конфиг, сертификат, env)"
         restored=$(( restored + 1 ))
+        # - запуск откладываем до раздела systemd units -
+    fi
+
+    # - systemd units: хранятся в ${root}/system/systemd/ -
+    if [[ -d "${root}/system/systemd" ]]; then
+        local units_restored=0
+        for u in "${root}/system/systemd/"*.service; do
+            [[ -f "$u" ]] || continue
+            cp -a "$u" /etc/systemd/system/ 2>/dev/null || continue
+            chmod 644 "/etc/systemd/system/$(basename "$u")" 2>/dev/null || true
+            units_restored=$(( units_restored + 1 ))
+        done
+        if [[ $units_restored -gt 0 ]]; then
+            systemctl daemon-reload 2>/dev/null || true
+            print_ok "systemd units (${units_restored} шт)"
+            restored=$(( restored + 1 ))
+            # - enable + start всех восстановленных hysteria-* юнитов -
+            for u in "${root}/system/systemd/"hysteria-*.service; do
+                [[ -f "$u" ]] || continue
+                local svc_name
+                svc_name=$(basename "$u" | sed 's/\.service$//')
+                systemctl enable "$svc_name" 2>/dev/null || true
+                systemctl start "$svc_name" 2>/dev/null || true
+            done
+            # - x-ui и teamspeak запускаем если их бинари на месте -
+            [[ -f /usr/local/x-ui/x-ui ]] && {
+                systemctl enable x-ui 2>/dev/null || true
+                systemctl start x-ui 2>/dev/null || true
+            }
+            [[ -f /opt/teamspeak/tsserver ]] && {
+                systemctl enable teamspeak 2>/dev/null || true
+                systemctl start teamspeak 2>/dev/null || true
+            }
+        fi
     fi
 
     # - sshd_config -
@@ -7725,12 +8658,12 @@ menu_vpn() {
         read -r choice
 
         case "$choice" in
-            1) menu_awg       || print_warn "Ошибка в разделе AmneziaWG" ;;
-            2) menu_xui       || print_warn "Ошибка в разделе 3X-UI" ;;
-            3) menu_otl       || print_warn "Ошибка в разделе Outline" ;;
-            4) menu_proxy     || print_warn "Ошибка в разделе Прокси" ;;
+            1) menu_awg       || { print_warn "Ошибка в разделе AmneziaWG"; eli_pause; } ;;
+            2) menu_xui       || { print_warn "Ошибка в разделе 3X-UI"; eli_pause; } ;;
+            3) menu_otl       || { print_warn "Ошибка в разделе Outline"; eli_pause; } ;;
+            4) menu_proxy     || { print_warn "Ошибка в разделе Прокси"; eli_pause; } ;;
             0) return 0 ;;
-            *) print_warn "Введите число от 0 до 4" ;;
+            *) print_warn "Введите число от 0 до 4"; eli_pause ;;
         esac
     done
 }
@@ -7763,9 +8696,9 @@ menu_awg() {
 
         case "$choice" in
             1) awg_install    || print_warn "Ошибка при установке AWG"; eli_pause ;;
-            2) awg_manage     || print_warn "Ошибка в управлении AWG" ;;
+            2) awg_manage     || { print_warn "Ошибка в управлении AWG"; eli_pause; } ;;
             0) return 0 ;;
-            *) print_warn "Введите число от 0 до 2" ;;
+            *) print_warn "Введите число от 0 до 2"; eli_pause ;;
         esac
     done
 }
@@ -7896,12 +8829,12 @@ menu_proxy() {
         read -r choice
 
         case "$choice" in
-            1) menu_mtp  || print_warn "Ошибка в разделе MTProto" ;;
-            2) menu_s5   || print_warn "Ошибка в разделе SOCKS5" ;;
-            3) menu_hy2  || print_warn "Ошибка в разделе Hysteria 2" ;;
-            4) menu_sig  || print_warn "Ошибка в разделе Signal" ;;
+            1) menu_mtp  || { print_warn "Ошибка в разделе MTProto"; eli_pause; } ;;
+            2) menu_s5   || { print_warn "Ошибка в разделе SOCKS5"; eli_pause; } ;;
+            3) menu_hy2  || { print_warn "Ошибка в разделе Hysteria 2"; eli_pause; } ;;
+            4) menu_sig  || { print_warn "Ошибка в разделе Signal"; eli_pause; } ;;
             0) return 0 ;;
-            *) print_warn "Введите число от 0 до 4" ;;
+            *) print_warn "Введите число от 0 до 4"; eli_pause ;;
         esac
     done
 }
@@ -8103,10 +9036,10 @@ menu_comms() {
         read -r choice
 
         case "$choice" in
-            1) menu_ts  || print_warn "Ошибка в разделе TeamSpeak" ;;
-            2) menu_mbl || print_warn "Ошибка в разделе Mumble" ;;
+            1) menu_ts  || { print_warn "Ошибка в разделе TeamSpeak"; eli_pause; } ;;
+            2) menu_mbl || { print_warn "Ошибка в разделе Mumble"; eli_pause; } ;;
             0) return 0 ;;
-            *) print_warn "Введите число от 0 до 2" ;;
+            *) print_warn "Введите число от 0 до 2"; eli_pause ;;
         esac
     done
 }
@@ -8237,17 +9170,17 @@ menu_maint() {
         read -r choice
 
         case "$choice" in
-            1) menu_unbound    || print_warn "Ошибка в разделе Unbound" ;;
+            1) menu_unbound    || { print_warn "Ошибка в разделе Unbound"; eli_pause; } ;;
             2) diag_run        || print_warn "Ошибка при диагностике"; eli_pause ;;
             3) prayer_run      || print_warn "Ошибка в Prayer of Eli"; eli_pause ;;
-            4) menu_ssh        || print_warn "Ошибка в разделе SSH" ;;
-            5) menu_ufw        || print_warn "Ошибка в разделе UFW" ;;
-            6) menu_update     || print_warn "Ошибка в разделе обновлений" ;;
+            4) menu_ssh        || { print_warn "Ошибка в разделе SSH"; eli_pause; } ;;
+            5) menu_ufw        || { print_warn "Ошибка в разделе UFW"; eli_pause; } ;;
+            6) menu_update     || { print_warn "Ошибка в разделе обновлений"; eli_pause; } ;;
             7) routine_run     || print_warn "Ошибка при автообслуживании"; eli_pause ;;
-            8) menu_backup     || print_warn "Ошибка в разделе бэкапов" ;;
-            9) menu_tgbot      || print_warn "Ошибка в разделе Telegram" ;;
+            8) menu_backup     || { print_warn "Ошибка в разделе бэкапов"; eli_pause; } ;;
+            9) menu_tgbot      || { print_warn "Ошибка в разделе Telegram"; eli_pause; } ;;
             0) return 0 ;;
-            *) print_warn "Введите число от 0 до 9" ;;
+            *) print_warn "Введите число от 0 до 9"; eli_pause ;;
         esac
     done
 }
@@ -8584,11 +9517,11 @@ eli_main() {
 
         case "$choice" in
             1) boot_run   || print_warn "Ошибка в разделе Старт"; eli_pause ;;
-            2) menu_vpn   || print_warn "Ошибка в разделе VPN" ;;
-            3) menu_comms || print_warn "Ошибка в разделе Связь" ;;
-            4) menu_maint || print_warn "Ошибка в разделе Обслуживание" ;;
+            2) menu_vpn   || { print_warn "Ошибка в разделе VPN"; eli_pause; } ;;
+            3) menu_comms || { print_warn "Ошибка в разделе Связь"; eli_pause; } ;;
+            4) menu_maint || { print_warn "Ошибка в разделе Обслуживание"; eli_pause; } ;;
             0) echo ""; echo "  Выход."; echo ""; exit 0 ;;
-            *) print_warn "Введите число от 0 до 4" ;;
+            *) print_warn "Введите число от 0 до 4"; eli_pause ;;
         esac
 
         eli_header
