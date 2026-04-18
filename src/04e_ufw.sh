@@ -62,7 +62,7 @@ ufw_add_port() {
         esac
     fi
     local comment=""
-    echo -e "  ${CYAN}Комментарий — пометка для чего этот порт (например: nginx, игра). Можно пропустить.${NC}"
+    echo -e "  ${CYAN}Комментарий - пометка для чего этот порт (например: nginx, игра). Можно пропустить.${NC}"
     ask "Комментарий (опционально)" "" comment
     if [[ -n "$comment" ]]; then ufw allow "${port_spec}" comment "${comment}"
     else ufw allow "${port_spec}"; fi
