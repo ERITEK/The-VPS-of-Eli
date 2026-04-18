@@ -4,7 +4,7 @@
 OTL_DIR="/etc/outline"
 OTL_ENV="${OTL_DIR}/outline.env"
 OTL_KEY="${OTL_DIR}/manager_key.json"
-OTL_INSTALL_URL="https://raw.githubusercontent.com/Jigsaw-Code/outline-server/master/src/server_manager/install_scripts/install_server.sh"
+OTL_INSTALL_URL="https://raw.githubusercontent.com/Jigsaw-Code/outline-apps/master/server_manager/install_scripts/install_server.sh"
 OTL_HEALTHCHECK="/usr/local/bin/outline-healthcheck.sh"
 
 otl_installed() {
@@ -45,8 +45,10 @@ otl_install() {
     done
 
     mkdir -p "$OTL_DIR"; chmod 700 "$OTL_DIR"
-    local install_log="/var/log/outline-install.log"
-    print_info "Запуск установщика Jigsaw..."
+    # - уникальный лог на каждый запуск, иначЕ tail -1 может вытащить apiUrl прошлой битой установки -
+    local install_log
+    install_log=$(mktemp /tmp/outline-install-XXXXXX.log)
+    print_info "Запуск установщика Jigsaw... (лог: ${install_log})"
 
     yes | bash <(curl -sSL "$OTL_INSTALL_URL") \
         --hostname "$server_ip" --api-port "$api_port" \
@@ -56,7 +58,9 @@ otl_install() {
     local api_json
     api_json=$(grep -oP '\{"apiUrl":"[^"]*","certSha256":"[^"]*"\}' "$install_log" | tail -1 || true)
     if [[ -z "$api_json" ]]; then
-        print_err "Не удалось извлечь apiUrl из лога"; return 1
+        print_err "Не удалось извлечь apiUrl из лога"
+        print_info "Лог: ${install_log}"
+        return 1
     fi
     local api_url cert_sha
     api_url=$(echo "$api_json" | grep -oP '"apiUrl":\s*"\K[^"]+')
@@ -170,7 +174,7 @@ otl_add_key() {
     local api_url; api_url=$(otl_get_api_url 2>/dev/null || echo "")
     [[ -z "$api_url" ]] && { print_err "apiUrl не найден"; return 0; }
     local key_name=""
-    echo -e "  ${CYAN}Имя ключа — для кого этот ключ (например: мама, коллега-Вася). Можно оставить пустым.${NC}"
+    echo -e "  ${CYAN}Имя ключа - для кого этот ключ (например: мама, коллега-Вася). Можно оставить пустым.${NC}"
     echo -ne "  ${BOLD}Имя ключа:${NC} "; read -r key_name
     local result
     result=$(curl -fsk --connect-timeout 5 -X POST "${api_url}/access-keys" 2>/dev/null || echo "")
