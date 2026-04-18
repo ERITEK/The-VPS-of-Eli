@@ -61,10 +61,14 @@ menu_awg() {
     в приложении AmneziaVPN (Android/iOS/Windows/macOS).
 
   Управление позволяет: создавать новые туннели, добавлять и удалять
-    клиентов, менять DNS, перезапускать сервис."
+    клиентов, менять DNS, перезапускать сервис.
+
+  Тест обфускации снимает tcpdump и проверяет применяются ли S1/S2 padding,
+    Jc junk-пакеты, H1-H4 mangle и I1 signature chain на реальном handshake."
 
         echo -e "  ${GREEN}1)${NC} Установка AmneziaWG"
         echo -e "  ${GREEN}2)${NC} Управление AmneziaWG"
+        echo -e "  ${GREEN}3)${NC} Тест обфускации"
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
@@ -74,8 +78,9 @@ menu_awg() {
         case "$choice" in
             1) awg_install    || print_warn "Ошибка при установке AWG"; eli_pause ;;
             2) awg_manage     || { print_warn "Ошибка в управлении AWG"; eli_pause; } ;;
+            3) awg_test_obf   || { print_warn "Ошибка в тесте обфускации"; eli_pause; }; eli_pause ;;
             0) return 0 ;;
-            *) print_warn "Введите число от 0 до 2"; eli_pause ;;
+            *) print_warn "Введите число от 0 до 3"; eli_pause ;;
         esac
     done
 }
@@ -223,24 +228,21 @@ menu_mtp() {
         eli_banner "MTProto Proxy (Telegram)" \
             "Прокси специально для Telegram с маскировкой под HTTPS.
 
-  Как работает: Docker-контейнер принимает соединения от Telegram-клиентов
+  Как работает: Docker-контейнер mtg принимает соединения от Telegram-клиентов
     и перенаправляет их на серверы Telegram.
     DPI видит обычный TLS-трафик к указанному домену (Fake TLS).
 
   Мультиинстанс: несколько прокси на разных портах.
-  Мультисекрет: каждый инстанс может иметь несколько секретов -
-    каждый секрет = отдельная ссылка. Можно отозвать один секрет
-    не трогая остальных (по сути раздельные пользователи).
+  Один инстанс = один секрет (mtg v2 by design без мультисекрета).
+    Если нужно несколько 'пользователей' - создай несколько инстансов
+    на разных портах.
 
   После установки: скопируй ссылку tg://proxy и отправь тому, кому нужен
     доступ к Telegram. Ссылка вставляется прямо в Telegram-клиент."
 
         echo -e "  ${GREEN}1)${NC} Добавить инстанс"
         echo -e "  ${GREEN}2)${NC} Список и ссылки"
-        echo -e "  ${GREEN}3)${NC} Добавить секрет (пользователя)"
-        echo -e "  ${GREEN}4)${NC} Удалить секрет"
-        echo -e "  ${GREEN}5)${NC} Удалить инстанс"
-        echo -e "  ${GREEN}6)${NC} Миграция legacy (mtproto-proxy -> mtproto-1)"
+        echo -e "  ${GREEN}3)${NC} Удалить инстанс"
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
@@ -248,14 +250,11 @@ menu_mtp() {
         read -r choice
 
         case "$choice" in
-            1) mtp_add           || print_warn "Ошибка при добавлении MTProto" ;;
-            2) mtp_list          || print_warn "Ошибка при показе списка" ;;
-            3) mtp_add_secret    || print_warn "Ошибка при добавлении секрета" ;;
-            4) mtp_remove_secret || print_warn "Ошибка при удалении секрета" ;;
-            5) mtp_remove        || print_warn "Ошибка при удалении MTProto" ;;
-            6) mtp_migrate       || print_warn "Ошибка при миграции" ;;
+            1) mtp_add     || print_warn "Ошибка при добавлении MTProto" ;;
+            2) mtp_list    || print_warn "Ошибка при показе списка" ;;
+            3) mtp_remove  || print_warn "Ошибка при удалении MTProto" ;;
             0) return 0 ;;
-            *) print_warn "Введите число от 0 до 6" ;;
+            *) print_warn "Введите число от 0 до 3" ;;
         esac
 
         eli_pause
@@ -773,6 +772,7 @@ awg_manage() {
         echo -e "  ${GREEN}7)${NC} Добавить клиента"
         echo -e "  ${GREEN}8)${NC} Показать конфиг клиента"
         echo -e "  ${GREEN}9)${NC} Удалить клиента"
+        echo -e "  ${GREEN}10)${NC} Экспорт клиента под Keenetic"
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
@@ -780,17 +780,18 @@ awg_manage() {
         read -r choice
 
         case "$choice" in
-            1) awg_show_status   || print_warn "Ошибка при показе статуса" ;;
-            2) awg_create_iface  || print_warn "Ошибка при создании интерфейса" ;;
-            3) awg_toggle_iface  || print_warn "Ошибка при переключении" ;;
-            4) awg_restart_iface || print_warn "Ошибка при перезапуске" ;;
-            5) awg_change_dns    || print_warn "Ошибка при смене DNS" ;;
-            6) awg_delete_iface  || print_warn "Ошибка при удалении интерфейса" ;;
-            7) awg_add_client    || print_warn "Ошибка при добавлении клиента" ;;
-            8) awg_show_client   || print_warn "Ошибка при показе конфига" ;;
-            9) awg_delete_client || print_warn "Ошибка при удалении клиента" ;;
+            1) awg_show_status    || print_warn "Ошибка при показе статуса" ;;
+            2) awg_create_iface   || print_warn "Ошибка при создании интерфейса" ;;
+            3) awg_toggle_iface   || print_warn "Ошибка при переключении" ;;
+            4) awg_restart_iface  || print_warn "Ошибка при перезапуске" ;;
+            5) awg_change_dns     || print_warn "Ошибка при смене DNS" ;;
+            6) awg_delete_iface   || print_warn "Ошибка при удалении интерфейса" ;;
+            7) awg_add_client     || print_warn "Ошибка при добавлении клиента" ;;
+            8) awg_show_client    || print_warn "Ошибка при показе конфига" ;;
+            9) awg_delete_client  || print_warn "Ошибка при удалении клиента" ;;
+            10) awg_export_keenetic || print_warn "Ошибка при экспорте под Keenetic" ;;
             0) return 0 ;;
-            *) print_warn "Введите число от 0 до 9" ;;
+            *) print_warn "Введите число от 0 до 10" ;;
         esac
 
         eli_pause
