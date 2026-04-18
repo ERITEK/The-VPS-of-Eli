@@ -7,7 +7,20 @@ MBL_DB="/var/lib/mumble-server/mumble-server.sqlite"
 MBL_BACKUP_DIR="/etc/mumble-backups"
 
 mbl_installed() {
-    systemctl is-active --quiet "$MBL_SERVICE" 2>/dev/null
+    # - проверяем наличие пакета, не is-active -
+    dpkg -l mumble-server 2>/dev/null | grep -q "^ii"
+}
+
+# - экранирование значения для sed-замены -
+# - sed: / как разделитель конфликтует с путями в паролях -
+# - & как back-reference, \ как escape, | как альтернатива разделителя -
+# - используем | как разделитель и экранируем обратный слэш, амперс, пайп -
+_mbl_sed_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"   # - \ -> \\ -
+    s="${s//&/\\&}"     # - & -> \& -
+    s="${s//|/\\|}"     # - | -> \| -
+    printf '%s' "$s"
 }
 
 mbl_install() {
@@ -31,27 +44,38 @@ mbl_install() {
     done
 
     # - пароль сервера (для подключения клиентов) -
+    # - read -rs чтобы пароль не светился в терминале -
     local srv_pass=""
     echo -ne "  ${BOLD}Пароль сервера (пустой = без пароля):${NC} "
-    read -r srv_pass
+    read -rs srv_pass
+    echo ""
 
-    # - пароль SuperUser (администратор) -
-    local su_pass=""
+    # - пароль SuperUser (администратор): двойной ввод с проверкой -
+    # - read -rs + подтверждение, минимум 6 символов -
+    local su_pass="" su_pass2=""
     while true; do
         echo -ne "  ${BOLD}Пароль SuperUser (мин. 6 символов):${NC} "
-        read -r su_pass
-        [[ ${#su_pass} -ge 6 ]] && break
-        print_err "Минимум 6 символов"
+        read -rs su_pass; echo ""
+        if [[ ${#su_pass} -lt 6 ]]; then
+            print_err "Минимум 6 символов"; continue
+        fi
+        echo -ne "  ${BOLD}Повторите пароль SuperUser:${NC} "
+        read -rs su_pass2; echo ""
+        if [[ "$su_pass" != "$su_pass2" ]]; then
+            print_err "Пароли не совпадают"; continue
+        fi
+        break
     done
 
     # - настройка конфига -
+    # - sed-escape для srv_pass, используем | как разделитель -
     if [[ -f "$MBL_CONF" ]]; then
-        sed -i "s/^;*port=.*/port=${port}/" "$MBL_CONF"
-        sed -i "s/^;*serverpassword=.*/serverpassword=${srv_pass}/" "$MBL_CONF"
-        # - welcometext -
-        sed -i 's/^;*welcometext=.*/welcometext="Welcome to Mumble Server"/' "$MBL_CONF"
-        # - bandwidth 72000 (хорошее качество, экономит трафик) -
-        sed -i 's/^;*bandwidth=.*/bandwidth=72000/' "$MBL_CONF"
+        local srv_pass_esc
+        srv_pass_esc=$(_mbl_sed_escape "$srv_pass")
+        sed -i "s|^;*port=.*|port=${port}|" "$MBL_CONF"
+        sed -i "s|^;*serverpassword=.*|serverpassword=${srv_pass_esc}|" "$MBL_CONF"
+        sed -i 's|^;*welcometext=.*|welcometext="Welcome to Mumble Server"|' "$MBL_CONF"
+        sed -i 's|^;*bandwidth=.*|bandwidth=72000|' "$MBL_CONF"
         print_ok "Конфиг настроен: ${MBL_CONF}"
     else
         print_warn "Конфиг не найден: ${MBL_CONF}"
