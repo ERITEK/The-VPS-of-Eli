@@ -102,15 +102,48 @@ update_xui() {
         print_ok "Бэкап БД создан"
     }
 
-    echo -e "n\n" | bash <(curl -Ls "${XUI_INSTALL_URL:-https://raw.githubusercontent.com/MHSanaei/3x-ui/main/install.sh}") || true
+    # - прямое скачивание tar.gz -
+    # - upstream install.sh имеет prompts (port/SSL), которые зависнут -
+    # - сохраняем настройки/базу и обновляем только бинарь -
+    if ! _xui_fetch_release_info; then
+        print_err "Не удалось определить последний релиз 3X-UI"
+        return 1
+    fi
+    print_info "Новая версия: ${XUI_TAG}"
 
-    # - восстанавливаем LimitNOFILE патч -
+    # - сохраняем БД в tmp на случай если tar.gz содержит свой db/ -
+    local db_backup=""
+    if [[ -f "${XUI_DB:-/usr/local/x-ui/db/x-ui.db}" ]]; then
+        db_backup=$(mktemp)
+        cp -f "${XUI_DB}" "$db_backup"
+    fi
+
+    if ! _xui_fetch_and_extract; then
+        print_err "Не удалось скачать/распаковать 3X-UI"
+        [[ -n "$db_backup" && -f "$db_backup" ]] && rm -f "$db_backup"
+        return 1
+    fi
+
+    # - восстанавливаем БД если архив переписал db/ -
+    if [[ -n "$db_backup" && -f "$db_backup" ]]; then
+        mkdir -p "${XUI_DIR:-/usr/local/x-ui}/db"
+        cp -f "$db_backup" "${XUI_DB:-/usr/local/x-ui/db/x-ui.db}"
+        rm -f "$db_backup"
+        print_ok "БД сохранена"
+    fi
+
+    if ! _xui_install_cli_and_unit; then
+        print_err "Не удалось установить CLI/unit"
+        return 1
+    fi
+
     _xui_fix_nofile 2>/dev/null || true
     systemctl restart "${XUI_SERVICE:-x-ui}" 2>/dev/null || true
     sleep 3
     if systemctl is-active --quiet "${XUI_SERVICE:-x-ui}" 2>/dev/null; then
         local new_ver; new_ver=$("${XUI_BIN:-/usr/local/x-ui/x-ui}" -v 2>/dev/null | head -1 || echo "?")
-        print_ok "3X-UI обновлён: ${new_ver}"
+        print_ok "3X-UI обновлён: ${new_ver} (${XUI_TAG})"
+        book_write ".3xui.version" "${new_ver}"
     else
         print_err "3X-UI не запустился после обновления"
     fi
