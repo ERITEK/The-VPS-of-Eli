@@ -1,5 +1,5 @@
 # --> МОДУЛЬ: ПРОКСИ <--
-# - MTProto (Telegram) мультиинстанс + мультисекрет -
+# - MTProto (Telegram) на mtg v2, мультиинстанс (один секрет на инстанс) -
 # - SOCKS5 мультиинстанс -
 # - Hysteria 2 мультиинстанс + мультиюзер (userpass) -
 # - Signal TLS Proxy -
@@ -13,22 +13,13 @@ SIG_ENV="/etc/signal-proxy/signal.env"
 SIG_DIR="/opt/signal-proxy"
 
 # ==========================================================================
-# --> MTPROTO PROXY (TELEGRAM) - МУЛЬТИИНСТАНС + МУЛЬТИСЕКРЕТ <--
+# --> MTPROTO PROXY (TELEGRAM) - МУЛЬТИИНСТАНС НА mtg v2 <--
 # ==========================================================================
+# - образ: nineseconds/mtg:2.1.13 (актуальный стабильный mtg v2) -
+# - один инстанс = один секрет (mtg v2 by design без мультисекрета) -
+# - секрет содержит в себе домен (генерится mtg generate-secret --hex DOMAIN) -
 
-_mtp_gen_secret() {
-    head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n'
-}
-
-# - guard на пустой домен, иначе tg-ссылка получит пустой хвост и клиент отвалит -
-_mtp_domain_hex() {
-    local d="$1"
-    if [[ -z "$d" ]]; then
-        # - fallback на www.google.com если пусто (для Fake TLS требуется SNI) -
-        d="www.google.com"
-    fi
-    echo -n "$d" | od -An -tx1 | tr -d ' \n'
-}
+MTG_IMAGE="nineseconds/mtg:2.1.13"
 
 _mtp_next_id() {
     local i=1
@@ -38,63 +29,58 @@ _mtp_next_id() {
     echo "$i"
 }
 
-# - файл секретов инстанса (один секрет на строку) -
-_mtp_secrets_file() { echo "${MTP_DIR}/secrets_${1}.list"; }
+_mtp_config_path() { echo "${MTP_DIR}/config_${1}.toml"; }
 
-# - пересоздать контейнер со всеми секретами -
-_mtp_rebuild_container() {
+# - генерит Fake TLS hex-секрет через одноразовый контейнер mtg -
+# - возвращает строку вида: eedf71035a8ed48a623d8e83e66aec4d0562696e672e636f6d -
+_mtp_gen_secret() {
+    local domain="$1"
+    [[ -z "$domain" ]] && { echo ""; return 1; }
+    docker run --rm "$MTG_IMAGE" generate-secret --hex "$domain" 2>/dev/null | tr -d ' \r\n'
+}
+
+# - ссылка tg:// из IP/port/secret (secret уже в формате ee... с доменом внутри) -
+_mtp_print_link() {
+    local ip="$1" port="$2" secret="$3"
+    echo ""
+    echo -e "  ${BOLD}Ссылка Telegram (Fake TLS):${NC}"
+    echo -e "  ${CYAN}tg://proxy?server=${ip}&port=${port}&secret=${secret}${NC}"
+    echo -e "  ${CYAN}https://t.me/proxy?server=${ip}&port=${port}&secret=${secret}${NC}"
+    echo ""
+}
+
+# - запуск/рестарт контейнера mtg для инстанса -
+_mtp_start_container() {
     local inst_id="$1"
     local env_file="${MTP_DIR}/instance_${inst_id}.env"
     [[ ! -f "$env_file" ]] && { print_err "env не найден: ${env_file}"; return 1; }
     # shellcheck disable=SC1090
     source "$env_file"
 
-    local secrets_file
-    secrets_file=$(_mtp_secrets_file "$inst_id")
-    if [[ ! -f "$secrets_file" ]] || [[ ! -s "$secrets_file" ]]; then
-        print_err "Нет секретов для инстанса #${inst_id}"; return 1
-    fi
+    local cfg
+    cfg=$(_mtp_config_path "$inst_id")
+    [[ ! -f "$cfg" ]] && { print_err "config.toml не найден: ${cfg}"; return 1; }
 
     docker stop "$CONTAINER" 2>/dev/null || true
     docker rm "$CONTAINER" 2>/dev/null || true
 
-    local -a secret_args=()
-    while IFS= read -r secret; do
-        [[ -z "$secret" ]] && continue
-        secret_args+=(-s "$secret")
-    done < "$secrets_file"
-    [[ ${#secret_args[@]} -eq 0 ]] && { print_err "Секреты пусты"; return 1; }
-
-    local effective_tag="${AD_TAG:-00000000000000000000000000000000}"
-
+    # - mtg слушает внутри 3128 по дефолту, пробрасываем внешний PORT -> 3128 -
     if ! docker run -d \
         --name "${CONTAINER}" \
         --restart always \
-        --network host \
-        "seriyps/mtproto-proxy:0.8.4" \
-        -p "${PORT}" \
-        "${secret_args[@]}" \
-        -t "${effective_tag}" \
-        -a tls; then
+        -p "${PORT}:3128" \
+        -v "${cfg}:/config.toml:ro" \
+        "$MTG_IMAGE" \
+        run /config.toml; then
         print_err "Не удалось запустить контейнер ${CONTAINER}"; return 1
     fi
     sleep 2
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER}$"; then
-        print_ok "Контейнер ${CONTAINER} запущен (секретов: ${#secret_args[@]})"
+        print_ok "Контейнер ${CONTAINER} запущен"
         return 0
-    else
-        print_err "Контейнер не запустился: docker logs ${CONTAINER}"; return 1
     fi
-}
-
-_mtp_print_links() {
-    local ip="$1" port="$2" secret="$3" domain="$4"
-    local domain_hex
-    domain_hex=$(_mtp_domain_hex "$domain")
-    echo ""
-    echo -e "  ${BOLD}Ссылка Telegram (Fake TLS):${NC}"
-    echo -e "  ${CYAN}tg://proxy?server=${ip}&port=${port}&secret=ee${secret}${domain_hex}${NC}"
-    echo ""
+    print_err "Контейнер не запустился: docker logs ${CONTAINER}"
+    return 1
 }
 
 # --> MTPROTO: ДОБАВИТЬ ИНСТАНС <--
@@ -110,6 +96,7 @@ mtp_add() {
     [[ -z "$server_ip" ]] && { print_err "Не удалось определить IP"; return 1; }
     print_ok "IP: ${server_ip}"
 
+    # - порт -
     local port=443
     while true; do
         echo -e "  ${CYAN}Порт 443/8443 лучше маскируется под HTTPS.${NC}"
@@ -122,147 +109,67 @@ mtp_add() {
         break
     done
 
+    # - домен для Fake TLS маскировки -
     local tls_domain="fonts.googleapis.com"
     echo -e "  ${CYAN}Домен для маскировки Fake TLS (DPI видит его в SNI).${NC}"
+    echo -e "  ${CYAN}Зашивается прямо в секрет клиента.${NC}"
     ask "Fake TLS domen" "$tls_domain" tls_domain
 
+    # - предварительно подтянуть образ (чтобы generate-secret не тянул в фоне) -
+    print_info "Проверяю образ ${MTG_IMAGE}..."
+    docker pull "$MTG_IMAGE" >/dev/null 2>&1 || {
+        print_err "Не удалось подтянуть образ ${MTG_IMAGE}"; return 1
+    }
+
+    # - секрет -
     local secret
-    secret=$(_mtp_gen_secret)
-    [[ -z "$secret" || ${#secret} -ne 32 ]] && { print_err "Ошибка генерации ключа"; return 1; }
+    secret=$(_mtp_gen_secret "$tls_domain")
+    if [[ -z "$secret" || ! "$secret" =~ ^ee[0-9a-f]+$ ]]; then
+        print_err "Ошибка генерации секрета (got: '${secret}')"; return 1
+    fi
+    print_ok "Секрет сгенерирован (Fake TLS, домен зашит)"
 
-    local ad_tag=""
-    echo -e "  ${CYAN}Ad tag от @MTProxyBot (можно пропустить).${NC}"
-    ask "Ad tag" "" ad_tag
-
-    local inst_id
+    # - id инстанса и имя контейнера -
+    local inst_id container
     inst_id=$(_mtp_next_id)
-    local container="mtproto-${inst_id}"
+    container="mtproto-${inst_id}"
 
+    # - файлы -
     mkdir -p "$MTP_DIR"; chmod 700 "$MTP_DIR"
     cat > "${MTP_DIR}/instance_${inst_id}.env" << MTPEOF
 SERVER_IP="${server_ip}"
 PORT="${port}"
 TLS_DOMAIN="${tls_domain}"
-AD_TAG="${ad_tag}"
+SECRET="${secret}"
 CONTAINER="${container}"
 MTPEOF
     chmod 600 "${MTP_DIR}/instance_${inst_id}.env"
 
-    local sf
-    sf=$(_mtp_secrets_file "$inst_id")
-    echo "$secret" > "$sf"; chmod 600 "$sf"
+    # - config.toml для mtg -
+    local cfg
+    cfg=$(_mtp_config_path "$inst_id")
+    cat > "$cfg" << TOMLEOF
+secret = "${secret}"
+bind-to = "0.0.0.0:3128"
+TOMLEOF
+    chmod 600 "$cfg"
 
+    # - запуск -
     print_section "Запуск MTProto #${inst_id}"
-    _mtp_rebuild_container "$inst_id" || return 1
+    _mtp_start_container "$inst_id" || return 1
 
+    # - ufw -
     if command -v ufw &>/dev/null; then
         ufw allow "${port}/tcp" comment "MTProto #${inst_id}" 2>/dev/null || true
         print_ok "UFW: ${port}/tcp"
     fi
 
+    # - book -
     book_write ".mtproto.instances.${inst_id}.port" "$port"
     book_write ".mtproto.instances.${inst_id}.tls_domain" "$tls_domain"
     book_write ".mtproto.instances.${inst_id}.container" "$container"
-    book_write ".mtproto.instances.${inst_id}.secret_count" "1" number
 
-    _mtp_print_links "$server_ip" "$port" "$secret" "$tls_domain"
-    return 0
-}
-
-# --> MTPROTO: ВЫБОР ИНСТАНСА (хелпер) <--
-_mtp_select_instance() {
-    local envfiles=()
-    for envf in "${MTP_DIR}"/instance_*.env; do
-        [[ -f "$envf" ]] && envfiles+=("$envf")
-    done
-    [[ ${#envfiles[@]} -eq 0 ]] && { print_warn "MTProto не установлен"; echo ""; return; }
-
-    if [[ ${#envfiles[@]} -eq 1 ]]; then
-        echo "$(basename "${envfiles[0]}" | sed 's/instance_//;s/\.env//')"
-        return
-    fi
-    local i=1
-    for envf in "${envfiles[@]}"; do
-        # shellcheck disable=SC1090
-        source "$envf"
-        local _id; _id=$(basename "$envf" | sed 's/instance_//;s/\.env//')
-        echo -e "  ${GREEN}${i})${NC} #${_id}  port:${PORT}  ${CONTAINER}" >&2
-        i=$(( i + 1 ))
-    done
-    echo "" >&2
-    local sel=""
-    echo -ne "  ${BOLD}Номер инстанса:${NC} " >&2; read -r sel
-    if [[ ! "$sel" =~ ^[0-9]+$ ]] || [[ "$sel" -lt 1 ]] || [[ "$sel" -gt ${#envfiles[@]} ]]; then
-        echo ""; return
-    fi
-    echo "$(basename "${envfiles[$(( sel - 1 ))]}" | sed 's/instance_//;s/\.env//')"
-}
-
-# --> MTPROTO: ДОБАВИТЬ СЕКРЕТ <--
-mtp_add_secret() {
-    print_section "Добавить секрет (пользователя)"
-    local inst_id
-    inst_id=$(_mtp_select_instance)
-    [[ -z "$inst_id" ]] && return 0
-
-    # shellcheck disable=SC1090
-    source "${MTP_DIR}/instance_${inst_id}.env"
-
-    local new_secret
-    new_secret=$(_mtp_gen_secret)
-    [[ -z "$new_secret" ]] && { print_err "Ошибка генерации"; return 1; }
-
-    local sf; sf=$(_mtp_secrets_file "$inst_id")
-    echo "$new_secret" >> "$sf"
-    local count; count=$(wc -l < "$sf")
-    print_ok "Секрет добавлен (#${inst_id}, всего: ${count})"
-
-    _mtp_rebuild_container "$inst_id" || return 1
-    book_write ".mtproto.instances.${inst_id}.secret_count" "$count" number
-    _mtp_print_links "$SERVER_IP" "$PORT" "$new_secret" "$TLS_DOMAIN"
-    return 0
-}
-
-# --> MTPROTO: УДАЛИТЬ СЕКРЕТ <--
-mtp_remove_secret() {
-    print_section "Удалить секрет"
-    local inst_id
-    inst_id=$(_mtp_select_instance)
-    [[ -z "$inst_id" ]] && return 0
-
-    # shellcheck disable=SC1090
-    source "${MTP_DIR}/instance_${inst_id}.env"
-
-    local sf; sf=$(_mtp_secrets_file "$inst_id")
-    [[ ! -f "$sf" || ! -s "$sf" ]] && { print_warn "Нет секретов"; return 0; }
-
-    # - sed -i "${sel}d" работает по физическим строкам, отображение пропускает пустые -
-    # - убираем пустые строки до выбора, чтобы нумерация совпадала-
-    sed -i '/^[[:space:]]*$/d' "$sf"
-
-    local count; count=$(wc -l < "$sf")
-    [[ "$count" -le 1 ]] && { print_err "Последний секрет. Удали инстанс целиком."; return 0; }
-
-    echo ""
-    local i=1
-    while IFS= read -r secret; do
-        [[ -z "$secret" ]] && continue
-        local dh; dh=$(_mtp_domain_hex "$TLS_DOMAIN")
-        echo -e "  ${GREEN}${i})${NC} ${secret:0:8}...  tg://...secret=ee${secret:0:8}...${dh:0:8}..."
-        i=$(( i + 1 ))
-    done < "$sf"
-    echo ""
-    local sel=""
-    ask "Номер для удаления" "" sel
-    [[ ! "$sel" =~ ^[0-9]+$ ]] || [[ "$sel" -lt 1 ]] || [[ "$sel" -ge "$i" ]] \
-        && { print_warn "Неверный выбор"; return 0; }
-
-    sed -i "${sel}d" "$sf"
-    local new_count; new_count=$(wc -l < "$sf")
-    print_ok "Секрет удалён (осталось: ${new_count})"
-
-    _mtp_rebuild_container "$inst_id" || return 1
-    book_write ".mtproto.instances.${inst_id}.secret_count" "$new_count" number
+    _mtp_print_link "$server_ip" "$port" "$secret"
     return 0
 }
 
@@ -282,21 +189,7 @@ mtp_list() {
         else
             echo -e "  ${RED}( )${NC} ${BOLD}#${inst_id}${NC}  port:${PORT}  [${YELLOW}остановлен${NC}]"
         fi
-
-        local sf; sf=$(_mtp_secrets_file "$inst_id")
-        if [[ -f "$sf" && -s "$sf" ]]; then
-            local si=1
-            while IFS= read -r secret; do
-                [[ -z "$secret" ]] && continue
-                local dh; dh=$(_mtp_domain_hex "$TLS_DOMAIN")
-                echo -e "    ${CYAN}${si})${NC} tg://proxy?server=${SERVER_IP}&port=${PORT}&secret=ee${secret}${dh}"
-                si=$(( si + 1 ))
-            done < "$sf"
-        else
-            # - legacy: SECRET в env -
-            local ls=""; ls=$(grep "^SECRET=" "$envf" 2>/dev/null | cut -d'"' -f2 || true)
-            [[ -n "$ls" ]] && _mtp_print_links "$SERVER_IP" "$PORT" "$ls" "$TLS_DOMAIN"
-        fi
+        echo -e "    ${CYAN}tg://proxy?server=${SERVER_IP}&port=${PORT}&secret=${SECRET}${NC}"
         echo ""
     done
     [[ $found -eq 0 ]] && print_warn "MTProto Proxy не установлен"
@@ -320,8 +213,9 @@ mtp_remove() {
     done
     echo ""
     local sel=""; ask "Номер для удаления" "1" sel
-    [[ ! "$sel" =~ ^[0-9]+$ ]] || [[ "$sel" -lt 1 ]] || [[ "$sel" -gt ${#envfiles[@]} ]] \
-        && { print_warn "Неверный выбор"; return 0; }
+    if [[ ! "$sel" =~ ^[0-9]+$ ]] || [[ "$sel" -lt 1 ]] || [[ "$sel" -gt ${#envfiles[@]} ]]; then
+        print_warn "Неверный выбор"; return 0
+    fi
 
     local envf="${envfiles[$(( sel - 1 ))]}"
     # shellcheck disable=SC1090
@@ -335,61 +229,9 @@ mtp_remove() {
     docker rm "$CONTAINER" 2>/dev/null || true
     [[ -n "$PORT" ]] && command -v ufw &>/dev/null && ufw delete allow "${PORT}/tcp" 2>/dev/null || true
 
-    rm -f "$envf" "$(_mtp_secrets_file "$inst_id")"
+    rm -f "$envf" "$(_mtp_config_path "$inst_id")"
     book_write ".mtproto.instances.${inst_id}" "null" bool
     print_ok "MTProto #${inst_id} удалён"
-    return 0
-}
-
-# --> MTPROTO: МИГРАЦИЯ LEGACY <--
-mtp_migrate() {
-    print_section "Миграция legacy MTProto"
-
-    # - миграция SECRET -> secrets.list для существующих инстансов -
-    for envf in "${MTP_DIR}"/instance_*.env; do
-        [[ -f "$envf" ]] || continue
-        local iid; iid=$(basename "$envf" | sed 's/instance_//;s/\.env//')
-        local sf; sf=$(_mtp_secrets_file "$iid")
-        if [[ ! -f "$sf" ]]; then
-            local old_s=""; old_s=$(grep "^SECRET=" "$envf" | cut -d'"' -f2 || true)
-            if [[ -n "$old_s" ]]; then
-                echo "$old_s" > "$sf"; chmod 600 "$sf"
-                sed -i '/^SECRET=/d' "$envf"
-                print_ok "Секрет #${iid} мигрирован в secrets_${iid}.list"
-            fi
-        fi
-    done
-
-    # - миграция mtproto.env -> instance_1.env -
-    local old_env="${MTP_DIR}/mtproto.env"
-    local old_container="mtproto-proxy"
-    if [[ ! -f "$old_env" ]] && ! docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${old_container}$"; then
-        [[ ! -f "${MTP_DIR}/instance_1.env" ]] && print_warn "Старый MTProto не найден"
-        return 0
-    fi
-
-    [[ -f "${MTP_DIR}/instance_1.env" ]] && { print_info "instance_1.env уже есть"; return 0; }
-
-    [[ -f "$old_env" ]] && { source "$old_env"; print_info "Найден: port=${PORT}, domen=${TLS_DOMAIN}"; }
-
-    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${old_container}$"; then
-        docker stop "$old_container" 2>/dev/null || true
-        docker rename "$old_container" "mtproto-1" 2>/dev/null || true
-        docker start "mtproto-1" 2>/dev/null || true
-        print_ok "Контейнер: mtproto-proxy -> mtproto-1"
-    fi
-
-    if [[ -f "$old_env" ]]; then
-        echo 'CONTAINER="mtproto-1"' >> "$old_env"
-        mv "$old_env" "${MTP_DIR}/instance_1.env"
-        # - секрет в файл -
-        local os=""; os=$(grep "^SECRET=" "${MTP_DIR}/instance_1.env" | cut -d'"' -f2 || true)
-        if [[ -n "$os" ]]; then
-            echo "$os" > "$(_mtp_secrets_file "1")"; chmod 600 "$(_mtp_secrets_file "1")"
-            sed -i '/^SECRET=/d' "${MTP_DIR}/instance_1.env"
-        fi
-        print_ok "Миграция завершена"
-    fi
     return 0
 }
 
