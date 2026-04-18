@@ -7,12 +7,12 @@ routine_run() {
         "Настройка автоматического обслуживания сервера по расписанию.
 
   Что будет настроено:
-    1. Journald — лимит логов 300 MB (чтобы диск не забивался)
-    2. Docker cleanup — удаление старых образов и кешей раз в неделю
-    3. Logrotate — ротация логов AWG
-    4. Мониторинг диска — предупреждение если диск заполнен на 80%+
-    5. Cron задачи — авто-reboot ср и вс в 5:00 МСК (очистка RAM)
-    6. Healthcheck — после каждого reboot проверяет и поднимает сервисы
+    1. Journald - лимит логов 300 MB (чтобы диск не забивался)
+    2. Docker cleanup - удаление старых образов и кешей раз в неделю
+    3. Logrotate - ротация логов AWG
+    4. Мониторинг диска - предупреждение если диск заполнен на 80%+
+    5. Cron задачи - авто-reboot ср и вс в 5:00 МСК (очистка RAM)
+    6. Healthcheck - после каждого reboot проверяет и поднимает сервисы
 
   Рекомендуется запускать после первичной настройки и установки сервисов.
   Все задачи работают автоматически, вмешательство не требуется."
@@ -218,7 +218,7 @@ _check_svc "docker.service" "Docker"
 
 # --> ОСТАЛЬНЫЕ СЕРВИСЫ <--
 _check_svc "x-ui.service" "3X-UI"
-_check_svc "tsserver.service" "TeamSpeak"
+_check_svc "teamspeak.service" "TeamSpeak"
 
 # - Mumble: разные имена в Debian/Ubuntu -
 if systemctl list-unit-files murmurd.service 2>/dev/null | grep -q "enabled"; then
@@ -267,8 +267,16 @@ if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker 2>/de
     done
 fi
 
-# --> HYSTERIA 2 <--
-_check_svc "hysteria-server.service" "Hysteria2"
+# --> HYSTERIA 2 (МУЛЬТИИНСТАНС + legacy fallback) <--
+HY2_FOUND=0
+for _u in $(systemctl list-unit-files 'hysteria-*.service' 2>/dev/null \
+    | awk '$1 ~ /^hysteria-[0-9]+\.service$/ {print $1}' | sort -u); do
+    _check_svc "$_u" "Hysteria2 (${_u%.service})"
+    HY2_FOUND=1
+done
+if [[ $HY2_FOUND -eq 0 ]] && systemctl list-unit-files hysteria-server.service 2>/dev/null | grep -q "hysteria-server"; then
+    _check_svc "hysteria-server.service" "Hysteria2 (legacy)"
+fi
 
 # --> ИТОГ <--
 _log "=== done: fixes=${FIXES} fails=${FAILS} ==="
