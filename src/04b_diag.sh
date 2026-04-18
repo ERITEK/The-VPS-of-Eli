@@ -32,7 +32,7 @@ diag_run() {
     открытые порты, MSS clamping, файрвол, journald, cron задачи.
 
   Результат: цветной отчёт в терминале + файлы TXT и HTML в /root/.
-    HTML отчёт можно скачать и открыть в браузере — там красивые таблицы
+    HTML отчёт можно скачать и открыть в браузере - там таблицы
     и светофор (красный/жёлтый/зелёный) с рекомендациями по каждой проблеме."
 
     _DG_RED=(); _DG_YELLOW=(); _DG_GREEN=()
@@ -99,15 +99,27 @@ diag_run() {
     # --> 3. КАНАЛ (10 точек с регионами) <--
     _dg_bandwidth() {
         D_BEST_SPEED="0"; D_BEST_HOST="?"
+        local bw_confirm=""
+        echo ""
+        echo -e "  ${YELLOW}Тест канала качает ~10 MB с каждой из 10 точек (~100 MB суммарно).${NC}"
+        echo -e "  ${YELLOW}На VPS с лимитом трафика стоит пропустить.${NC}"
+        ask_yn "Запустить тест канала?" "y" bw_confirm
+        if [[ "$bw_confirm" != "yes" ]]; then
+            print_info "Тест канала пропущен пользователем"
+            D_SPEED_RESULTS+=("__skipped__|skipped")
+            return 0
+        fi
         _bw() {
             local url="$1" host="$2" speed mbit
-            speed=$(curl -o /dev/null -s --connect-timeout 5 --max-time 15 -w "%{speed_download}" "$url" 2>/dev/null || echo "0")
+            # - --range 0-10485760 ограничивает скачивание 10 MB даже на быстром канале -
+            speed=$(curl -o /dev/null -s --connect-timeout 5 --max-time 15 \
+                --range 0-10485760 -w "%{speed_download}" "$url" 2>/dev/null || echo "0")
             mbit=$(awk "BEGIN {printf \"%.1f\", ${speed}/1024/1024*8}")
             echo -e "  ${CYAN}${host}:${NC} ${mbit} Мбит/с"
             D_SPEED_RESULTS+=("${host}|${mbit}")
             awk "BEGIN {exit !(${mbit}+0 > ${D_BEST_SPEED}+0)}" && { D_BEST_SPEED=$mbit; D_BEST_HOST="$host"; }
         }
-        print_info "Тестируем канал (10 точек)..."
+        print_info "Тестируем канал (10 точек по ~10 MB)..."
         echo -e "  ${BOLD}Европа:${NC}"; D_SPEED_RESULTS+=("__region__|Европа")
         _bw "http://speedtest.tele2.net/100MB.zip" "Tele2 (Швеция)"
         _bw "https://fra-de-ping.vultr.com/vultr.com.100MB.bin" "Vultr (Франкфурт)"
@@ -291,6 +303,11 @@ diag_run() {
 
     # --> 12-16: iptables, порты, диск, сервисы, обслуживание (как раньше) <--
     _dg_iptables() {
+        # - MSS clamping нужен только если есть AWG -
+        if [[ ${#D_AWG_DATA[@]} -eq 0 ]]; then
+            print_info "AWG не установлен, проверка MSS clamping пропущена"
+            return 0
+        fi
         local mangle; mangle=$(iptables -t mangle -L FORWARD -n -v 2>/dev/null | grep "TCPMSS" || echo "")
         [[ -n "$mangle" ]] && { print_ok "MSS clamping: активен"; _dg_green "MSS clamping в iptables"; echo "$mangle" | sed 's/^/    /'; } \
             || { print_warn "MSS: нет правил"; _dg_red "Нет MSS clamping в iptables|Перезапусти AWG интерфейсы"; }
@@ -319,7 +336,7 @@ diag_run() {
         done < <(ss -tulpn 2>/dev/null | tail -n +2)
     }
     _dg_disk() {
-        D_DISK_SPEED=$(dd if=/dev/zero of=/tmp/_disktest bs=1M count=128 conv=fdatasync 2>&1 | grep -oP '[0-9.]+ [MG]B/s' | tail -1 || echo "?")
+        D_DISK_SPEED=$(dd if=/dev/zero of=/tmp/_disktest bs=1M count=32 conv=fdatasync 2>&1 | grep -oP '[0-9.]+ [MG]B/s' | tail -1 || echo "?")
         rm -f /tmp/_disktest; print_ok "Запись: ${D_DISK_SPEED}"
         df -hT | grep -v "tmpfs\|overlay\|udev" | sed 's/^/  /'
         while read -r use mp; do local pct=${use%%%}
@@ -333,7 +350,23 @@ diag_run() {
             else st="н/у"; print_info "${label}: не установлен"; fi; D_SVC_TABLE+=("${label}|${st}"); }
         _sv "fail2ban" "Fail2Ban"; _sv "docker" "Docker"; _sv "x-ui" "3X-UI"
         _sv "teamspeak" "TeamSpeak"; _sv "mumble-server" "Mumble"; _sv "unbound" "Unbound"
-        _sv "hysteria-server" "Hysteria2"
+        # - Hysteria multi-instance hysteria-1/2/3 -
+        local hy2_units
+        hy2_units=$(systemctl list-unit-files 'hysteria-*.service' 2>/dev/null \
+            | awk '$1 ~ /^hysteria-[0-9]+\.service$/ {print $1}' | sort -u)
+        if [[ -n "$hy2_units" ]]; then
+            local _u
+            for _u in $hy2_units; do
+                _sv "${_u%.service}" "Hysteria2 (${_u%.service})"
+            done
+        else
+            # - fallback на legacy single unit -
+            if systemctl list-unit-files 2>/dev/null | grep -q "^hysteria-server"; then
+                _sv "hysteria-server" "Hysteria2 (legacy)"
+            else
+                print_info "Hysteria2: не установлен"; D_SVC_TABLE+=("Hysteria2|н/у")
+            fi
+        fi
         D_UFW=$(ufw status 2>/dev/null | grep -oP '^Status: \K\w+' || echo "?")
         [[ "$D_UFW" == "active" ]] && { print_ok "UFW: активен"; _dg_green "UFW активен"; } \
             || { print_warn "UFW: ${D_UFW}"; _dg_yellow "UFW не включён|ufw --force enable"; }
@@ -363,9 +396,17 @@ diag_run() {
         for envf in /etc/mtproto/instance_*.env; do
             [[ -f "$envf" ]] || continue
             mtp_count=$(( mtp_count + 1 ))
+            # - unset перед source, иначе переменные остаются от предыдущего инстанса -
+            unset CONTAINER PORT TLS_DOMAIN
             source "$envf" 2>/dev/null
             local inst_id; inst_id=$(basename "$envf" | sed 's/instance_//;s/\.env//')
-            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER:-}$"; then
+            # - guard на пустой CONTAINER (env может быть битым) -
+            if [[ -z "${CONTAINER:-}" ]]; then
+                print_err "MTProto #${inst_id}: CONTAINER пуст в env"
+                _dg_red "MTProto #${inst_id} битый env"
+                continue
+            fi
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER}$"; then
                 print_ok "MTProto #${inst_id}: port ${PORT} (${TLS_DOMAIN})"
                 _dg_green "MTProto #${inst_id} активен"
             else
@@ -380,9 +421,16 @@ diag_run() {
         for envf in /etc/socks5/instance_*.env; do
             [[ -f "$envf" ]] || continue
             s5_count=$(( s5_count + 1 ))
+            unset CONTAINER PORT
             source "$envf" 2>/dev/null
             local inst_id; inst_id=$(basename "$envf" | sed 's/instance_//;s/\.env//')
-            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER:-}$"; then
+            # - guard на пустой CONTAINER -
+            if [[ -z "${CONTAINER:-}" ]]; then
+                print_err "SOCKS5 #${inst_id}: CONTAINER пуст в env"
+                _dg_red "SOCKS5 #${inst_id} битый env"
+                continue
+            fi
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER}$"; then
                 print_ok "SOCKS5 #${inst_id}: port ${PORT}"
                 _dg_green "SOCKS5 #${inst_id} активен"
             else
@@ -392,17 +440,37 @@ diag_run() {
         done
         [[ $s5_count -eq 0 ]] && print_info "SOCKS5: не установлен"
 
-        # - Hysteria 2 -
-        if [[ -f /etc/hysteria/hysteria.env ]]; then
+        # - Hysteria 2: мультиинстанс + legacy fallback -
+        local hy2_count=0
+        for idir in /etc/hysteria/instance_*/; do
+            [[ -d "$idir" ]] || continue
+            local envf="${idir}hysteria.env"
+            [[ -f "$envf" ]] || continue
+            hy2_count=$(( hy2_count + 1 ))
+            unset PORT VERSION
+            source "$envf" 2>/dev/null
+            local inst_id; inst_id=$(basename "$idir" | sed 's/instance_//')
+            local svc="hysteria-${inst_id}"
+            if systemctl is-active --quiet "$svc" 2>/dev/null; then
+                print_ok "Hysteria 2 #${inst_id}: port ${PORT:-?} (ver ${VERSION:-?})"
+                _dg_green "Hysteria 2 #${inst_id} активен"
+            else
+                print_err "Hysteria 2 #${inst_id}: остановлен"
+                _dg_red "Hysteria 2 #${inst_id} остановлен|systemctl start ${svc}"
+            fi
+        done
+        # - legacy fallback: старый конфиг /etc/hysteria/hysteria.env -
+        if [[ $hy2_count -eq 0 && -f /etc/hysteria/hysteria.env ]]; then
+            unset PORT VERSION
             source /etc/hysteria/hysteria.env 2>/dev/null
             if systemctl is-active --quiet hysteria-server 2>/dev/null; then
-                print_ok "Hysteria 2: port ${PORT} (ver ${VERSION})"
-                _dg_green "Hysteria 2 активен"
+                print_ok "Hysteria 2 (legacy): port ${PORT:-?} (ver ${VERSION:-?})"
+                _dg_green "Hysteria 2 legacy активен"
             else
-                print_err "Hysteria 2: остановлен"
-                _dg_red "Hysteria 2 остановлен|systemctl start hysteria-server"
+                print_err "Hysteria 2 (legacy): остановлен"
+                _dg_red "Hysteria 2 legacy остановлен|systemctl start hysteria-server"
             fi
-        else
+        elif [[ $hy2_count -eq 0 ]]; then
             print_info "Hysteria 2: не установлен"
         fi
     }
