@@ -217,10 +217,11 @@ net.ipv4.tcp_congestion_control=bbr
 EOBBR
     print_ok "99-bbr.conf записан"
 
-    # - conntrack_max = 5% RAM / 300 байт на запись -
+    # - conntrack_max = 5% RAM / 300 байт на запись, минимум 65536 -
     local ram_mb conntrack_max
     ram_mb=$(free -m | awk '/^Mem:/{print $2}')
     conntrack_max=$(( ram_mb * 1024 * 1024 * 5 / 100 / 300 ))
+    [[ "$conntrack_max" -lt 65536 ]] && conntrack_max=65536
     print_info "RAM: ${ram_mb} MB -> nf_conntrack_max = ${conntrack_max}"
 
     # - VPN tune -
@@ -370,7 +371,7 @@ boot_setup_fd_limits() {
 
     # - limits.conf: для PAM сессий (SSH, su) -
     # - ВНИМАНИЕ: проверяем строго по паттерну "* soft nofile" -
-    # - слово "nofile" есть в системных комментариях файла, grep без якоря даёт ложный результат -
+    # - grep без якоря даёт ложный результат -
     if ! grep -qE "^\*[[:space:]]+soft[[:space:]]+nofile" /etc/security/limits.conf 2>/dev/null; then
         cat >> /etc/security/limits.conf << 'EOLIMITS'
 # VPS Stack: file descriptors для VPN + Docker
@@ -520,7 +521,7 @@ boot_run() {
     9. Инициализация книги (book_of_Eli - хранилище настроек стека)
 
   После завершения потребуется перезагрузка (reboot).
-  Время выполнения: 3-10 минут в зависимости от сервера."
+  Время выполнения: 3-5 минут в зависимости от сервера."
 
     local confirm=""
     ask_yn "Запустить первичную настройку?" "y" confirm
