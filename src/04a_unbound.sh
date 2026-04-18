@@ -35,15 +35,25 @@ unbound_install() {
     print_ok "Режим: ${dns_mode}"
 
     # - отключаем DNSStubListener + направляем resolved на Unbound -
-    mkdir -p /etc/systemd/resolved.conf.d/
-    cat > /etc/systemd/resolved.conf.d/no-stub.conf << 'EOF'
+    # - проверяем наличие systemd-resolved перед записью конфига и рестартом -
+    # - на минимальных установках Debian резолва может не быть -
+    if systemctl list-unit-files systemd-resolved.service 2>/dev/null | grep -q systemd-resolved; then
+        mkdir -p /etc/systemd/resolved.conf.d/
+        cat > /etc/systemd/resolved.conf.d/no-stub.conf << 'EOF'
 [Resolve]
 DNSStubListener=no
 DNS=127.0.0.1
 FallbackDNS=8.8.8.8
 EOF
-    systemctl restart systemd-resolved 2>/dev/null || true
-    print_ok "systemd-resolved: StubListener off, DNS -> 127.0.0.1"
+        if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+            systemctl restart systemd-resolved 2>/dev/null || true
+            print_ok "systemd-resolved: StubListener off, DNS -> 127.0.0.1"
+        else
+            print_info "systemd-resolved присутствует но не активен, drop-in создан"
+        fi
+    else
+        print_info "systemd-resolved не установлен -> пропускаем настройку StubListener"
+    fi
 
     # - собираем IP AWG интерфейсов -
     local awg_ips=() awg_ifaces=()
@@ -102,6 +112,8 @@ ${access_lines}
 EOF
     else
         # - форвард: запросы на Google/CF/Quad9, быстрее но менее приватно -
+        # - harden-dnssec-stripped отключён для forward-first режима -
+        # - иначЕ запросы к доменам без DNSSEC (а их дохуя) дают SERVFAIL -
         cat > "$UNBOUND_CONF" << EOF
 # - режим: форвард через Google/Cloudflare/Quad9 -
 # - быстрее, но они видят все запрашиваемые домены -
@@ -118,8 +130,8 @@ ${access_lines}
     hide-identity: yes
     hide-version: yes
     harden-glue: yes
-    harden-dnssec-stripped: yes
-    use-caps-for-id: yes
+    harden-dnssec-stripped: no
+    use-caps-for-id: no
     verbosity: 0
     log-queries: no
 
@@ -139,16 +151,17 @@ EOF
     # - root.hints (нужен для рекурсии, не мешает форварду) -
     if curl -fsSL --connect-timeout 10 "https://www.internic.net/domain/named.cache" \
         -o /var/lib/unbound/root.hints 2>/dev/null; then
+        # - chown чтобы unbound-пользователь в chroot смог прочитать -
+        chown unbound:unbound /var/lib/unbound/root.hints 2>/dev/null || true
         print_ok "root.hints обновлён"
     else
         print_warn "root.hints: internic.net недоступен, используем встроенный"
     fi
 
-    # - DNSSEC anchor для рекурсии -
-    if [[ "$dns_mode" == "recursive" ]]; then
-        unbound-anchor -a /var/lib/unbound/root.key 2>/dev/null || true
-        chown unbound:unbound /var/lib/unbound/root.key 2>/dev/null || true
-    fi
+    # - DNSSEC anchor: в Debian/Ubuntu unbound.service сам генерит root.key -
+    # - через ExecStartPre=/usr/libexec/unbound-helper root_trust_anchor_update. -
+    # - Наш вызов unbound-anchor дублировал якорь, получали "trust anchor presented twice". -
+    # - Не трогаем: если файл уже есть, ничего не делаем; если нет - unit создаст при старте -
 
     # - проверка и запуск -
     if unbound-checkconf "$UNBOUND_CONF" 2>/dev/null; then
