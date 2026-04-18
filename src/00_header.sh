@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # --> ЗАГОЛОВОК СКРИПТА <--
-# - The VPS of Eli v3.141: общие функции, переменные, book блок -
+# - The VPS of Eli v3.236: общие функции, переменные, book блок -
 
 # - проверка bash -
 if [ -z "$BASH_VERSION" ]; then
@@ -19,7 +19,7 @@ if ! flock -n 200; then
     exit 1
 fi
 
-ELI_VERSION="3.141"
+ELI_VERSION="3.236"
 # shellcheck disable=SC2034
 ELI_CODENAME="The VPS of Eli" # - используется в баннере и book -
 
@@ -135,6 +135,15 @@ cidr_base() {
 
 # --> РАНДОМ <--
 # - генерация случайных значений для обфускации и портов -
+_rand_bits30() {
+    local span="$1"
+    [[ -z "$span" || "$span" -le 0 ]] && { echo 0; return; }
+    local r
+    r=$(od -An -N4 -tu4 < /dev/urandom 2>/dev/null | tr -d ' ')
+    [[ -z "$r" ]] && r=$(( (RANDOM << 15) | RANDOM ))
+    echo $(( r % span ))
+}
+
 rand_h() {
     printf '%u\n' $(( (RANDOM << 16 | RANDOM) % 2147483647 + 1 ))
 }
@@ -142,25 +151,41 @@ rand_h() {
 # - диапазон H для AWG 2.0: возвращает "min-max" внутри сегмента [lo, hi] -
 rand_h_range() {
     local lo="$1" hi="$2"
+    if [[ -z "$lo" || -z "$hi" || "$lo" -ge "$hi" ]]; then
+        echo "${lo:-0}-${hi:-0}"; return 1
+    fi
     local mid=$(( (lo + hi) / 2 ))
-    local mn=$(( lo + RANDOM % (mid - lo + 1) ))
-    local mx=$(( mid + 1 + RANDOM % (hi - mid) ))
+    local span_lo=$(( mid - lo + 1 ))
+    local span_hi=$(( hi - mid ))
+    local mn=$(( lo + $(_rand_bits30 "$span_lo") ))
+    local mx=$(( mid + 1 + $(_rand_bits30 "$span_hi") ))
     echo "${mn}-${mx}"
 }
 
+# - guard на $1 > $2, иначе RANDOM % 0 -> shell падает -
 rand_range() {
-    echo $(( RANDOM % ($2 - $1 + 1) + $1 ))
+    local lo="$1" hi="$2"
+    if [[ -z "$lo" || -z "$hi" ]]; then echo 0; return 1; fi
+    if [[ "$lo" -gt "$hi" ]]; then local t="$lo"; lo="$hi"; hi="$t"; fi
+    [[ "$lo" -eq "$hi" ]] && { echo "$lo"; return 0; }
+    echo $(( RANDOM % (hi - lo + 1) + lo ))
 }
 
+# - таймаут 100 попыток -
 rand_port() {
     local low="${1:-10000}" high="${2:-60000}" port
-    while true; do
+    local attempts=0 max_attempts=100
+    while (( attempts < max_attempts )); do
         port=$(( RANDOM % (high - low + 1) + low ))
         if ! ss -ulnp 2>/dev/null | grep -q ":${port} " && \
            ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
-            echo "$port"; return
+            echo "$port"; return 0
         fi
+        (( attempts++ ))
     done
+    # - исчерпали попытки, возвращаем последний сгенерированный -
+    echo "$port"
+    return 1
 }
 
 rand_str() {
@@ -180,9 +205,17 @@ rand_path() {
 # - ВНИМАНИЕ: рассчитана на подсети вида 10.X.0.0/24 (схема AWG)
 # - сравнивает первые три октета, этого достаточно для автогенерируемых /24
 # - net2 может содержать несколько CIDR через пробел
+# - при не-/24 выводим предупреждение в stderr -
 subnets_overlap() {
     local net1="$1" net2="$2"
     [[ -z "$net1" || -z "$net2" ]] && return 1
+    # - предупреждение если net1 не /24 -
+    if [[ "$net1" =~ /([0-9]+)$ ]]; then
+        local mask="${BASH_REMATCH[1]}"
+        if [[ "$mask" != "24" ]]; then
+            echo "  WARN: subnets_overlap рассчитана на /24, net1=${net1} (маска /${mask})" >&2
+        fi
+    fi
     local base1
     base1=$(echo "$net1" | cut -d'/' -f1 | sed 's/\.[0-9]*$//')
     local cidr
