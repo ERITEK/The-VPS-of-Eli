@@ -9,10 +9,17 @@ XUI_BIN="${XUI_DIR}/x-ui"
 XUI_DB="${XUI_DIR}/db/x-ui.db"
 XUI_SERVICE="x-ui"
 XUI_UNIT="/etc/systemd/system/x-ui.service"
-XUI_INSTALL_URL="https://raw.githubusercontent.com/MHSanaei/3x-ui/main/install.sh"
 
+# - ветка master, используется как fallback для x-ui.sh и unit-файла -
+XUI_REPO_BRANCH="master"
+XUI_GITHUB_REPO="MHSanaei/3x-ui"
+XUI_RAW_URL="https://raw.githubusercontent.com/${XUI_GITHUB_REPO}/${XUI_REPO_BRANCH}"
+XUI_API_URL="https://api.github.com/repos/${XUI_GITHUB_REPO}/releases/latest"
+
+# - установка "на самом деле 'нет'" требует бинарь и unit -
+# - is-active проверяем отдельно через xui_running (иначе после падения сервиса нельзя переустановить) -
 xui_installed() {
-    [[ -f "$XUI_BIN" ]] || systemctl list-unit-files "$XUI_SERVICE" 2>/dev/null | grep -q "$XUI_SERVICE"
+    [[ -f "$XUI_BIN" ]] && systemctl list-unit-files "$XUI_SERVICE" 2>/dev/null | grep -q "$XUI_SERVICE"
 }
 
 xui_running() {
@@ -22,6 +29,126 @@ xui_running() {
 xui_get_param() {
     local key="$1"
     [[ -f "$XUI_ENV" ]] && grep -oP "^${key}=\"\K[^\"]+" "$XUI_ENV" | head -1 || true
+}
+
+# --> 3X-UI: АРХИТЕКТУРА ДЛЯ РЕЛИЗА <--
+_xui_arch() {
+    case "$(uname -m)" in
+        x86_64|amd64) echo "amd64" ;;
+        aarch64|arm64) echo "arm64" ;;
+        armv7*|armv7l) echo "armv7" ;;
+        armv6*) echo "armv6" ;;
+        armv5*) echo "armv5" ;;
+        i?86) echo "386" ;;
+        s390x) echo "s390x" ;;
+        *) echo "amd64" ;;
+    esac
+}
+
+# --> 3X-UI: ПОЛУЧИТЬ ССЫЛКУ НА РЕЛИЗ <--
+# - возвращает tag_version и URL на x-ui-linux-<arch>.tar.gz -
+# - результат в глобальных XUI_TAG / XUI_TARBALL_URL -
+_xui_fetch_release_info() {
+    local arch
+    arch=$(_xui_arch)
+    local tag
+    tag=$(curl -fsSL --connect-timeout 10 "$XUI_API_URL" 2>/dev/null \
+        | grep '"tag_name":' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+    if [[ -z "$tag" ]]; then
+        # - fallback через IPv4 -
+        tag=$(curl -4 -fsSL --connect-timeout 10 "$XUI_API_URL" 2>/dev/null \
+            | grep '"tag_name":' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+    fi
+    if [[ -z "$tag" ]]; then
+        print_err "Не удалось получить версию 3X-UI с GitHub API"
+        return 1
+    fi
+    XUI_TAG="$tag"
+    XUI_TARBALL_URL="https://github.com/${XUI_GITHUB_REPO}/releases/download/${tag}/x-ui-linux-${arch}.tar.gz"
+    return 0
+}
+
+# --> 3X-UI: СКАЧАТЬ И РАСПАКОВАТЬ tar.gz <--
+# - чистая установка без вызова upstream install.sh (там интерактивные prompts) -
+_xui_fetch_and_extract() {
+    local arch tmpdir tarball
+    arch=$(_xui_arch)
+    tmpdir=$(mktemp -d)
+    tarball="${tmpdir}/x-ui-linux-${arch}.tar.gz"
+
+    print_info "Скачиваем ${XUI_TAG} для ${arch}..."
+    if ! curl -4fLRo "$tarball" --connect-timeout 15 "$XUI_TARBALL_URL"; then
+        print_err "Не удалось скачать ${XUI_TARBALL_URL}"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # - чистим старую установку -
+    systemctl stop "$XUI_SERVICE" 2>/dev/null || true
+    rm -rf "$XUI_DIR"
+
+    # - распаковка в /usr/local, архив содержит папку x-ui/ -
+    if ! tar -xzf "$tarball" -C /usr/local/; then
+        print_err "Не удалось распаковать tar.gz"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+    rm -rf "$tmpdir"
+
+    [[ ! -d "$XUI_DIR" ]] && { print_err "После распаковки ${XUI_DIR} не найден"; return 1; }
+
+    chmod +x "${XUI_DIR}/x-ui" 2>/dev/null || true
+    chmod +x "${XUI_DIR}/x-ui.sh" 2>/dev/null || true
+    chmod +x "${XUI_DIR}/bin/xray-linux-${arch}" 2>/dev/null || true
+
+    # - для armv5/6/7 бинар переименовывается в xray-linux-arm -
+    case "$arch" in
+        armv5|armv6|armv7)
+            if [[ -f "${XUI_DIR}/bin/xray-linux-${arch}" ]]; then
+                mv -f "${XUI_DIR}/bin/xray-linux-${arch}" "${XUI_DIR}/bin/xray-linux-arm"
+                chmod +x "${XUI_DIR}/bin/xray-linux-arm"
+            fi
+            ;;
+    esac
+    return 0
+}
+
+# --> 3X-UI: УСТАНОВИТЬ CLI И UNIT <--
+_xui_install_cli_and_unit() {
+    # - x-ui.sh: сначала ищем в архиве, иначе качаем с GitHub raw -
+    if [[ -f "${XUI_DIR}/x-ui.sh" ]]; then
+        cp -f "${XUI_DIR}/x-ui.sh" /usr/bin/x-ui
+    else
+        curl -4fLRo /usr/bin/x-ui --connect-timeout 10 \
+            "${XUI_RAW_URL}/x-ui.sh" 2>/dev/null || true
+    fi
+    [[ -f /usr/bin/x-ui ]] && chmod +x /usr/bin/x-ui
+
+    # - systemd unit: сначала из архива (x-ui.service или x-ui.service.debian), иначе raw -
+    local unit_src=""
+    if [[ -f "${XUI_DIR}/x-ui.service" ]]; then
+        unit_src="${XUI_DIR}/x-ui.service"
+    elif [[ -f "${XUI_DIR}/x-ui.service.debian" ]]; then
+        unit_src="${XUI_DIR}/x-ui.service.debian"
+    fi
+
+    if [[ -n "$unit_src" ]]; then
+        cp -f "$unit_src" "$XUI_UNIT"
+    else
+        print_info "Unit не найден в архиве, качаем с GitHub..."
+        if ! curl -4fLRo "$XUI_UNIT" --connect-timeout 10 \
+             "${XUI_RAW_URL}/x-ui.service.debian"; then
+            print_err "Не удалось получить x-ui.service"
+            return 1
+        fi
+    fi
+
+    chown root:root "$XUI_UNIT"
+    chmod 644 "$XUI_UNIT"
+    mkdir -p /var/log/x-ui
+    systemctl daemon-reload
+    systemctl enable "$XUI_SERVICE" >/dev/null 2>&1
+    return 0
 }
 
 # --> 3X-UI: ПАТЧ NOFILE <--
@@ -48,7 +175,13 @@ xui_install() {
     print_section "Установка 3X-UI"
 
     if xui_installed 2>/dev/null; then
-        print_warn "3X-UI уже установлен и запущен"
+        if xui_running 2>/dev/null; then
+            print_warn "3X-UI уже установлен и запущен"
+        else
+            print_warn "3X-UI установлен, но не запущен"
+            print_info "Для восстановления: systemctl start ${XUI_SERVICE}"
+            print_info "Для переустановки: меню 3X-UI -> Переустановить"
+        fi
         return 0
     fi
 
@@ -115,11 +248,35 @@ xui_install() {
     print_ok "Логин: ${panel_user}"
 
     # - запуск установщика -
-    print_section "Запуск установщика"
+    print_section "Установка из релиза"
     mkdir -p "$XUI_ENV_DIR" "$XUI_BACKUP_DIR"
     chmod 700 "$XUI_ENV_DIR"
 
-    echo -e "n\n" | bash <(curl -Ls "$XUI_INSTALL_URL") || true
+    # - прямое скачивание tar.gz вместо upstream install.sh -
+    # - причина: install.sh на master имеет 2-3 интерактивных prompts (port/SSL/IPv6) -
+    # - и сам генерит webBasePath/username/password, игнорируя наши аргументы -
+    # - базовые зависимости (curl/tar/tzdata/socat/ca-certificates) -
+    apt-get install -y -qq curl tar tzdata socat ca-certificates 2>/dev/null || true
+
+    if ! _xui_fetch_release_info; then
+        print_err "Не удалось определить последний релиз 3X-UI"
+        return 1
+    fi
+    print_info "Версия: ${XUI_TAG}"
+
+    if ! _xui_fetch_and_extract; then
+        print_err "Не удалось скачать/распаковать 3X-UI"
+        return 1
+    fi
+
+    if ! _xui_install_cli_and_unit; then
+        print_err "Не удалось установить CLI/unit"
+        return 1
+    fi
+
+    # - первый запуск для инициализации БД (генерит дефолтные user/pass/path) -
+    systemctl start "$XUI_SERVICE" || true
+    sleep 3
 
     if [[ ! -f "$XUI_BIN" ]]; then
         print_err "Установка не удалась: ${XUI_BIN} не найден"
@@ -127,10 +284,11 @@ xui_install() {
     fi
     print_ok "3X-UI установлен"
 
-    # - настройка через CLI -
+    # - настройка через CLI: наши параметры применяются гарантированно -
     "$XUI_BIN" setting -port "$panel_port" >/dev/null 2>&1 || true
     "$XUI_BIN" setting -webBasePath "$panel_path" >/dev/null 2>&1 || true
     "$XUI_BIN" setting -username "$panel_user" -password "$panel_pass" >/dev/null 2>&1 || true
+    "$XUI_BIN" migrate >/dev/null 2>&1 || true
     systemctl restart "$XUI_SERVICE" 2>/dev/null || true
     sleep 3
 
@@ -245,6 +403,8 @@ xui_show_inbounds() {
 
     local cookie_jar
     cookie_jar=$(mktemp)
+    # - trap на cleanup cookie (в нём логин/пароль до ответа сервера) -
+    trap 'rm -f "$cookie_jar" 2>/dev/null' RETURN
     local login_result
     login_result=$(curl -sk --connect-timeout 5 -c "$cookie_jar" \
         -X POST "${base_url}/login" \
@@ -259,6 +419,7 @@ xui_show_inbounds() {
         -b "$cookie_jar" -c "$cookie_jar" \
         "${base_url}/panel/api/inbounds/list" 2>/dev/null || echo "")
     rm -f "$cookie_jar"
+    trap - RETURN
 
     if ! echo "$inbounds_result" | grep -q '"success":true'; then
         print_err "Не удалось получить inbound'ы"; return 0
