@@ -149,16 +149,32 @@ prayer_run() {
             else _pr_warn "  Сервис: не активен"; fi
 
             local iobj
+            # - валидация: --argjson требует валидный JSON (число без пробелов/знаков) -
+            # - если env битый - подставляем дефолт, чтобы jq не упал -
+            local _p_port="${SERVER_PORT:-0}"; [[ "$_p_port" =~ ^[0-9]+$ ]] || _p_port=0
+            local _p_jc="${JC:-5}";    [[ "$_p_jc"   =~ ^[0-9]+$ ]] || _p_jc=5
+            local _p_jmin="${JMIN:-50}";  [[ "$_p_jmin" =~ ^[0-9]+$ ]] || _p_jmin=50
+            local _p_jmax="${JMAX:-1000}"; [[ "$_p_jmax" =~ ^[0-9]+$ ]] || _p_jmax=1000
+            local _p_s1="${S1:-0}";   [[ "$_p_s1"   =~ ^[0-9]+$ ]] || _p_s1=0
+            local _p_s2="${S2:-0}";   [[ "$_p_s2"   =~ ^[0-9]+$ ]] || _p_s2=0
             iobj=$(jq -n --arg desc "${IFACE_DESC:-}" --arg ep "${SERVER_ENDPOINT_IP:-}" \
-                --argjson port "${SERVER_PORT:-0}" --arg tip "${SERVER_TUNNEL_IP:-}" \
+                --argjson port "$_p_port" --arg tip "${SERVER_TUNNEL_IP:-}" \
                 --arg snet "${TUNNEL_SUBNET:-}" --arg dns "${CLIENT_DNS:-}" \
                 --arg allowed "${CLIENT_ALLOWED_IPS:-}" \
-                --argjson jc "${JC:-5}" --argjson jmin "${JMIN:-50}" --argjson jmax "${JMAX:-1000}" \
-                --argjson s1 "${S1:-0}" --argjson s2 "${S2:-0}" \
-                --argjson h1 "${H1:-1}" --argjson h2 "${H2:-2}" --argjson h3 "${H3:-3}" --argjson h4 "${H4:-4}" \
+                --arg awg_ver "${AWG_VERSION:-1.0}" \
+                --argjson jc "$_p_jc" --argjson jmin "$_p_jmin" --argjson jmax "$_p_jmax" \
+                --argjson s1 "$_p_s1" --argjson s2 "$_p_s2" \
+                --arg s3 "${S3:-}" --arg s4 "${S4:-}" \
+                --arg h1 "${H1:-1}" --arg h2 "${H2:-2}" --arg h3 "${H3:-3}" --arg h4 "${H4:-4}" \
+                --arg i1 "${I1:-}" --arg i2 "${I2:-}" --arg i3 "${I3:-}" \
+                --arg i4 "${I4:-}" --arg i5 "${I5:-}" \
                 '{"desc":$desc,"endpoint_ip":$ep,"port":$port,"server_tunnel_ip":$tip,
                   "tunnel_subnet":$snet,"client_dns":$dns,"client_allowed_ips":$allowed,
-                  "obfuscation":{"jc":$jc,"jmin":$jmin,"jmax":$jmax,"s1":$s1,"s2":$s2,"h1":$h1,"h2":$h2,"h3":$h3,"h4":$h4}}' 2>/dev/null || echo "{}")
+                  "awg_version":$awg_ver,
+                  "obfuscation":{"jc":$jc,"jmin":$jmin,"jmax":$jmax,
+                    "s1":$s1,"s2":$s2,"s3":$s3,"s4":$s4,
+                    "h1":$h1,"h2":$h2,"h3":$h3,"h4":$h4,
+                    "i1":$i1,"i2":$i2,"i3":$i3,"i4":$i4,"i5":$i5}}' 2>/dev/null || echo "{}")
             book_write_obj ".awg.interfaces.${iface}" "$iobj"
         done
     fi
@@ -297,7 +313,7 @@ EOF
         local mbl_ip; mbl_ip=$(book_read ".mumble.server_ip")
         [[ -z "$mbl_ip" ]] && { mbl_ip=$(curl -4 -fsSL --connect-timeout 5 ifconfig.me 2>/dev/null || echo ""); book_write ".mumble.server_ip" "$mbl_ip"; }
         _pr_found "Адрес: ${mbl_ip:-?}:${mbl_port:-64738}"
-    elif dpkg -l 2>/dev/null | grep -q "mumble-server"; then
+    elif dpkg -l mumble-server 2>/dev/null | grep -q "^ii"; then
         _pr_warn "mumble-server установлен но не запущен"
         book_write ".mumble.installed" "true" bool
     else
