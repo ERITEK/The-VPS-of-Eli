@@ -35,12 +35,12 @@ menu_vpn() {
         read -r choice
 
         case "$choice" in
-            1) menu_awg       || print_warn "Ошибка в разделе AmneziaWG" ;;
-            2) menu_xui       || print_warn "Ошибка в разделе 3X-UI" ;;
-            3) menu_otl       || print_warn "Ошибка в разделе Outline" ;;
-            4) menu_proxy     || print_warn "Ошибка в разделе Прокси" ;;
+            1) menu_awg       || { print_warn "Ошибка в разделе AmneziaWG"; eli_pause; } ;;
+            2) menu_xui       || { print_warn "Ошибка в разделе 3X-UI"; eli_pause; } ;;
+            3) menu_otl       || { print_warn "Ошибка в разделе Outline"; eli_pause; } ;;
+            4) menu_proxy     || { print_warn "Ошибка в разделе Прокси"; eli_pause; } ;;
             0) return 0 ;;
-            *) print_warn "Введите число от 0 до 4" ;;
+            *) print_warn "Введите число от 0 до 4"; eli_pause ;;
         esac
     done
 }
@@ -73,9 +73,9 @@ menu_awg() {
 
         case "$choice" in
             1) awg_install    || print_warn "Ошибка при установке AWG"; eli_pause ;;
-            2) awg_manage     || print_warn "Ошибка в управлении AWG" ;;
+            2) awg_manage     || { print_warn "Ошибка в управлении AWG"; eli_pause; } ;;
             0) return 0 ;;
-            *) print_warn "Введите число от 0 до 2" ;;
+            *) print_warn "Введите число от 0 до 2"; eli_pause ;;
         esac
     done
 }
@@ -206,12 +206,12 @@ menu_proxy() {
         read -r choice
 
         case "$choice" in
-            1) menu_mtp  || print_warn "Ошибка в разделе MTProto" ;;
-            2) menu_s5   || print_warn "Ошибка в разделе SOCKS5" ;;
-            3) menu_hy2  || print_warn "Ошибка в разделе Hysteria 2" ;;
-            4) menu_sig  || print_warn "Ошибка в разделе Signal" ;;
+            1) menu_mtp  || { print_warn "Ошибка в разделе MTProto"; eli_pause; } ;;
+            2) menu_s5   || { print_warn "Ошибка в разделе SOCKS5"; eli_pause; } ;;
+            3) menu_hy2  || { print_warn "Ошибка в разделе Hysteria 2"; eli_pause; } ;;
+            4) menu_sig  || { print_warn "Ошибка в разделе Signal"; eli_pause; } ;;
             0) return 0 ;;
-            *) print_warn "Введите число от 0 до 4" ;;
+            *) print_warn "Введите число от 0 до 4"; eli_pause ;;
         esac
     done
 }
@@ -413,10 +413,10 @@ menu_comms() {
         read -r choice
 
         case "$choice" in
-            1) menu_ts  || print_warn "Ошибка в разделе TeamSpeak" ;;
-            2) menu_mbl || print_warn "Ошибка в разделе Mumble" ;;
+            1) menu_ts  || { print_warn "Ошибка в разделе TeamSpeak"; eli_pause; } ;;
+            2) menu_mbl || { print_warn "Ошибка в разделе Mumble"; eli_pause; } ;;
             0) return 0 ;;
-            *) print_warn "Введите число от 0 до 2" ;;
+            *) print_warn "Введите число от 0 до 2"; eli_pause ;;
         esac
     done
 }
@@ -547,17 +547,17 @@ menu_maint() {
         read -r choice
 
         case "$choice" in
-            1) menu_unbound    || print_warn "Ошибка в разделе Unbound" ;;
+            1) menu_unbound    || { print_warn "Ошибка в разделе Unbound"; eli_pause; } ;;
             2) diag_run        || print_warn "Ошибка при диагностике"; eli_pause ;;
             3) prayer_run      || print_warn "Ошибка в Prayer of Eli"; eli_pause ;;
-            4) menu_ssh        || print_warn "Ошибка в разделе SSH" ;;
-            5) menu_ufw        || print_warn "Ошибка в разделе UFW" ;;
-            6) menu_update     || print_warn "Ошибка в разделе обновлений" ;;
+            4) menu_ssh        || { print_warn "Ошибка в разделе SSH"; eli_pause; } ;;
+            5) menu_ufw        || { print_warn "Ошибка в разделе UFW"; eli_pause; } ;;
+            6) menu_update     || { print_warn "Ошибка в разделе обновлений"; eli_pause; } ;;
             7) routine_run     || print_warn "Ошибка при автообслуживании"; eli_pause ;;
-            8) menu_backup     || print_warn "Ошибка в разделе бэкапов" ;;
-            9) menu_tgbot      || print_warn "Ошибка в разделе Telegram" ;;
+            8) menu_backup     || { print_warn "Ошибка в разделе бэкапов"; eli_pause; } ;;
+            9) menu_tgbot      || { print_warn "Ошибка в разделе Telegram"; eli_pause; } ;;
             0) return 0 ;;
-            *) print_warn "Введите число от 0 до 9" ;;
+            *) print_warn "Введите число от 0 до 9"; eli_pause ;;
         esac
     done
 }
@@ -894,11 +894,11 @@ eli_main() {
 
         case "$choice" in
             1) boot_run   || print_warn "Ошибка в разделе Старт"; eli_pause ;;
-            2) menu_vpn   || print_warn "Ошибка в разделе VPN" ;;
-            3) menu_comms || print_warn "Ошибка в разделе Связь" ;;
-            4) menu_maint || print_warn "Ошибка в разделе Обслуживание" ;;
+            2) menu_vpn   || { print_warn "Ошибка в разделе VPN"; eli_pause; } ;;
+            3) menu_comms || { print_warn "Ошибка в разделе Связь"; eli_pause; } ;;
+            4) menu_maint || { print_warn "Ошибка в разделе Обслуживание"; eli_pause; } ;;
             0) echo ""; echo "  Выход."; echo ""; exit 0 ;;
-            *) print_warn "Введите число от 0 до 4" ;;
+            *) print_warn "Введите число от 0 до 4"; eli_pause ;;
         esac
 
         eli_header
