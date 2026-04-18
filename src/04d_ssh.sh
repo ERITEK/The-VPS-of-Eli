@@ -49,7 +49,7 @@ ssh_change_port() {
     print_info "Текущий: ${current_port}"
     local new_port=""
     while true; do
-        echo -e "  ${CYAN}Рекомендуется порт в диапазоне 10000-60000. Запомни его — без него не подключишься!${NC}"
+        echo -e "  ${CYAN}Рекомендуется порт в диапазоне 10000-60000. Запомни его - без него не подключишься!${NC}"
         echo -ne "  ${BOLD}Новый порт (1-65535):${NC} "; read -r new_port
         validate_port "$new_port" || { print_err "1-65535"; continue; }
         [[ "$new_port" == "$current_port" ]] && { print_warn "Уже текущий"; continue; }
@@ -116,11 +116,11 @@ ssh_fail2ban() {
     command -v fail2ban-client &>/dev/null || apt-get install -y -qq fail2ban || true
     local ssh_port; ssh_port=$(ssh_get_port)
     local maxretry="5" bantime="3600" findtime="600"
-    echo -e "  ${CYAN}maxretry — сколько неудачных попыток входа до блокировки IP (рекомендуется 3-5).${NC}"
+    echo -e "  ${CYAN}maxretry - сколько неудачных попыток входа до блокировки IP (рекомендуется 3-5).${NC}"
     echo -ne "  ${BOLD}maxretry${NC} [${maxretry}]: "; read -r _in; [[ -n "$_in" ]] && maxretry="$_in"
-    echo -e "  ${CYAN}bantime — на сколько секунд блокировать IP (3600 = 1 час, 86400 = сутки).${NC}"
+    echo -e "  ${CYAN}bantime - на сколько секунд блокировать IP (3600 = 1 час, 86400 = сутки).${NC}"
     echo -ne "  ${BOLD}bantime (сек)${NC} [${bantime}]: "; read -r _in; [[ -n "$_in" ]] && bantime="$_in"
-    echo -e "  ${CYAN}findtime — за какой период считать попытки (600 = 10 минут).${NC}"
+    echo -e "  ${CYAN}findtime - за какой период считать попытки (600 = 10 минут).${NC}"
     echo -ne "  ${BOLD}findtime (сек)${NC} [${findtime}]: "; read -r _in; [[ -n "$_in" ]] && findtime="$_in"
 
     local backend logpath=""
