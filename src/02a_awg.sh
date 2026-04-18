@@ -9,14 +9,14 @@ AWG_VER=""
 
 # --> AWG: ВЫБОР ВЕРСИИ ПРОТОКОЛА <--
 # - AWG 1.0 (H+S1/S2) vs AWG 1.5 (+ I1-I5) vs AWG 2.0 (+ ranged H, S3/S4, I1-I5) vs WG -
-# - P/S хелпа AWG написана идиотом, куском гуманитарного шлепка блядь -
+# - P/S хелпа AWG написана идиотом. я АтупеL пока читал -
 _awg_ask_version() {
     echo ""
     echo -e "  ${BOLD}Версия протокола:${NC}"
     echo -e "  ${GREEN}1)${NC} AWG 1.0 (classic) - H1-H4 + S1/S2 + Jc/Jmin/Jmax"
     echo -e "     ${CYAN}Совместим с Keenetic 4.2+, OpenWrt, все старые клиенты.${NC}"
     echo -e "  ${GREEN}2)${NC} AWG 1.5 - + I1-I5 (signature chain/CPS)"
-    echo -e "     ${CYAN}Маскировка хендшейка под реальный протокол (QUIC/DNS).${NC}"
+    echo -e "     ${CYAN}Keenetic 5.1+ Маскировка под реальный протокол (QUIC/DNS).${NC}"
     echo -e "  ${GREEN}3)${NC} AWG 2.0 - 1.5 + ranged H + S3/S4"
     echo -e "     ${CYAN}Keenetic 5.1+, Amnezia 4.8.12.9+. Максимальная обфускация.${NC}"
     echo -e "  ${GREEN}4)${NC} WireGuard vanilla - без обфускации"
@@ -72,14 +72,139 @@ _awg_cps_preset_quic() {
     echo "<b 0xc000000001><r 18><b 0x00><r 8><b 0x00040000040000000400><r 1100>"
 }
 
+# - генератор hex DNS-запроса типа A для произвольного FQDN -
+# - формат: flags(0100) qd(0001) an(0000) ns(0000) ar(0000) QNAME qtype(0001) qclass(0001) -
+_awg_dns_query_hex() {
+    local domain="$1"
+    local hex="01000001000000000000"
+    local IFS='.'
+    local -a labels=($domain)
+    local label len i ch
+    for label in "${labels[@]}"; do
+        len="${#label}"
+        hex+=$(printf "%02x" "$len")
+        for (( i=0; i<${#label}; i++ )); do
+            ch="${label:$i:1}"
+            hex+=$(printf "%02x" "'$ch")
+        done
+    done
+    hex+="00"       # - терминатор QNAME -
+    hex+="00010001" # - QTYPE=A, QCLASS=IN -
+    echo "$hex"
+}
+
+# - пул популярных DNS-доменов по регионам -
+# - формат: "домен|описание" либо "###Заголовок" как маркер группы -
+# - маркеры не получают номера в меню, только визуальные разделители -
+AWG_DNS_DOMAINS=(
+    "###Глобальные"
+    "www.cloudflare.com|Global CDN, правдоподобен в любой стране"
+    "www.google.com|Global поиск/Gmail, самый распространённый запрос"
+    "fonts.googleapis.com|Google Fonts, грузится с большинства сайтов"
+    "www.apple.com|Global Apple сервисы"
+    "www.microsoft.com|Global Windows/Office телеметрия"
+    "www.amazon.com|Global AWS и магазин"
+    "www.github.com|Global разработчики"
+    "###Россия"
+    "www.yandex.ru|Россия Яндекс"
+    "mc.yandex.ru|Россия Яндекс.Метрика (грузится с кучи сайтов)"
+    "www.vk.com|Россия VK соцсеть"
+    "www.mail.ru|Россия Mail.ru почта"
+    "www.tinkoff.ru|Россия T-Банк"
+    "###СНГ / Средняя Азия"
+    "www.kaspi.kz|Казахстан Kaspi банк"
+    "www.beeline.uz|Узбекистан Beeline оператор"
+    "www.onliner.by|Беларусь Onliner портал"
+    "list.am|Армения List.am объявления"
+    "###Турция"
+    "www.trt.net.tr|Турция гос. медиа"
+    "www.hurriyet.com.tr|Турция Hurriyet новости"
+    "###Европа"
+    "www.bbc.co.uk|UK BBC"
+    "www.spiegel.de|DE Spiegel"
+    "www.lemonde.fr|FR Le Monde"
+    "www.elpais.com|ES El Pais"
+    "###США"
+    "www.netflix.com|США Netflix"
+    "www.nytimes.com|США NY Times"
+    "www.cnn.com|США CNN"
+)
+
+# --> AWG: RAND_PORT ДЛЯ AWG-ИНТЕРФЕЙСА <--
+# - диапазон 1024-9999 (рекомендация Amnezia, провайдеры режут UDP на high-ports) -
+# - исключаем well-known зарезервированные порты -
+_awg_port_blacklist() {
+    local p="$1"
+    case "$p" in
+        53|80|123|443|853|8080|8443|1194|1701|4500|5060|3478|3479|1812|1813|22|21|25|465|587|993|995|110|143|3306|5432|5900|5901|6881|6882|6883|6884|6885|6886|6887|6888|6889)
+            return 0 ;;
+    esac
+    return 1
+}
+
+rand_port_awg() {
+    local low=1024 high=9999 port
+    local attempts=0 max_attempts=100
+    while (( attempts < max_attempts )); do
+        port=$(( RANDOM % (high - low + 1) + low ))
+        if _awg_port_blacklist "$port"; then (( attempts++ )); continue; fi
+        if ! ss -ulnp 2>/dev/null | grep -q ":${port} " && \
+           ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+            echo "$port"; return 0
+        fi
+        (( attempts++ ))
+    done
+    echo "$port"; return 1
+}
+
 _awg_cps_preset_dns() {
-    # - DNS query (example) - маскирует под обычный DNS запрос -
-    echo "<r 2><b 0x0100000100000000000003777777076578616d706c6503636f6d0000010001>"
+    # - DNS query типа A, маскирует под обычный DNS резолвинг -
+    # - аргумент: FQDN. Если пустой - случайный из AWG_DNS_DOMAINS (маркеры пропускаются) -
+    local domain="$1"
+    if [[ -z "$domain" ]]; then
+        local pool=() entry
+        for entry in "${AWG_DNS_DOMAINS[@]}"; do
+            [[ "$entry" == "###"* ]] && continue
+            pool+=("${entry%%|*}")
+        done
+        domain="${pool[$(( RANDOM % ${#pool[@]} ))]}"
+    fi
+    local hex
+    hex=$(_awg_dns_query_hex "$domain")
+    echo "<r 2><b 0x${hex}>"
 }
 
 _awg_cps_preset_stun() {
     # - STUN binding request (RFC 5389) - маскирует под STUN (WebRTC) -
     echo "<b 0x000100002112a442><r 12>"
+}
+
+# - описание пресетов для интерактивного выбора -
+# - показывает как работает, где реалистично, какие риски -
+_awg_preset_desc() {
+    case "$1" in
+        quic)
+            echo "    Как работает: первый пакет имитирует QUIC Initial (HTTP/3 handshake)."
+            echo "    Реалистично: браузеры Chrome/Safari активно используют HTTP/3, много трафика."
+            echo "    Риски: DPI с глубокой проверкой QUIC увидит что пакет не продолжает QUIC"
+            echo "           сессию (нет ACK, нет валидных QUIC фреймов). Но для статистического"
+            echo "           DPI выглядит нормально."
+            ;;
+        dns)
+            echo "    Как работает: первый пакет имитирует DNS query типа A к выбранному домену."
+            echo "    Реалистично: DNS-трафик есть всегда и везде, самый банальный протокол."
+            echo "    Риски: DNS обычно идёт на порт 53 или DoH/DoT. Запрос с AWG-порта на DNS-домен"
+            echo "           через нестандартный порт = слабый признак аномалии. Плюс домен"
+            echo "           отправляется всегда одинаковый - потенциальный фингерпринт."
+            ;;
+        stun)
+            echo "    Как работает: первый пакет имитирует STUN binding request (WebRTC)."
+            echo "    Реалистично: WebRTC активно используется (видеозвонки, голосовые, Telegram calls)."
+            echo "    Риски: STUN короткий (20 байт base), редко летит на случайные порты. Подделка"
+            echo "           пакета STUN от реального трафика WebRTC-сессии отличается отсутствием"
+            echo "           ответа от STUN-сервера."
+            ;;
+    esac
 }
 
 # - случайная CPS-строка для I2-I5: разнообразные теги для энтропии -
@@ -95,26 +220,48 @@ _awg_cps_random() {
 }
 
 # --> AWG: ГЕНЕРАЦИЯ I1-I5 <--
-# - auto: гибрид - I1 из пресета QUIC/DNS/STUN, I2-I5 случайные теги -
-# - manual: запрос ручного ввода с возможностью "пропустить" через пустую строку -
+# - auto: для 1.5/2.0 показываем меню выбора пресета (дефолт DNS) + домена (дефолт cloudflare) -
+# - manual: полный ручной ввод с описаниями пресетов и выбор домена для DNS -
+# - I1 обязателен для 1.5/2.0, I2-I5 - случайные CPS для энтропии -
 _awg_gen_i_packets() {
     local auto="$1"
     OBF_I1=""; OBF_I2=""; OBF_I3=""; OBF_I4=""; OBF_I5=""
 
     if [[ "$auto" == "yes" ]]; then
-        # - гибрид: случайный пресет для I1, случайные CPS для I2-I5 -
-        local presets=("quic" "dns" "stun")
-        local p="${presets[$(( RANDOM % 3 ))]}"
-        case "$p" in
-            quic) OBF_I1=$(_awg_cps_preset_quic) ;;
-            dns)  OBF_I1=$(_awg_cps_preset_dns) ;;
-            stun) OBF_I1=$(_awg_cps_preset_stun) ;;
+        # - даже в auto пользователь выбирает пресет и домен один раз при установке -
+        echo ""
+        echo -e "  ${CYAN}I1 - первый пакет маскировки. Выбери под что маскировать handshake.${NC}"
+        echo ""
+        echo -e "  ${GREEN}q)${NC} ${BOLD}QUIC${NC} (HTTP/3 handshake)"
+        echo -e "  ${GREEN}d)${NC} ${BOLD}DNS${NC} (DNS запрос типа A) ${YELLOW}[дефолт]${NC}"
+        echo -e "  ${GREEN}s)${NC} ${BOLD}STUN${NC} (WebRTC binding)"
+        echo ""
+        local _ch=""
+        while true; do
+            echo -ne "  ${BOLD}Пресет?${NC} [d]: "; read -r _ch
+            case "${_ch:-d}" in
+                q|Q) AWG_I1_PRESET="quic"; break ;;
+                d|D) AWG_I1_PRESET="dns";  break ;;
+                s|S) AWG_I1_PRESET="stun"; break ;;
+                *) print_warn "q, d или s" ;;
+            esac
+        done
+
+        case "$AWG_I1_PRESET" in
+            quic) OBF_I1=$(_awg_cps_preset_quic); print_info "I1 пресет: quic" ;;
+            dns)
+                _awg_choose_dns_domain
+                OBF_I1=$(_awg_cps_preset_dns "$AWG_DNS_SELECTED")
+                print_info "I1 пресет: dns (${AWG_DNS_SELECTED})"
+                ;;
+            stun) OBF_I1=$(_awg_cps_preset_stun); print_info "I1 пресет: stun" ;;
         esac
+
+        # - I2-I5 случайные CPS для энтропии -
         OBF_I2=$(_awg_cps_random 2)
         OBF_I3=$(_awg_cps_random 3)
         OBF_I4=$(_awg_cps_random 4)
         OBF_I5=$(_awg_cps_random 5)
-        print_info "I1 пресет: ${p}, I2-I5 случайные"
     else
         echo ""
         echo -e "  ${CYAN}I1-I5 - signature chain (CPS). I1 обязателен (иначе AWG работает как 1.0).${NC}"
@@ -122,16 +269,23 @@ _awg_gen_i_packets() {
         echo -e "  ${CYAN}Оставь пустым для пропуска пакета. I1 пустой = отключение CPS целиком.${NC}"
         echo ""
         echo -e "  ${BOLD}Готовые пресеты для I1:${NC}"
-        echo -e "  ${GREEN}q)${NC} QUIC Initial (маскировка под HTTP/3)"
-        echo -e "  ${GREEN}d)${NC} DNS query (маскировка под DNS)"
-        echo -e "  ${GREEN}s)${NC} STUN (маскировка под WebRTC)"
-        echo -e "  ${GREEN}m)${NC} Ввести вручную"
+        echo -e "  ${GREEN}q)${NC} ${BOLD}QUIC Initial${NC} (маскировка под HTTP/3)"
+        _awg_preset_desc quic
+        echo ""
+        echo -e "  ${GREEN}d)${NC} ${BOLD}DNS query${NC} (маскировка под DNS)"
+        _awg_preset_desc dns
+        echo ""
+        echo -e "  ${GREEN}s)${NC} ${BOLD}STUN${NC} (маскировка под WebRTC)"
+        _awg_preset_desc stun
+        echo ""
+        echo -e "  ${GREEN}m)${NC} ${BOLD}Ввести вручную${NC}"
+        echo ""
         local _ch=""
         while true; do
             echo -ne "  ${BOLD}Выбор для I1?${NC} [q]: "; read -r _ch
             case "${_ch:-q}" in
                 q|Q) OBF_I1=$(_awg_cps_preset_quic); break ;;
-                d|D) OBF_I1=$(_awg_cps_preset_dns); break ;;
+                d|D) _awg_choose_dns_domain; OBF_I1=$(_awg_cps_preset_dns "$AWG_DNS_SELECTED"); break ;;
                 s|S) OBF_I1=$(_awg_cps_preset_stun); break ;;
                 m|M) ask "I1 (CPS)" "" OBF_I1; break ;;
                 *) print_warn "q, d, s или m" ;;
@@ -142,6 +296,76 @@ _awg_gen_i_packets() {
         ask "I4 (CPS, пусто = пропустить)" "$(_awg_cps_random 4)" OBF_I4
         ask "I5 (CPS, пусто = пропустить)" "$(_awg_cps_random 5)" OBF_I5
     fi
+}
+
+# - выбор домена для DNS-пресета из пула с региональной группировкой -
+# - маркеры ###Заголовок выводятся как разделители без номеров -
+# - сквозная нумерация только для доменов, дефолт www.cloudflare.com -
+# - результат кладёт в AWG_DNS_SELECTED -
+_awg_choose_dns_domain() {
+    AWG_DNS_SELECTED=""
+    echo ""
+    echo -e "  ${BOLD}Выбор домена для DNS-пресета:${NC}"
+    echo -e "  ${CYAN}Выбери правдоподобный для твоего региона.${NC}"
+    echo -e "  ${CYAN}Домен должен быть логичен для пользователя из твоей страны.${NC}"
+    echo ""
+
+    # - idx_map: по номеру в меню даёт индекс в AWG_DNS_DOMAINS -
+    local -a idx_map=()
+    local default_num=0
+    local i=0 n=0 entry name desc
+    for entry in "${AWG_DNS_DOMAINS[@]}"; do
+        if [[ "$entry" == "###"* ]]; then
+            echo -e "  ${CYAN}-=== ${entry#\#\#\#} ===-${NC}"
+        else
+            n=$(( n + 1 ))
+            idx_map+=("$i")
+            name="${entry%%|*}"
+            desc="${entry##*|}"
+            printf "  ${GREEN}%2d)${NC} %-25s  ${CYAN}%s${NC}\n" "$n" "$name" "$desc"
+            [[ "$name" == "www.cloudflare.com" ]] && default_num="$n"
+        fi
+        i=$(( i + 1 ))
+    done
+
+    local own_num=$(( n + 1 ))
+    local rand_num=$(( n + 2 ))
+    echo ""
+    printf "  ${GREEN}%2d)${NC} %s\n" "$own_num" "Ввести свой домен"
+    printf "  ${GREEN}%2d)${NC} %s\n" "$rand_num" "Случайный из пула"
+    echo ""
+
+    local sel=""
+    while true; do
+        echo -ne "  ${BOLD}Номер (1-${rand_num})?${NC} [${default_num}]: "; read -r sel
+        [[ -z "$sel" ]] && sel="$default_num"
+        if ! [[ "$sel" =~ ^[0-9]+$ ]] || [[ "$sel" -lt 1 || "$sel" -gt "$rand_num" ]]; then
+            print_warn "Введи число от 1 до ${rand_num}"
+            continue
+        fi
+        break
+    done
+
+    if [[ "$sel" -le "$n" ]]; then
+        entry="${AWG_DNS_DOMAINS[${idx_map[$(( sel - 1 ))]}]}"
+        AWG_DNS_SELECTED="${entry%%|*}"
+    elif [[ "$sel" -eq "$own_num" ]]; then
+        local d=""
+        while true; do
+            ask "Домен (например news.example.org)" "" d
+            if validate_domain "$d"; then
+                AWG_DNS_SELECTED="$d"
+                break
+            fi
+            print_warn "Неверный формат домена (RFC 1035)"
+        done
+    else
+        # - случайный: берём из idx_map чтобы гарантированно не попасть на маркер -
+        local rnd_idx="${idx_map[$(( RANDOM % ${#idx_map[@]} ))]}"
+        entry="${AWG_DNS_DOMAINS[$rnd_idx]}"
+        AWG_DNS_SELECTED="${entry%%|*}"
+    fi
+    print_info "DNS-домен: ${AWG_DNS_SELECTED}"
 }
 
 # - AWG 1.0: H1-H4 одиночные значения, без I1-I5 -
@@ -190,17 +414,38 @@ _awg_gen_obf_v2() {
         OBF_S3=$(rand_range 15 40)
         OBF_S4=$(rand_range 15 40)
         # - 4 сегмента разных порядков, гарантированно не пересекаются -
+        # - контрольная проверка ниже: требование Amnezia 2.0, 'раз в год и палка стреляет' -
         local _segs=("1000 90000" "100000 900000" "1000000 9000000" "10000000 90000000")
-        local _ord=(0 1 2 3) _i _j _tmp
-        for (( _i=3; _i>0; _i-- )); do
-            _j=$(( RANDOM % (_i + 1) ))
-            _tmp=${_ord[$_i]}; _ord[$_i]=${_ord[$_j]}; _ord[$_j]=$_tmp
-        done
-        local _n=1 _lo _hi
-        for _si in "${_ord[@]}"; do
-            read -r _lo _hi <<< "${_segs[$_si]}"
-            printf -v "OBF_H${_n}" '%s' "$(rand_h_range "$_lo" "$_hi")"
-            _n=$(( _n + 1 ))
+        local _gen_att=0
+        while true; do
+            local _ord=(0 1 2 3) _i _j _tmp
+            for (( _i=3; _i>0; _i-- )); do
+                _j=$(( RANDOM % (_i + 1) ))
+                _tmp=${_ord[$_i]}; _ord[$_i]=${_ord[$_j]}; _ord[$_j]=$_tmp
+            done
+            local _n=1 _lo _hi _si
+            for _si in "${_ord[@]}"; do
+                read -r _lo _hi <<< "${_segs[$_si]}"
+                printf -v "OBF_H${_n}" '%s' "$(rand_h_range "$_lo" "$_hi")"
+                _n=$(( _n + 1 ))
+            done
+            # - контроль непересечения всех 6 пар -
+            local _ok="yes" _pair
+            for _pair in "H1:H2" "H1:H3" "H1:H4" "H2:H3" "H2:H4" "H3:H4"; do
+                local _a="${_pair%:*}" _b="${_pair#*:}"
+                local -n _av_ref="OBF_${_a}"
+                local -n _bv_ref="OBF_${_b}"
+                if _awg_ranges_overlap "$_av_ref" "$_bv_ref"; then
+                    _ok="no"; unset -n _av_ref _bv_ref; break
+                fi
+                unset -n _av_ref _bv_ref
+            done
+            [[ "$_ok" == "yes" ]] && break
+            (( _gen_att++ ))
+            if [[ "$_gen_att" -ge 10 ]]; then
+                print_warn "H1-H4 auto: не удалось исключить пересечение за 10 попыток, оставляю как есть"
+                break
+            fi
         done
     else
         echo -e "  ${CYAN}S3/S4 - дополнительные сдвиги заголовков для AWG 2.0 (15-40).${NC}"
@@ -292,19 +537,32 @@ _awg_obf_env_lines() {
 }
 
 # - заголовок-комментарий для клиентского .conf -
+# - указывает версию AWG, требуемые клиенты и Keenetic NDMS -
 _awg_client_header_comment() {
     case "$AWG_VER" in
         1.0)
-            echo "# AWG 1.0 - Keenetic 4.2+: interface WireguardX wireguard asc ${OBF_JC} ${OBF_JMIN} ${OBF_JMAX} ${OBF_S1} ${OBF_S2} ${OBF_H1} ${OBF_H2} ${OBF_H3} ${OBF_H4}"
+            echo "# AWG 1.0"
+            echo "# Совместимость: AmneziaVPN, AmneziaWG native, Keenetic NDMS 5.1 Alpha 3+"
+            echo "# Как подключить: импортируй этот .conf в клиент (файл или QR-код)"
+            echo "# Keenetic: отдельный файл .keenetic.conf / .keenetic.cli (если сгенерирован)"
             ;;
         1.5)
-            echo "# AWG 1.5 - требует клиент с I1-I5 (Amnezia 4.x+, AmneziaWG 1.5+)"
+            echo "# AWG 1.5 (Jc/Jmin/Jmax/S1/S2/H1-H4 + I1-I5 signature chain)"
+            echo "# Совместимость: AmneziaVPN 4.x+, AmneziaWG 1.5+, Keenetic NDMS 5.1 Alpha 3+"
+            echo "# Как подключить: импортируй этот .conf в клиент (файл или QR-код)"
+            echo "# Keenetic: отдельный файл .keenetic.conf / .keenetic.cli (если сгенерирован)"
             ;;
         2.0)
-            echo "# AWG 2.0 - требует Amnezia 4.8.12.9+ или AmneziaWG 2.0.0+"
+            echo "# AWG 2.0 (S3/S4 + ranged H1-H4 + I1-I5)"
+            echo "# Совместимость: AmneziaVPN 4.8.12.9+, AmneziaWG 2.0.0+"
+            echo "# Keenetic: NDMS 5.1 Alpha 3+ поддерживает ASC 2.0, стабильный импорт с 5.1 Alpha 5+"
+            echo "# Как подключить: импортируй этот .conf в клиент (файл или QR-код)"
+            echo "# Keenetic: только .keenetic.conf (CLI не генерится для 2.0, ranged H неудобны)"
             ;;
         wg)
-            echo "# WireGuard vanilla - совместим с любым WG клиентом"
+            echo "# WireGuard vanilla (без обфускации)"
+            echo "# Совместимость: любой WireGuard клиент, любая Keenetic NDMS с поддержкой WG"
+            echo "# Как подключить: импортируй этот .conf в клиент (файл или QR-код)"
             ;;
     esac
 }
@@ -326,6 +584,211 @@ _awg_show_qr() {
     echo ""
     qrencode -t ansiutf8 < "$conf_file"
     echo ""
+}
+
+# --> AWG: ЭКСПОРТ КОНФИГА ПОД KEENETIC <--
+# - для поддержки ASC нужен NDMS 5.1 Alpha 3+, для AWG 2.0 стабильно с 5.1 Alpha 5+ -
+# - .keenetic.conf: импорт через веб-морду (WireGuard, Импорт из файла) -
+# - .keenetic.cli: CLI-команды для терминала роутера, только для 1.0/1.5 (в 2.0 H как диапазоны) -
+# - аргументы: conf_file (путь к client.conf), AWG_VER и OBF_* должны быть выставлены -
+_awg_keenetic_header() {
+    local ver="$1"
+    echo "# ========================================================"
+    echo "# ПОРТИРОВАН ПОД KEENETIC / NDMS"
+    echo "# ========================================================"
+    case "$ver" in
+        1.0)
+            echo "# Версия AWG: 1.0"
+            echo "# Минимальная прошивка: NDMS 5.1 Alpha 3"
+            echo "# Поддержка ASC: да (Jc Jmin Jmax S1 S2 H1 H2 H3 H4)"
+            ;;
+        1.5)
+            echo "# Версия AWG: 1.5"
+            echo "# Минимальная прошивка: NDMS 5.1 Alpha 3"
+            echo "# Поддержка ASC: да (с I1 signature chain)"
+            ;;
+        2.0)
+            echo "# Версия AWG: 2.0"
+            echo "# Минимальная прошивка: NDMS 5.1 Alpha 3"
+            echo "# Рекомендовано: NDMS 5.1 Alpha 5+ (стабильный импорт ASC)"
+            echo "# Поддержка ASC: да (S3 S4 + ranged H1-H4 + I1-I5)"
+            echo "# CLI-вариант для 2.0 НЕ генерится: диапазоны H не ложатся на CLI-формат"
+            ;;
+        wg)
+            echo "# Версия AWG: WireGuard vanilla (без обфускации)"
+            echo "# Минимальная прошивка: любая с поддержкой WireGuard"
+            ;;
+    esac
+    echo "# ========================================================"
+    echo ""
+}
+
+# - .keenetic.conf: тот же клиентский конфиг, но с шапкой для Keenetic -
+# - аргументы: клиентский .conf источник, целевой .keenetic.conf -
+_awg_keenetic_conf() {
+    local src="$1" dst="$2" ver="$3"
+    {
+        _awg_keenetic_header "$ver"
+        echo "# Импорт: Веб-интерфейс → WireGuard → Добавить подключение → Импорт из файла"
+        echo "# После импорта: проверь в Системный монитор что интерфейс поднялся (RX/TX)"
+        echo ""
+        # - вырезаем только [Interface]/[Peer] и обфускацию, без нашего заголовка -
+        sed -n '/^\[Interface\]/,$ p' "$src"
+    } > "$dst"
+    chmod 600 "$dst"
+}
+
+# - .keenetic.cli: набор CLI-команд для терминала роутера -
+# - работает для AWG 1.0 и 1.5. Для 2.0 не вызывается. Для wg генерит базовый WG без ASC -
+# - аргументы: целевой .keenetic.cli, peer_ip, peer_priv, peer_allowed, srv_pub, srv_ip, srv_port, mtu -
+_awg_keenetic_cli() {
+    local dst="$1" peer_ip="$2" peer_priv="$3" peer_allowed="$4"
+    local srv_pub="$5" srv_ip="$6" srv_port="$7" mtu="$8"
+    local ver="$AWG_VER"
+    local iface_name="Wireguard0"
+
+    {
+        _awg_keenetic_header "$ver"
+        echo "# Интерфейс на роутере: ${iface_name} (большинство установок используют это имя)"
+        echo "# Если у тебя другой номер - замени ${iface_name} на свой (Wireguard1, Wireguard2...)"
+        echo "# Узнать: в веб-морде на странице WireGuard смотри имя существующего подключения"
+        echo "#"
+        echo "# Как применить: Веб-интерфейс → Меню → Командная строка (CLI)"
+        echo "# Скопируй и вставь команды блоком. Не забудь последнюю - сохранение конфига."
+        echo ""
+
+        # - базовая настройка интерфейса -
+        echo "interface ${iface_name} no shutdown"
+        echo "interface ${iface_name} ip address ${peer_ip}/32"
+        [[ -n "$mtu" && "$mtu" != "1320" ]] && echo "interface ${iface_name} ip mtu ${mtu}"
+        echo "interface ${iface_name} wireguard listen-port ${srv_port}"
+        echo "interface ${iface_name} wireguard private-key ${peer_priv}"
+        echo ""
+
+        # - ASC параметры для 1.0/1.5 -
+        if [[ "$ver" == "1.0" || "$ver" == "1.5" ]]; then
+            echo "# ASC параметры (обфускация AmneziaWG)"
+            if [[ "$ver" == "1.5" && -n "$OBF_I1" ]]; then
+                # - формат 1.5 с I1 (I2-I5 опционально) -
+                local asc_cmd="interface ${iface_name} wireguard asc ${OBF_JC} ${OBF_JMIN} ${OBF_JMAX} ${OBF_S1} ${OBF_S2} ${OBF_H1} ${OBF_H2} ${OBF_H3} ${OBF_H4}"
+                # - I-параметры в кавычках т.к. содержат угловые скобки -
+                asc_cmd+=" 0 0 \"${OBF_I1}\""
+                [[ -n "$OBF_I2" ]] && asc_cmd+=" \"${OBF_I2}\"" || asc_cmd+=" \"\""
+                [[ -n "$OBF_I3" ]] && asc_cmd+=" \"${OBF_I3}\"" || asc_cmd+=" \"\""
+                [[ -n "$OBF_I4" ]] && asc_cmd+=" \"${OBF_I4}\"" || asc_cmd+=" \"\""
+                [[ -n "$OBF_I5" ]] && asc_cmd+=" \"${OBF_I5}\"" || asc_cmd+=" \"\""
+                echo "$asc_cmd"
+                echo "# ВНИМАНИЕ: строки I1-I5 могут быть длинными. Если CLI отклонит команду -"
+                echo "# используй импорт .keenetic.conf через веб-интерфейс."
+            else
+                # - 1.0: только базовые 9 параметров без S3/S4/I -
+                echo "interface ${iface_name} wireguard asc ${OBF_JC} ${OBF_JMIN} ${OBF_JMAX} ${OBF_S1} ${OBF_S2} ${OBF_H1} ${OBF_H2} ${OBF_H3} ${OBF_H4}"
+            fi
+            echo ""
+        fi
+
+        # - peer -
+        echo "# Peer (сервер)"
+        echo "interface ${iface_name} wireguard peer ${srv_pub}"
+        echo "  endpoint ${srv_ip}:${srv_port}"
+        echo "  allow-ips ${peer_allowed}"
+        echo "  keepalive-interval 25"
+        echo "  exit"
+        echo ""
+        echo "# Сохранение конфигурации (обязательно!)"
+        echo "system configuration save"
+    } > "$dst"
+    chmod 600 "$dst"
+}
+
+# - координатор экспорта: для существующего клиента генерит .keenetic.conf и .keenetic.cli -
+# - env интерфейса должен быть загружен заранее, OBF_* выставлены -
+# - аргументы: iface, client_name -
+_awg_do_keenetic_export() {
+    local iface="$1" cname="$2"
+    local cdir
+    cdir="$(awg_iface_clients "$iface")/${cname}"
+    local src_conf="${cdir}/client.conf"
+    if [[ ! -f "$src_conf" ]]; then
+        print_err "Клиентский .conf не найден: ${src_conf}"
+        return 1
+    fi
+
+    local ver="${AWG_VER:-1.0}"
+    # - .keenetic.conf всегда -
+    local dst_conf="${cdir}/${cname}.keenetic.conf"
+    _awg_keenetic_conf "$src_conf" "$dst_conf" "$ver"
+    print_ok "Keenetic CONF: ${dst_conf}"
+
+    # - .keenetic.cli только для 1.0/1.5/wg -
+    if [[ "$ver" == "2.0" ]]; then
+        print_info "CLI-вариант для AWG 2.0 не генерится (ranged H неудобны в CLI)"
+        print_info "Используй .keenetic.conf через веб-интерфейс"
+    else
+        local dst_cli="${cdir}/${cname}.keenetic.cli"
+        local peer_ip peer_priv peer_allowed
+        peer_ip=$(grep -E "^Address" "$src_conf" | head -1 | awk -F'= *' '{print $2}' | cut -d'/' -f1)
+        peer_priv=$(cat "${cdir}/private.key")
+        peer_allowed=$(grep -E "^AllowedIPs" "$src_conf" | tail -1 | awk -F'= *' '{print $2}')
+        local mtu_val
+        mtu_val=$(grep -E "^MTU" "$src_conf" | head -1 | awk -F'= *' '{print $2}')
+        [[ -z "$mtu_val" ]] && mtu_val="${TUNNEL_MTU:-1320}"
+        _awg_keenetic_cli "$dst_cli" "$peer_ip" "$peer_priv" "$peer_allowed" \
+            "$(cat "$(awg_iface_keys "$iface")/server.pub")" \
+            "${SERVER_ENDPOINT_IP}" "${SERVER_PORT}" "$mtu_val"
+        print_ok "Keenetic CLI:  ${dst_cli}"
+    fi
+
+    echo ""
+    print_warn "Keenetic требует NDMS 5.1 Alpha 3+ для поддержки ASC (обфускация AWG)"
+    [[ "$ver" == "2.0" ]] && print_warn "Для AWG 2.0 рекомендуется NDMS 5.1 Alpha 5+ (стабильный импорт)"
+    return 0
+}
+
+# --> AWG: МЕНЮ - ЭКСПОРТ КЛИЕНТА ПОД KEENETIC <--
+# - отдельный пункт меню для уже существующих клиентов -
+awg_export_keenetic() {
+    print_section "Экспорт клиента под Keenetic"
+    awg_select_iface
+    [[ -z "$AWG_ACTIVE_IFACE" ]] && return 0
+    local iface="$AWG_ACTIVE_IFACE"
+    local env_file
+    env_file=$(awg_iface_env "$iface")
+    # shellcheck disable=SC1090
+    source "$env_file"
+    AWG_VER="${AWG_VERSION:-1.0}"
+    OBF_JC="$JC"; OBF_JMIN="$JMIN"; OBF_JMAX="$JMAX"
+    OBF_S1="$S1"; OBF_S2="$S2"; OBF_S3="${S3:-}"; OBF_S4="${S4:-}"
+    OBF_H1="$H1"; OBF_H2="$H2"; OBF_H3="$H3"; OBF_H4="$H4"
+    OBF_I1="${I1:-}"; OBF_I2="${I2:-}"; OBF_I3="${I3:-}"
+    OBF_I4="${I4:-}"; OBF_I5="${I5:-}"
+
+    local clients
+    clients=$(awg_get_client_list "$iface")
+    if [[ -z "$clients" ]]; then
+        print_warn "На ${iface} нет клиентов"
+        return 0
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Клиенты на ${iface}:${NC}"
+    local -a arr=()
+    local i=0 c
+    for c in $clients; do
+        i=$(( i + 1 ))
+        arr+=("$c")
+        printf "  ${GREEN}%2d)${NC} %s\n" "$i" "$c"
+    done
+    echo ""
+    local sel=""
+    while true; do
+        echo -ne "  ${BOLD}Номер клиента (1-${i})?${NC}: "; read -r sel
+        [[ "$sel" =~ ^[0-9]+$ ]] && [[ "$sel" -ge 1 && "$sel" -le "$i" ]] && break
+        print_warn "1-${i}"
+    done
+    local cname="${arr[$(( sel - 1 ))]}"
+    echo ""
+    _awg_do_keenetic_export "$iface" "$cname"
 }
 
 # --> AWG: ПУТИ ПО ИМЕНИ ИНТЕРФЕЙСА <--
@@ -723,9 +1186,9 @@ _awg_ensure_headers() {
 
 # --> AWG: ОПРЕДЕЛЕНИЕ UBUNTU CODENAME ДЛЯ PPA <--
 # - Amnezia PPA публикует под focal/jammy/noble, выбираем по Debian версии -
-# - Debian 11 → focal (glibc 2.31 совместимо) -
-# - Debian 12 → focal -
-# - Debian 13 → noble (для новых ядер 6.1+ и glibc 2.38+) -
+# - Debian 11 -> focal (glibc 2.31 совместимо) -
+# - Debian 12 -> focal -
+# - Debian 13 -> noble (для новых ядер 6.1+ и glibc 2.38+) -
 _awg_ppa_codename() {
     local deb_ver=""
     if [[ -f /etc/os-release ]]; then
@@ -874,6 +1337,24 @@ _awg_ensure_module() {
 # =============================================================================
 
 awg_install() {
+    # --> ПРОВЕРКА ПОВТОРНОЙ УСТАНОВКИ <--
+    # - блокируем если AWG уже установлен: флаг в book + файлы конфига или загруженный модуль -
+    local _already_flag _has_conf _has_mod
+    _already_flag=$(book_read ".awg.installed" 2>/dev/null)
+    _has_conf="no"
+    if [[ -d "$AWG_CONF_DIR" ]] && compgen -G "${AWG_CONF_DIR}/*.conf" > /dev/null; then
+        _has_conf="yes"
+    fi
+    _has_mod="no"
+    lsmod 2>/dev/null | grep -q "^amneziawg" && _has_mod="yes"
+    if [[ "$_already_flag" == "true" && ( "$_has_conf" == "yes" || "$_has_mod" == "yes" ) ]]; then
+        print_section "AmneziaWG уже установлен"
+        print_warn "Повторная установка затрёт существующие ключи и конфиги."
+        print_info "Для добавления нового интерфейса или клиента: меню 'Управление AmneziaWG'"
+        print_info "Для полного сноса: меню 'Управление' -> Удаление"
+        return 0
+    fi
+
     print_section "Анализ системы"
 
     # - проверка ОС -
@@ -1311,18 +1792,24 @@ LEGEOF
         echo ""
     fi
 
-    # - QR-коды клиентов -
+    # - QR-код и Keenetic per-client: отдельный вопрос для каждого клиента -
     local show_qr=""
     ask_yn "Показать QR-коды клиентов?" "y" show_qr
-    if [[ "$show_qr" == "yes" ]]; then
-        for cname in "${client_names[@]}"; do
-            local _qcf="${clients_dir}/${cname}/client.conf"
-            if [[ -f "$_qcf" ]]; then
-                echo -e "  ${BOLD}-- ${cname} --${NC}"
-                _awg_show_qr "$_qcf" || break
-            fi
-        done
-    fi
+    echo ""
+    for cname in "${client_names[@]}"; do
+        local _qcf="${clients_dir}/${cname}/client.conf"
+        [[ ! -f "$_qcf" ]] && continue
+        echo -e "  ${BOLD}-- ${cname} --${NC}"
+        if [[ "$show_qr" == "yes" ]]; then
+            _awg_show_qr "$_qcf" || true
+        fi
+        local do_keenetic=""
+        ask_yn "Сгенерировать конфиг под Keenetic для ${cname} (.keenetic.conf/.cli)?" "n" do_keenetic
+        if [[ "$do_keenetic" == "yes" ]]; then
+            _awg_do_keenetic_export "$iface" "$cname"
+        fi
+        echo ""
+    done
 
     return 0
 }
@@ -1889,6 +2376,14 @@ CLIEOF
     ask_yn "Показать QR-код?" "y" show_qr
     [[ "$show_qr" == "yes" ]] && _awg_show_qr "${cdir}/client.conf"
 
+    # - экспорт конфига под Keenetic (опционально, по запросу) -
+    echo ""
+    local do_keenetic=""
+    ask_yn "Сгенерировать конфиг под Keenetic (.keenetic.conf/.cli)?" "n" do_keenetic
+    if [[ "$do_keenetic" == "yes" ]]; then
+        _awg_do_keenetic_export "$iface" "$name"
+    fi
+
     echo ""
     local do_restart=""
     ask_yn "Перезапустить ${iface}?" "y" do_restart
@@ -1967,5 +2462,343 @@ awg_delete_client() {
     local do_restart=""
     ask_yn "Перезапустить ${iface}?" "y" do_restart
     [[ "$do_restart" == "yes" ]] && awg_reload_iface "$iface"
+    return 0
+}
+
+# --> AWG: ТЕСТ ОБФУСКАЦИИ <--
+# - снимает tcpdump, анализирует handshake пакеты, определяет применились ли -
+# - S1/S2 padding, Jc junk, H1-H4 mangle, I1 signature chain. Pcap удаляется -
+awg_test_obf() {
+    print_section "Тест обфускации AmneziaWG"
+    awg_select_iface
+    [[ -z "$AWG_ACTIVE_IFACE" ]] && return 0
+    local iface="$AWG_ACTIVE_IFACE"
+
+    # --> ЗАГРУЗКА ПАРАМЕТРОВ ИЗ ENV <--
+    local env_file
+    env_file=$(awg_iface_env "$iface")
+    [[ ! -f "$env_file" ]] && { print_err "env не найден: ${env_file}"; return 1; }
+    # shellcheck disable=SC1090
+    source "$env_file"
+
+    local srv_port="${SERVER_PORT:-}"
+    local awg_ver="${AWG_VERSION:-1.0}"
+    [[ -z "$srv_port" ]] && { print_err "SERVER_PORT не задан в ${env_file}"; return 1; }
+
+    # --> ПРОВЕРКА TCPDUMP <--
+    if ! command -v tcpdump &>/dev/null; then
+        print_warn "tcpdump не установлен"
+        local do_inst=""
+        ask_yn "Установить tcpdump?" "y" do_inst
+        [[ "$do_inst" != "yes" ]] && { print_info "Отмена"; return 0; }
+        apt-get install -y -qq tcpdump 2>/dev/null || { print_err "Не удалось установить tcpdump"; return 1; }
+    fi
+
+    # --> ВНЕШНИЙ ИНТЕРФЕЙС <--
+    local ext_iface
+    ext_iface=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
+    [[ -z "$ext_iface" ]] && ext_iface="any"
+
+    # --> ОЖИДАЕМЫЕ РАЗМЕРЫ <--
+    # - стандартный WG: init=148, resp=92 (UDP payload) -
+    # - AWG: +S1 к init, +S2 к resp -
+    local exp_init=148 exp_resp=92
+    local s1_val="${S1:-0}" s2_val="${S2:-0}"
+    local exp_init_pad=$(( exp_init + s1_val ))
+    local exp_resp_pad=$(( exp_resp + s2_val ))
+
+    # --> ВЫВОД КОНФИГА <--
+    echo ""
+    echo -e "  ${BOLD}Интерфейс:${NC}      ${CYAN}${iface}${NC}"
+    echo -e "  ${BOLD}Порт:${NC}           ${CYAN}${srv_port}/udp${NC}"
+    echo -e "  ${BOLD}Версия AWG:${NC}     ${CYAN}${awg_ver}${NC}"
+    echo -e "  ${BOLD}Внешний iface:${NC}  ${CYAN}${ext_iface}${NC}"
+    echo ""
+    echo -e "  ${BOLD}Ожидаемые параметры обфускации:${NC}"
+    echo -e "    Jc=${JC:-?}  Jmin=${JMIN:-?}  Jmax=${JMAX:-?}"
+    echo -e "    S1=${S1:-?}  S2=${S2:-?}"
+    [[ -n "${S3:-}" ]] && echo -e "    S3=${S3}  S4=${S4:-?}"
+    echo -e "    H1=${H1:-?}  H2=${H2:-?}  H3=${H3:-?}  H4=${H4:-?}"
+    [[ -n "${I1:-}" ]] && echo -e "    I1=${I1:0:60}..."
+    echo ""
+    echo -e "  ${BOLD}Ожидаемые размеры пакетов (UDP payload):${NC}"
+    echo -e "    Vanilla WG:          init=${exp_init}, resp=${exp_resp}"
+    echo -e "    AWG S1/S2 padding:   init=${exp_init_pad}, resp=${exp_resp_pad}"
+    [[ "${JC:-0}" != "0" ]] && echo -e "    Junk (Jc=${JC}):     ${JMIN:-?}..${JMAX:-?} байт ДО handshake"
+    echo ""
+
+    # --> ВЫБОР ДЛИТЕЛЬНОСТИ <--
+    local duration=60
+    echo -e "  ${BOLD}Длительность захвата:${NC}"
+    echo -e "    ${GREEN}1)${NC} 30 секунд"
+    echo -e "    ${GREEN}2)${NC} 60 секунд (по умолчанию)"
+    echo -e "    ${GREEN}3)${NC} 120 секунд"
+    echo ""
+    local dsel=""
+    ask "Выбор [1/2/3]" "2" dsel
+    case "$dsel" in
+        1) duration=30 ;;
+        3) duration=120 ;;
+        *) duration=60 ;;
+    esac
+
+    # --> ИНСТРУКЦИЯ ПОЛЬЗОВАТЕЛЮ <--
+    echo ""
+    print_info "Инструкция:"
+    echo -e "    1) На клиенте (Keenetic/Amnezia/etc) ${BOLD}ОТКЛЮЧИ${NC} VPN"
+    echo -e "    2) Подожди 3-5 секунд"
+    echo -e "    3) ${BOLD}ВКЛЮЧИ${NC} VPN обратно -> клиент пошлёт handshake"
+    echo -e "    4) Жди пока tcpdump завершится (${duration} сек)"
+    echo ""
+    local go=""
+    ask_yn "Начать захват?" "y" go
+    [[ "$go" != "yes" ]] && { print_info "Отмена"; return 0; }
+
+    # --> КАПТУРА <--
+    local pcap
+    pcap=$(mktemp -t "awg_test_${iface}.XXXXXX.pcap")
+    # - гарантированное удаление дампа на выходе из функции -
+    # shellcheck disable=SC2064
+    trap "rm -f '${pcap}'" RETURN
+
+    echo ""
+    print_info "Путь дампа: ${pcap}"
+    print_info "(удаляется автоматически после анализа)"
+    print_info "Захват ${duration} сек на ${ext_iface}:${srv_port}/udp..."
+    timeout "$duration" tcpdump -i "$ext_iface" -nn -U -s 0 \
+        "udp port ${srv_port}" -w "$pcap" >/dev/null 2>&1 &
+    local tpid=$!
+
+    # - прогресс -
+    local i
+    for (( i=1; i<=duration; i++ )); do
+        printf "\r  Прошло: %ds / %ds" "$i" "$duration"
+        sleep 1
+    done
+    echo ""
+    wait "$tpid" 2>/dev/null || true
+
+    # --> АНАЛИЗ <--
+    echo ""
+    print_section "Анализ дампа"
+
+    if [[ ! -s "$pcap" ]]; then
+        print_err "Дамп пустой. Возможные причины:"
+        echo -e "    - клиент не пытался подключиться"
+        echo -e "    - UFW блокирует ${srv_port}/udp"
+        echo -e "    - пакеты идут через другой интерфейс (не ${ext_iface})"
+        return 1
+    fi
+
+    local pkt_count
+    pkt_count=$(tcpdump -nn -r "$pcap" 2>/dev/null | wc -l)
+    print_ok "Захвачено пакетов всего: ${pkt_count}"
+    [[ "$pkt_count" -eq 0 ]] && { print_err "Пакетов нет, клиент не подключался"; return 1; }
+
+    # - лимит для анализа: handshake + Jc junk + несколько data пакетов -
+    # - всё что дальше - это уже трафик пользователя, не влияет на диагностику обфускации -
+    local analyze_limit=100
+    if [[ "$pkt_count" -gt "$analyze_limit" ]]; then
+        print_info "Анализируем первые ${analyze_limit} пакетов (handshake и начало трафика)"
+    fi
+
+    # --> РАЗБОР РАЗМЕРОВ <--
+    # - собираем длины UDP payload первых N пакетов -
+    local -a sizes=()
+    mapfile -t sizes < <(tcpdump -nn -r "$pcap" -c "$analyze_limit" 2>/dev/null | grep -oP 'length \K[0-9]+')
+
+    # - раздельная статистика: все размеры + подсчёт -
+    declare -A size_count=()
+    local sz
+    for sz in "${sizes[@]}"; do
+        size_count[$sz]=$(( ${size_count[$sz]:-0} + 1 ))
+    done
+
+    echo ""
+    echo -e "  ${BOLD}Распределение размеров пакетов:${NC}"
+    # - сортировка по размеру для читаемости -
+    local -a sorted_sizes=()
+    mapfile -t sorted_sizes < <(printf '%s\n' "${!size_count[@]}" | sort -n)
+
+    local init_found=0 init_padded=0 resp_found=0 resp_padded=0 junk_found=0
+    local jmin_v="${JMIN:-0}" jmax_v="${JMAX:-0}" jc_v="${JC:-0}"
+    for sz in "${sorted_sizes[@]}"; do
+        local cnt="${size_count[$sz]}"
+        local marker=""
+        if [[ "$sz" == "$exp_init" ]]; then
+            marker="  ${YELLOW}<- vanilla WG init (S1 НЕ применилось)${NC}"
+            init_found=1
+        elif [[ "$sz" == "$exp_resp" ]]; then
+            marker="  ${YELLOW}<- vanilla WG response (S2 НЕ применилось)${NC}"
+            resp_found=1
+        elif [[ "$sz" == "$exp_init_pad" && "$s1_val" -gt 0 ]]; then
+            marker="  ${GREEN}<- AWG init с S1=${s1_val} padding (S1 работает)${NC}"
+            init_padded=1
+        elif [[ "$sz" == "$exp_resp_pad" && "$s2_val" -gt 0 ]]; then
+            marker="  ${GREEN}<- AWG response с S2=${s2_val} padding (S2 работает)${NC}"
+            resp_padded=1
+        elif [[ "$jc_v" != "0" && "$sz" -ge "$jmin_v" && "$sz" -le "$jmax_v" \
+             && "$sz" != "$exp_init" && "$sz" != "$exp_resp" \
+             && "$sz" != "$exp_init_pad" && "$sz" != "$exp_resp_pad" ]]; then
+            marker="  ${CYAN}<- вероятно junk (Jc в диапазоне ${jmin_v}..${jmax_v})${NC}"
+            junk_found=1
+        elif [[ "$sz" -gt "$jmax_v" ]]; then
+            marker="  ${NC}<- data-трафик (после handshake)${NC}"
+        fi
+        printf "    %5d байт  x%-3d%b\n" "$sz" "$cnt" "$marker"
+    done
+
+    # --> ПЕРВЫЙ БАЙТ PAYLOAD (H-MANGLE) <--
+    # - tcpdump -x выводит hex начиная с IP хедера -
+    # - IP хедер 20 байт + UDP хедер 8 байт = 28 байт = offset 0x001c -
+    # - в выводе каждая строка: "\t0x0000:  4500 0098 ..." по 16 байт -
+    # - offset 28 байт -> во второй строке (0x0010) позиция +12 от начала -
+    # - берём payload-hex первых 5 пакетов и смотрим первый байт -
+    echo ""
+    echo -e "  ${BOLD}Первый байт UDP payload (WG type field):${NC}"
+
+    # - dump в виде "packet #N: <все hex без пробелов>" -
+    # - ограничиваем 10 пакетами на уровне tcpdump - иначе awk молотит весь pcap -
+    local -a pkt_hex=()
+    mapfile -t pkt_hex < <(
+        tcpdump -nn -r "$pcap" -c 10 -x 2>/dev/null | awk '
+            /^[0-9]{2}:[0-9]{2}:[0-9]{2}/ {
+                if (buf != "") print buf
+                buf = ""
+                next
+            }
+            /^[[:space:]]*0x/ {
+                gsub(/^[[:space:]]*0x[0-9a-f]+:[[:space:]]*/, "")
+                gsub(/[[:space:]]+/, "")
+                buf = buf $0
+            }
+            END { if (buf != "") print buf }
+        '
+    )
+
+    local h_mangled=0 h_vanilla=0
+    local p idx=0
+    for p in "${pkt_hex[@]}"; do
+        idx=$(( idx + 1 ))
+        [[ $idx -gt 5 ]] && break
+        # - payload начинается с offset 56 (28 байт × 2 hex символа) -
+        # - первый байт payload = символы 56-57 -
+        local fb="${p:56:2}"
+        [[ -z "$fb" ]] && continue
+        local fb_dec=$(( 16#${fb} ))
+        local desc=""
+        case "$fb_dec" in
+            1) desc="0x01 -> vanilla WG init (H1 mangle НЕ применилось)"; h_vanilla=1 ;;
+            2) desc="0x02 -> vanilla WG response (H2 mangle НЕ применилось)"; h_vanilla=1 ;;
+            3) desc="0x03 -> vanilla WG cookie (H3 mangle НЕ применилось)"; h_vanilla=1 ;;
+            4) desc="0x04 -> vanilla WG data (H4 mangle НЕ применилось)"; h_vanilla=1 ;;
+            *) desc="0x${fb} (${fb_dec}) -> обфусцирован (не равен 1-4)"; h_mangled=1 ;;
+        esac
+        printf "    пакет #%d: %s\n" "$idx" "$desc"
+    done
+
+    # --> ПРОВЕРКА I1 СИГНАТУРЫ <--
+    local i1_status="none"
+    if [[ -n "${I1:-}" ]]; then
+        echo ""
+        echo -e "  ${BOLD}Проверка I1 signature chain:${NC}"
+        # - ищем статичные hex-блоки в I1: "<b 0xDEADBEEF>" -
+        local -a i1_static=()
+        mapfile -t i1_static < <(grep -oP '<b 0x\K[0-9a-fA-F]+' <<< "$I1" 2>/dev/null)
+
+        if [[ ${#i1_static[@]} -eq 0 ]]; then
+            echo -e "    ${YELLOW}I1 без статичных байт (<b 0x...>), только random/timestamp${NC}"
+            echo -e "    Визуально проверить невозможно. Если handshake прошёл - I1 скорее всего применяется."
+            i1_status="dynamic"
+        else
+            local target="${i1_static[0],,}"
+            local probe="${target:0:16}"
+            # - поиск probe в первых 5 пакетах через grep (быстрее bash substring на длинных hex) -
+            local found=0 pnum=0 p payload_hex
+            for p in "${pkt_hex[@]}"; do
+                pnum=$(( pnum + 1 ))
+                [[ $pnum -gt 5 ]] && break
+                payload_hex="${p:56}"
+                [[ -z "$payload_hex" ]] && continue
+                if grep -qi "$probe" <<< "$payload_hex"; then
+                    # - вычисляем offset через awk (без растягивания переменной) -
+                    local pos_bytes
+                    pos_bytes=$(awk -v h="${payload_hex,,}" -v n="$probe" \
+                        'BEGIN { i = index(h, n); if (i > 0) print int((i-1)/2); else print -1 }')
+                    print_ok "    I1 найден в пакете #${pnum} на offset ${pos_bytes} байт"
+                    echo -e "    Искомый фрагмент: ${target:0:32}..."
+                    found=1
+                    i1_status="applied"
+                    break
+                fi
+            done
+            if [[ $found -eq 0 ]]; then
+                print_warn "    I1 статичный фрагмент НЕ найден в первых 5 пакетах"
+                echo -e "    Искомый фрагмент: ${target:0:32}..."
+                echo -e "    Возможные причины: клиент не поддерживает I1-I5 или применил их иначе"
+                i1_status="missing"
+            fi
+        fi
+    fi
+
+    # --> ИТОГОВЫЙ ВЕРДИКТ <--
+    echo ""
+    echo -e "  ${BOLD}Итог:${NC}"
+    # - S1 -
+    if [[ "$s1_val" -gt 0 ]]; then
+        if [[ $init_padded -eq 1 ]]; then
+            print_ok "S1 padding работает (пакет ${exp_init_pad} байт)"
+        elif [[ $init_found -eq 1 ]]; then
+            print_err "S1 padding НЕ применяется (пакет ${exp_init} байт - vanilla)"
+        else
+            print_warn "S1: init пакет не видно (клиент не подключился?)"
+        fi
+    else
+        print_info "S1=0 (padding отключён)"
+    fi
+    # - S2 -
+    if [[ "$s2_val" -gt 0 ]]; then
+        if [[ $resp_padded -eq 1 ]]; then
+            print_ok "S2 padding работает (пакет ${exp_resp_pad} байт)"
+        elif [[ $resp_found -eq 1 ]]; then
+            print_err "S2 padding НЕ применяется (пакет ${exp_resp} байт - vanilla)"
+        else
+            print_warn "S2: response пакет не видно"
+        fi
+    else
+        print_info "S2=0 (padding отключён)"
+    fi
+    # - Jc -
+    if [[ "$jc_v" != "0" ]]; then
+        if [[ $junk_found -eq 1 ]]; then
+            print_ok "Jc junk пакеты присутствуют"
+        else
+            print_warn "Jc junk пакеты не обнаружены (ожидалось ${jc_v} в диапазоне ${jmin_v}..${jmax_v})"
+        fi
+    else
+        print_info "Jc=0 (junk отключён)"
+    fi
+    # - H -
+    if [[ "$awg_ver" == "wg" ]]; then
+        print_info "H: vanilla WG, mangle не применяется по определению"
+    elif [[ $h_mangled -eq 1 && $h_vanilla -eq 0 ]]; then
+        print_ok "H1-H4 mangle работает (первые байты не равны 1-4)"
+    elif [[ $h_vanilla -eq 1 && $h_mangled -eq 0 ]]; then
+        print_err "H1-H4 mangle НЕ применяется (видны vanilla type байты 1-4)"
+    elif [[ $h_mangled -eq 1 && $h_vanilla -eq 1 ]]; then
+        print_warn "H: смешанная картина (часть пакетов обфусцирована, часть нет)"
+    else
+        print_warn "H: недостаточно пакетов для анализа"
+    fi
+    # - I1 -
+    case "$i1_status" in
+        applied) print_ok "I1 signature chain применён (найден статичный фрагмент)" ;;
+        missing) print_err "I1 signature chain НЕ применён" ;;
+        dynamic) print_info "I1: только динамические теги, визуальная проверка невозможна" ;;
+        none)    [[ "$awg_ver" != "wg" && "$awg_ver" != "1.0" ]] && print_warn "I1 не задан, хотя версия ${awg_ver}" ;;
+    esac
+
+    echo ""
+    print_info "Дамп был сохранён как ${pcap} и сейчас удаляется"
     return 0
 }
