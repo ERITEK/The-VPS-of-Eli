@@ -14,11 +14,17 @@ TS_DB="${TS_DIR}/tsserver.sqlitedb"
 TS_GITHUB_API="https://api.github.com/repos/teamspeak/teamspeak6-server/releases/latest"
 
 ts_installed() {
-    [[ -f "$TS_BIN" ]] && systemctl is-active --quiet teamspeak 2>/dev/null
+    # - проверяем только наличие бинарника, не is-active -
+    # - иначЕ = сервис упал -> ts_installed=false -> ts_install перезапишет рабочую дирку -
+    [[ -f "$TS_BIN" ]]
+}
+
+ts_running() {
+    systemctl is-active --quiet teamspeak 2>/dev/null
 }
 
 ts_find_db() {
-    # Ищет *.sqlitedb в директории установки, обновляет переменную и env
+    # - Ищет *.sqlitedb в директории установки, обновляет переменную и env -
     local found
     found=$(find "$TS_DIR" "$TS_DATA_DIR" -name "*.sqlitedb" -type f 2>/dev/null | head -1)
     if [[ -n "$found" ]]; then
@@ -38,14 +44,32 @@ ts_get_version() {
     [[ -f "$TS_ENV" ]] && grep -oP '^TS_VERSION="\K[^"]+' "$TS_ENV" | head -1 || true
 }
 
+# - возвращает URL на архив с линуксовой сборкой -
+# - сначала ищем .tar.bz2 (текущий формат), fallback на .tar.gz (на случай смены) -
+# - возвращает формат через глобальный TS_ARCHIVE_FMT (bz2|gz) для выбора флага tar -
 ts_get_latest_url() {
-    # - парсим assets через jq: ищем linux_amd64 + .tar.bz2 -
-    local json
+    local json url
     json=$(curl -fsSL --connect-timeout 10 "$TS_GITHUB_API" 2>/dev/null || true)
-    [[ -z "$json" ]] && return
-    echo "$json" | jq -r \
-        '.assets | map(select((.name | contains("linux_amd64")) and (.name | endswith(".tar.bz2"))))[0].browser_download_url' \
-        2>/dev/null || true
+    [[ -z "$json" ]] && return 1
+    # - .tar.bz2 -
+    url=$(echo "$json" | jq -r \
+        '.assets | map(select((.name | contains("linux_amd64")) and (.name | endswith(".tar.bz2"))))[0].browser_download_url // empty' \
+        2>/dev/null)
+    if [[ -n "$url" && "$url" != "null" ]]; then
+        TS_ARCHIVE_FMT="bz2"
+        echo "$url"
+        return 0
+    fi
+    # - fallback .tar.gz -
+    url=$(echo "$json" | jq -r \
+        '.assets | map(select((.name | contains("linux_amd64")) and (.name | endswith(".tar.gz"))))[0].browser_download_url // empty' \
+        2>/dev/null)
+    if [[ -n "$url" && "$url" != "null" ]]; then
+        TS_ARCHIVE_FMT="gz"
+        echo "$url"
+        return 0
+    fi
+    return 1
 }
 
 ts_get_latest_version() {
@@ -101,8 +125,18 @@ ts_install() {
     mkdir -p "$TS_DIR" "$TS_DATA_DIR" "$TS_LOG_DIR" "$TS_ENV_DIR" "$TS_BACKUP_DIR"
 
     local tmpdir; tmpdir=$(mktemp -d)
-    curl -fsSL --connect-timeout 30 --max-time 120 "$download_url" -o "${tmpdir}/ts6.tar.bz2"
-    tar -xjf "${tmpdir}/ts6.tar.bz2" -C "$TS_DIR" --strip-components=1
+    # - выбор флага tar по формату (bz2|gz) - чтобы переживать будущие смены формата -
+    local tar_flag="j" archive_ext="tar.bz2"
+    if [[ "${TS_ARCHIVE_FMT:-bz2}" == "gz" ]]; then
+        tar_flag="z"
+        archive_ext="tar.gz"
+    fi
+    curl -fsSL --connect-timeout 30 --max-time 120 "$download_url" -o "${tmpdir}/ts6.${archive_ext}"
+    if ! tar -x${tar_flag}f "${tmpdir}/ts6.${archive_ext}" -C "$TS_DIR" --strip-components=1; then
+        print_err "Не удалось распаковать архив"
+        rm -rf "$tmpdir"
+        return 1
+    fi
     rm -rf "$tmpdir"
     chmod +x "$TS_BIN"
     chown -R "${TS_USER}:${TS_USER}" "$TS_DIR" "$TS_DATA_DIR" "$TS_LOG_DIR"
@@ -237,8 +271,14 @@ ts_update() {
     ts_backup_db || true
     systemctl stop teamspeak 2>/dev/null || true
     local tmpdir; tmpdir=$(mktemp -d)
-    curl -fsSL --connect-timeout 30 --max-time 120 "$url" -o "${tmpdir}/ts6.tar.bz2"
-    tar -xjf "${tmpdir}/ts6.tar.bz2" -C "$TS_DIR" --strip-components=1; rm -rf "$tmpdir"
+    # - выбор флага tar по формату -
+    local tar_flag="j" archive_ext="tar.bz2"
+    if [[ "${TS_ARCHIVE_FMT:-bz2}" == "gz" ]]; then
+        tar_flag="z"
+        archive_ext="tar.gz"
+    fi
+    curl -fsSL --connect-timeout 30 --max-time 120 "$url" -o "${tmpdir}/ts6.${archive_ext}"
+    tar -x${tar_flag}f "${tmpdir}/ts6.${archive_ext}" -C "$TS_DIR" --strip-components=1; rm -rf "$tmpdir"
     chmod +x "$TS_BIN"; chown -R "${TS_USER}:${TS_USER}" "$TS_DIR"
     systemctl start teamspeak; sleep 3
     systemctl is-active --quiet teamspeak && print_ok "Обновлён до ${lat}" || print_err "Не запустился"
