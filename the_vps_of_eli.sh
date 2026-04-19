@@ -3,7 +3,7 @@
 # The VPS of Eli v3.236
 # Мега-менеджер VPS стека: VPN, связь, обслуживание
 # scrp by ERITEK & Loo1, Claude (Anthropic)
-# Собран: 2026-04-18 dev
+# Собран: 2026-04-19 rls
 # =============================================================================
 
 
@@ -131,7 +131,12 @@ validate_port() {
 }
 
 validate_cidr() {
-    [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]
+    local c="$1"
+    [[ "$c" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})/([0-9]{1,2})$ ]] || return 1
+    local o1="${BASH_REMATCH[1]}" o2="${BASH_REMATCH[2]}" o3="${BASH_REMATCH[3]}" o4="${BASH_REMATCH[4]}" m="${BASH_REMATCH[5]}"
+    (( o1 <= 255 && o2 <= 255 && o3 <= 255 && o4 <= 255 )) || return 1
+    (( m >= 0 && m <= 32 )) || return 1
+    return 0
 }
 
 validate_name() {
@@ -156,7 +161,8 @@ _rand_bits30() {
     [[ -z "$span" || "$span" -le 0 ]] && { echo 0; return; }
     local r
     r=$(od -An -N4 -tu4 < /dev/urandom 2>/dev/null | tr -d ' ')
-    [[ -z "$r" ]] && r=$(( (RANDOM << 15) | RANDOM ))
+    # - od может вернуть не-число при странном окружении, guard на арифметику -
+    [[ -z "$r" || ! "$r" =~ ^[0-9]+$ ]] && r=$(( (RANDOM << 15) | RANDOM ))
     echo $(( r % span ))
 }
 
@@ -179,28 +185,31 @@ rand_h_range() {
 }
 
 # - guard на $1 > $2, иначе RANDOM % 0 -> shell падает -
+# - RANDOM в bash даёт только 0..32767, для диапазонов шире используем _rand_bits30 -
 rand_range() {
     local lo="$1" hi="$2"
     if [[ -z "$lo" || -z "$hi" ]]; then echo 0; return 1; fi
     if [[ "$lo" -gt "$hi" ]]; then local t="$lo"; lo="$hi"; hi="$t"; fi
     [[ "$lo" -eq "$hi" ]] && { echo "$lo"; return 0; }
-    echo $(( RANDOM % (hi - lo + 1) + lo ))
+    local span=$(( hi - lo + 1 ))
+    echo $(( lo + $(_rand_bits30 "$span") ))
 }
 
-# - таймаут 100 попыток -
+# - таймаут 100 попыток, при провале возвращает пусто + код 1 -
+# - диапазон может превышать 32767, используем /dev/urandom через _rand_bits30 -
 rand_port() {
     local low="${1:-10000}" high="${2:-60000}" port
     local attempts=0 max_attempts=100
+    local span=$(( high - low + 1 ))
     while (( attempts < max_attempts )); do
-        port=$(( RANDOM % (high - low + 1) + low ))
+        port=$(( low + $(_rand_bits30 "$span") ))
         if ! ss -ulnp 2>/dev/null | grep -q ":${port} " && \
            ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
             echo "$port"; return 0
         fi
         (( attempts++ ))
     done
-    # - исчерпали попытки, возвращаем последний сгенерированный -
-    echo "$port"
+    # - исчерпали попытки, пусто + код 1 чтобы вызывающий не получил занятый порт -
     return 1
 }
 
@@ -319,6 +328,22 @@ book_init() {
     return 0
 }
 
+# --> SSH: БАЗОВЫЕ ХЕЛПЕРЫ <--
+# - нужны ещё на этапе boot, до загрузки 04d_ssh.sh -
+# - читаем порт через sshd -T (учитывает Include drop-in), fallback на sshd_config -
+ssh_get_port() {
+    local port
+    port=$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')
+    if [[ -z "$port" ]]; then
+        port=$(grep -oP '^\s*Port\s+\K[0-9]+' /etc/ssh/sshd_config 2>/dev/null | head -1)
+    fi
+    echo "${port:-22}"
+}
+
+ssh_restart() {
+    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+}
+
 # --> ПРОВЕРКА ROOT <--
 # - все операции требуют root -
 if [[ "$EUID" -ne 0 ]]; then
@@ -372,16 +397,18 @@ boot_install_packages() {
     # --> BOOT: KERNEL HEADERS <--
     # - нужны для DKMS (AmneziaWG). Ставим заранее, до установки AWG -
     # - без headers DKMS не соберёт модуль ядра и AWG не заработает -
-    local kver
+    local kver arch
     kver=$(uname -r)
+    # - arch для метапакета, без этого на ARM VPS ставится amd64 -> apt error -
+    arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
     if [[ -d "/lib/modules/${kver}/build" ]]; then
         print_ok "Kernel headers уже установлены (${kver})"
     else
         print_info "Устанавливаю kernel headers для ${kver}..."
         if apt-get -y install -qq "linux-headers-${kver}" 2>/dev/null; then
             print_ok "linux-headers-${kver} установлен"
-        elif apt-get -y install -qq linux-headers-amd64 2>/dev/null; then
-            print_ok "linux-headers-amd64 установлен (метапакет)"
+        elif apt-get -y install -qq "linux-headers-${arch}" 2>/dev/null; then
+            print_ok "linux-headers-${arch} установлен (метапакет)"
         else
             print_warn "Kernel headers не удалось установить"
             print_warn "AWG может потребовать ручную установку headers или стандартное ядро"
@@ -428,9 +455,16 @@ boot_install_docker() {
         else
             local tmp
             tmp=$(mktemp)
-            jq '. + {"default-ulimits": {"nofile": {"Name": "nofile", "Hard": 65536, "Soft": 65536}}}' \
-                "$daemon_json" > "$tmp" && mv "$tmp" "$daemon_json"
-            print_ok "Docker daemon.json: ulimit nofile=65536 добавлен"
+            # - проверяем код возврата jq, иначе при битом json молча оставим мусор -
+            if jq '. + {"default-ulimits": {"nofile": {"Name": "nofile", "Hard": 65536, "Soft": 65536}}}' \
+                "$daemon_json" > "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+                mv "$tmp" "$daemon_json"
+                print_ok "Docker daemon.json: ulimit nofile=65536 добавлен"
+            else
+                rm -f "$tmp"
+                print_err "Не удалось обновить ${daemon_json} (jq ошибка или битый JSON)"
+                return 1
+            fi
         fi
     else
         cat > "$daemon_json" << 'EODAEMON'
@@ -447,7 +481,17 @@ EODAEMON
         print_ok "Docker daemon.json: создан с ulimit nofile=65536"
     fi
 
-    systemctl restart docker 2>/dev/null || true
+    # - restart с проверкой, иначе битый daemon.json оставит Docker лежать -
+    if ! systemctl restart docker 2>/dev/null; then
+        print_err "systemctl restart docker не удался"
+        return 1
+    fi
+    sleep 2
+    if ! systemctl is-active --quiet docker 2>/dev/null; then
+        print_err "Docker не запустился после рестарта (проверь ${daemon_json})"
+        return 1
+    fi
+    print_ok "Docker запущен"
     return 0
 }
 
@@ -459,6 +503,7 @@ boot_setup_swap() {
     local swap_min_mb=448
 
     # - создать и активировать /swapfile заданного размера -
+    # - fallocate работает не везде (ZFS/BTRFS/LXC), fallback на dd -
     _boot_create_swapfile() {
         local size_mb="$1"
         if [[ -f /swapfile ]]; then
@@ -479,14 +524,38 @@ boot_setup_swap() {
             rm -f /swapfile
         fi
         print_info "Создаём /swapfile ${size_mb} MB"
-        fallocate -l "${size_mb}M" /swapfile
-        chmod 600 /swapfile
-        mkswap /swapfile
-        swapon /swapfile
+        # - шаг 1: fallocate, если не сработал - fallback на dd -
+        if ! fallocate -l "${size_mb}M" /swapfile 2>/dev/null; then
+            print_info "fallocate не поддерживается на этой FS, fallback на dd"
+            if ! dd if=/dev/zero of=/swapfile bs=1M count="$size_mb" status=none 2>/dev/null; then
+                print_err "dd не смог создать /swapfile"
+                rm -f /swapfile
+                return 1
+            fi
+        fi
+        # - шаг 2: права строго 600, иначе mkswap даст warning и swapon может отказаться -
+        if ! chmod 600 /swapfile; then
+            print_err "chmod 600 /swapfile не удался"
+            rm -f /swapfile
+            return 1
+        fi
+        # - шаг 3: mkswap -
+        if ! mkswap /swapfile >/dev/null 2>&1; then
+            print_err "mkswap /swapfile не удался"
+            rm -f /swapfile
+            return 1
+        fi
+        # - шаг 4: swapon -
+        if ! swapon /swapfile 2>/dev/null; then
+            print_err "swapon /swapfile не удался"
+            rm -f /swapfile
+            return 1
+        fi
         if ! grep -q "/swapfile" /etc/fstab; then
             echo '/swapfile none swap sw 0 0' >> /etc/fstab
         fi
         print_ok "Swapfile ${size_mb} MB создан и активирован"
+        return 0
     }
 
     local active_swap_mb
@@ -952,21 +1021,40 @@ _awg_gen_obf_common() {
     if [[ "$auto" == "yes" ]]; then
         OBF_JC=$(rand_range 3 10)
         OBF_S1=$(rand_range 15 40)
+        # - S1 и S2 в диапазоне 15..40, S1+56 = 71..96 - пересечения никогда нет -
+        # - реально полезная проверка: S1 != S2 (одинаковые = хуже маскировка) -
         local _att=0
         while true; do
             OBF_S2=$(rand_range 15 40)
-            [[ $OBF_S2 -ne $(( OBF_S1 + 56 )) ]] && break
+            [[ "$OBF_S2" -ne "$OBF_S1" ]] && break
             (( _att++ )); [[ $_att -gt 10 ]] && break
         done
         OBF_JMIN=$(rand_range 50 150)
         OBF_JMAX=$(rand_range 500 1000)
     else
-        print_info "Правила: Jmin < Jmax, S1+56 != S2, H1-H4 разные"
+        print_info "Правила: Jmin < Jmax, S1 != S2, H1-H4 разные"
         echo -e "  ${CYAN}Jc - кол-во мусорных пакетов (больше = сложнее распознать VPN, но чуть больше трафика).${NC}"
         echo -e "  ${CYAN}Jmin/Jmax - диапазон размера мусорных пакетов в байтах.${NC}"
-        echo -e "  ${CYAN}S1/S2 - сдвиг заголовков пакетов (влияет на маскировку, S1+56 не равно S2).${NC}"
-        ask "Jc (3-10)" "5" OBF_JC; ask "Jmin (50-150)" "64" OBF_JMIN; ask "Jmax (500-1000)" "1000" OBF_JMAX
-        ask "S1 (15-40)" "20" OBF_S1; ask "S2 (15-40, != S1+56)" "20" OBF_S2
+        echo -e "  ${CYAN}S1/S2 - сдвиг заголовков пакетов (диапазон 15-40, разные значения).${NC}"
+        ask "Jc (3-10)" "5" OBF_JC
+        # - Jmin < Jmax: иначе мусорные пакеты невалидны, AWG падает при старте -
+        while true; do
+            ask "Jmin (50-150)" "64" OBF_JMIN
+            ask "Jmax (500-1000)" "1000" OBF_JMAX
+            if [[ "$OBF_JMIN" =~ ^[0-9]+$ && "$OBF_JMAX" =~ ^[0-9]+$ ]] && (( OBF_JMIN < OBF_JMAX )); then
+                break
+            fi
+            print_err "Jmin должен быть меньше Jmax и оба числа. Повторите ввод"
+        done
+        # - S1 != S2: одинаковые значения ухудшают обфускацию -
+        ask "S1 (15-40)" "20" OBF_S1
+        while true; do
+            ask "S2 (15-40, != S1)" "20" OBF_S2
+            if [[ "$OBF_S2" =~ ^[0-9]+$ ]] && (( OBF_S2 != OBF_S1 )); then
+                break
+            fi
+            print_err "S2 должно быть числом и не равняться S1 (${OBF_S1}). Повторите ввод"
+        done
     fi
 }
 
@@ -1051,8 +1139,10 @@ _awg_port_blacklist() {
 rand_port_awg() {
     local low=1024 high=9999 port
     local attempts=0 max_attempts=100
+    local span=$(( high - low + 1 ))
     while (( attempts < max_attempts )); do
-        port=$(( RANDOM % (high - low + 1) + low ))
+        # - _rand_bits30 на /dev/urandom, корректно работает при span > 32767 -
+        port=$(( low + $(_rand_bits30 "$span") ))
         if _awg_port_blacklist "$port"; then (( attempts++ )); continue; fi
         if ! ss -ulnp 2>/dev/null | grep -q ":${port} " && \
            ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
@@ -1287,7 +1377,20 @@ _awg_gen_obf_v1() {
         while [[ "$OBF_H4" == "$OBF_H1" || "$OBF_H4" == "$OBF_H2" || "$OBF_H4" == "$OBF_H3" ]]; do OBF_H4=$(rand_h); done
     else
         echo -e "  ${CYAN}H1-H4 - магические числа в заголовках. Должны быть разными. Любые целые числа.${NC}"
-        ask "H1" "1" OBF_H1; ask "H2" "2" OBF_H2; ask "H3" "3" OBF_H3; ask "H4" "4" OBF_H4
+        # - цикл до корректного набора: все 4 числа и все 4 различны -
+        while true; do
+            ask "H1" "1" OBF_H1; ask "H2" "2" OBF_H2; ask "H3" "3" OBF_H3; ask "H4" "4" OBF_H4
+            if ! [[ "$OBF_H1" =~ ^[0-9]+$ && "$OBF_H2" =~ ^[0-9]+$ && "$OBF_H3" =~ ^[0-9]+$ && "$OBF_H4" =~ ^[0-9]+$ ]]; then
+                print_err "H1-H4 должны быть целыми числами"
+                continue
+            fi
+            if [[ "$OBF_H1" == "$OBF_H2" || "$OBF_H1" == "$OBF_H3" || "$OBF_H1" == "$OBF_H4" \
+               || "$OBF_H2" == "$OBF_H3" || "$OBF_H2" == "$OBF_H4" || "$OBF_H3" == "$OBF_H4" ]]; then
+                print_err "H1-H4 должны быть все разными, повторите ввод"
+                continue
+            fi
+            break
+        done
     fi
 }
 
@@ -1301,6 +1404,8 @@ _awg_gen_obf_v15() {
 # - проверка пересечения диапазонов "min-max": возвращает 0 если пересекаются -
 _awg_ranges_overlap() {
     local a="$1" b="$2"
+    # - guard на формат: оба аргумента должны быть "число-число", иначе арифметика упадёт -
+    [[ "$a" =~ ^[0-9]+-[0-9]+$ && "$b" =~ ^[0-9]+-[0-9]+$ ]] || return 1
     local a_lo a_hi b_lo b_hi
     a_lo="${a%-*}"; a_hi="${a#*-}"
     b_lo="${b%-*}"; b_hi="${b#*-}"
@@ -1764,9 +1869,12 @@ awg_remove_peer_by_pubkey() {
             has_match = 0
             for (i = 1; i <= buf_len; i++) {
                 if (buf[i] ~ /^[[:space:]]*PublicKey[[:space:]]*=/) {
-                    split(buf[i], a, "=")
-                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", a[2])
-                    if (a[2] == target) { has_match = 1; break }
+                    # - нельзя split по "=", base64 ключи заканчиваются на "=" или "==" -
+                    # - срезаем только префикс "PublicKey = ", остальное = значение целиком -
+                    key_val = buf[i]
+                    sub(/^[[:space:]]*PublicKey[[:space:]]*=[[:space:]]*/, "", key_val)
+                    gsub(/[[:space:]]+$/, "", key_val)
+                    if (key_val == target) { has_match = 1; break }
                 }
             }
             if (has_match) {
@@ -2026,8 +2134,11 @@ MIGEOF
 # - трёхступенчатый fallback: exact headers -> метапакет -> установка стандартного ядра -
 # - return 0 = headers есть, return 1 = headers нет и не удалось поставить, return 2 = нужен reboot -
 _awg_ensure_headers() {
-    local kver
+    local kver arch
     kver=$(uname -r)
+    # - архитектура нужна для метапакетов linux-headers-* и linux-image-* -
+    # - amd64 на x86_64, arm64 на ARM (Oracle Cloud и прочие ARM VPS) -
+    arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
 
     # - шаг 0: уже есть? -
     if [[ -d "/lib/modules/${kver}/build" ]]; then
@@ -2043,12 +2154,12 @@ _awg_ensure_headers() {
     fi
     print_warn "Пакет linux-headers-${kver} не найден в репозитории"
 
-    # - шаг 2: метапакет linux-headers-amd64 (тянет headers для текущего stable ядра) -
-    print_info "Пробую метапакет linux-headers-amd64..."
-    if apt-get install -y -qq linux-headers-amd64 2>/dev/null; then
+    # - шаг 2: метапакет linux-headers-${arch} (тянет headers для текущего stable ядра) -
+    print_info "Пробую метапакет linux-headers-${arch}..."
+    if apt-get install -y -qq "linux-headers-${arch}" 2>/dev/null; then
         # - метапакет мог поставить headers для другой версии ядра -
         if [[ -d "/lib/modules/${kver}/build" ]]; then
-            print_ok "linux-headers-amd64 -> headers для ${kver} появились"
+            print_ok "linux-headers-${arch} -> headers для ${kver} появились"
             return 0
         fi
         print_warn "Метапакет установлен, но headers для ${kver} всё ещё нет"
@@ -2061,9 +2172,9 @@ _awg_ensure_headers() {
     print_info "Решение: установить стандартное ядро Debian + reboot."
     echo ""
     local fallback_pkg=""
-    apt-cache show linux-image-amd64 &>/dev/null && fallback_pkg="linux-image-amd64"
+    apt-cache show "linux-image-${arch}" &>/dev/null && fallback_pkg="linux-image-${arch}"
     if [[ -z "$fallback_pkg" ]]; then
-        print_err "Метапакет linux-image-amd64 не найден в репозитории"
+        print_err "Метапакет linux-image-${arch} не найден в репозитории"
         return 1
     fi
     local do_install=""
@@ -2072,7 +2183,7 @@ _awg_ensure_headers() {
         print_warn "Без kernel headers AWG не заработает"
         return 1
     fi
-    apt-get install -y "$fallback_pkg" "linux-headers-amd64" || {
+    apt-get install -y "$fallback_pkg" "linux-headers-${arch}" || {
         print_err "Не удалось установить ядро"
         return 1
     }
@@ -2164,7 +2275,9 @@ REPOEOF
             mv "$src_list_bak" /etc/apt/sources.list
             print_warn "apt update упал, sources.list восстановлен"
         fi
-        rm -f /etc/apt/sources.list.d/amnezia.list
+        # - чистим оба варианта имени файла, legacy amneziawg.list тоже -
+        rm -f /etc/apt/sources.list.d/amnezia.list \
+              /etc/apt/sources.list.d/amneziawg.list
         return 1
     fi
 
@@ -2834,6 +2947,14 @@ awg_create_iface() {
     local main_iface=""
     [[ -f "$sys_env" ]] && main_iface=$(grep "^MAIN_IFACE=" "$sys_env" | cut -d'"' -f2)
     [[ -z "$main_iface" ]] && main_iface=$(ip route show default 2>/dev/null | awk '/default/{print $5}' | head -1)
+    # - вторая ступень fallback: первый non-lo интерфейс -
+    # - без main_iface PostUp с iptables -o "" упадёт, интерфейс не поднимется -
+    [[ -z "$main_iface" ]] && main_iface=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -v '^lo$' | head -1)
+    if [[ -z "$main_iface" ]]; then
+        print_err "Не удалось определить основной сетевой интерфейс"
+        print_err "Проверь: ip route show default"
+        return 1
+    fi
 
     local endpoint_ip=""
     endpoint_ip=$(grep "^SERVER_IP=" "$sys_env" 2>/dev/null | cut -d'"' -f2 || echo "")
@@ -3718,7 +3839,9 @@ XUI_ENV="${XUI_ENV_DIR}/3xui.env"
 XUI_BACKUP_DIR="${XUI_ENV_DIR}/backups"
 XUI_DIR="/usr/local/x-ui"
 XUI_BIN="${XUI_DIR}/x-ui"
-XUI_DB="${XUI_DIR}/db/x-ui.db"
+# - актуальный дефолт 3X-UI v2.x: /etc/x-ui/x-ui.db (Configuration wiki, Default value: /etc/x-ui) -
+# - старый путь /usr/local/x-ui/db/ больше не используется, в xui_install реальный путь детектится и перезаписывается -
+XUI_DB="/etc/x-ui/x-ui.db"
 XUI_SERVICE="x-ui"
 XUI_UNIT="/etc/systemd/system/x-ui.service"
 
@@ -3736,6 +3859,21 @@ xui_installed() {
 
 xui_running() {
     systemctl is-active --quiet "$XUI_SERVICE" 2>/dev/null
+}
+
+# - автодетект фактического пути к БД: апстрим мог сменить дефолт -
+# - /etc/x-ui/x-ui.db (v2.x дефолт) | ${XUI_DIR}/db/x-ui.db (legacy) -
+# - при нахождении обновляет глобальную XUI_DB, иначе оставляет как есть -
+_xui_detect_db() {
+    local _cand
+    for _cand in "/etc/x-ui/x-ui.db" "${XUI_DIR}/db/x-ui.db"; do
+        if [[ -f "$_cand" ]]; then XUI_DB="$_cand"; return 0; fi
+    done
+    # - fallback через find, если апстрим уедет ещё раз -
+    local _found
+    _found=$(find /etc/x-ui "$XUI_DIR" -maxdepth 3 -name "x-ui.db" -type f 2>/dev/null | head -1 || true)
+    [[ -n "$_found" ]] && { XUI_DB="$_found"; return 0; }
+    return 1
 }
 
 xui_get_param() {
@@ -3987,8 +4125,28 @@ xui_install() {
     fi
 
     # - первый запуск для инициализации БД (генерит дефолтные user/pass/path) -
+    # - ждём появления БД до 30 сек, sleep 3 не хватает на слабых VPS -
+    # - без БД setting -username ниже уйдёт в пустоту -
+    # - 3X-UI v2+ держит БД в /etc/x-ui/x-ui.db (дефолт из апстрима), -
+    # - старые версии - в /usr/local/x-ui/db/x-ui.db. Проверяем оба пути. -
     systemctl start "$XUI_SERVICE" || true
-    sleep 3
+    local retries=0 _db_found=""
+    while (( retries < 30 )); do
+        for _cand in "/etc/x-ui/x-ui.db" "${XUI_DIR}/db/x-ui.db"; do
+            if [[ -f "$_cand" ]]; then _db_found="$_cand"; break; fi
+        done
+        [[ -n "$_db_found" ]] && break
+        sleep 1
+        (( retries++ ))
+    done
+    if [[ -z "$_db_found" ]]; then
+        print_err "БД 3X-UI не создана за 30 сек (проверены /etc/x-ui/ и ${XUI_DIR}/db/)"
+        print_info "Проверь: journalctl -u ${XUI_SERVICE} --no-pager -n 50"
+        return 1
+    fi
+    # - фиксируем фактический путь: дальше backup/status/restore будут работать по нему -
+    XUI_DB="$_db_found"
+    print_ok "БД 3X-UI инициализирована (${retries} сек): ${XUI_DB}"
 
     if [[ ! -f "$XUI_BIN" ]]; then
         print_err "Установка не удалась: ${XUI_BIN} не найден"
@@ -4057,6 +4215,7 @@ EOF
 # --> 3X-UI: СТАТУС <--
 xui_show_status() {
     print_section "Статус 3X-UI"
+    _xui_detect_db 2>/dev/null || true
     if systemctl is-active --quiet "$XUI_SERVICE" 2>/dev/null; then
         local started
         started=$(systemctl show "$XUI_SERVICE" --property=ActiveEnterTimestamp 2>/dev/null | cut -d= -f2 || echo "?")
@@ -4118,9 +4277,11 @@ xui_show_inbounds() {
     # - trap на cleanup cookie (в нём логин/пароль до ответа сервера) -
     trap 'rm -f "$cookie_jar" 2>/dev/null' RETURN
     local login_result
+    # - --data-urlencode обязателен, иначе спецсимволы в пароле (&, =, %) ломают тело запроса -
     login_result=$(curl -sk --connect-timeout 5 -c "$cookie_jar" \
         -X POST "${base_url}/login" \
-        -d "username=${PANEL_USER}&password=${PANEL_PASS}" 2>/dev/null || echo "")
+        --data-urlencode "username=${PANEL_USER}" \
+        --data-urlencode "password=${PANEL_PASS}" 2>/dev/null || echo "")
     if ! echo "$login_result" | grep -q '"success":true'; then
         print_err "Авторизация не удалась"
         rm -f "$cookie_jar"; return 0
@@ -4151,6 +4312,7 @@ xui_show_inbounds() {
 # --> 3X-UI: БЭКАП <--
 xui_backup_db() {
     print_section "Бэкап БД"
+    _xui_detect_db 2>/dev/null || true
     [[ ! -f "$XUI_DB" ]] && { print_err "БД не найдена: ${XUI_DB}"; return 0; }
     mkdir -p "$XUI_BACKUP_DIR"
     local backup_file
@@ -4168,6 +4330,7 @@ xui_reinstall() {
     local confirm=""
     ask_yn "Подтвердить?" "n" confirm
     [[ "$confirm" != "yes" ]] && return 0
+    _xui_detect_db 2>/dev/null || true
     [[ -f "$XUI_DB" ]] && { mkdir -p "$XUI_BACKUP_DIR"; cp -f "$XUI_DB" "${XUI_BACKUP_DIR}/x-ui_pre_reinstall_$(date +%Y%m%d).db"; }
     systemctl stop "$XUI_SERVICE" 2>/dev/null || true
     systemctl disable "$XUI_SERVICE" 2>/dev/null || true
@@ -4185,6 +4348,7 @@ xui_delete() {
     local confirm=""
     ask_yn "Подтвердить?" "n" confirm
     [[ "$confirm" != "yes" ]] && return 0
+    _xui_detect_db 2>/dev/null || true
     [[ -f "$XUI_DB" ]] && { mkdir -p "$XUI_BACKUP_DIR"; cp -f "$XUI_DB" "${XUI_BACKUP_DIR}/x-ui_final_$(date +%Y%m%d).db" 2>/dev/null || true; }
     systemctl stop "$XUI_SERVICE" 2>/dev/null || true
     systemctl disable "$XUI_SERVICE" 2>/dev/null || true
@@ -4254,9 +4418,14 @@ otl_install() {
     install_log=$(mktemp /tmp/outline-install-XXXXXX.log)
     print_info "Запуск установщика Jigsaw... (лог: ${install_log})"
 
+    # - синхронный pipe: tee в одну ветку, stderr слит в stdout -
+    # - старый вариант ">(tee) 2>(tee)" запускал tee в фоне, и grep ниже мог отработать -
+    # - до того как tee сбросил последнюю строку с apiUrl. Результат: ключ не находился. -
     yes | bash <(curl -sSL "$OTL_INSTALL_URL") \
         --hostname "$server_ip" --api-port "$api_port" \
-        > >(tee -a "$install_log") 2> >(tee -a "$install_log" >&2) || true
+        2>&1 | tee -a "$install_log" || true
+    # - sync после pipe: убедиться что данные на диске до grep -
+    sync
 
     # - извлекаем ключ из лога -
     local api_json
@@ -4285,9 +4454,23 @@ EOF
     mgmt_port=$(echo "$api_url" | grep -oP ':\K[0-9]+(?=/)' || echo "$api_port")
     keys_port=""
     local sbconf="/opt/outline/persisted-state/shadowbox_config.json"
-    [[ -f "$sbconf" ]] && keys_port=$(jq -r '.accessKeys[0].port // empty' "$sbconf" 2>/dev/null || true)
-    [[ -z "$keys_port" ]] && keys_port=$(curl -fsk --connect-timeout 5 "${api_url}/server" 2>/dev/null \
-        | grep -oP '"portForNewAccessKeys":\s*\K[0-9]+' || true)
+    # - ждём появления keys_port до 30 сек: контейнер мог ещё не прописать конфиг -
+    # - без keys_port не откроем UFW, клиенты не подключатся -
+    local kp_tries=0
+    while [[ -z "$keys_port" ]] && (( kp_tries < 30 )); do
+        [[ -f "$sbconf" ]] && keys_port=$(jq -r '.accessKeys[0].port // empty' "$sbconf" 2>/dev/null || true)
+        if [[ -z "$keys_port" ]]; then
+            keys_port=$(curl -fsk --connect-timeout 5 "${api_url}/server" 2>/dev/null \
+                | grep -oP '"portForNewAccessKeys":\s*\K[0-9]+' || true)
+        fi
+        [[ -n "$keys_port" ]] && break
+        sleep 1
+        (( kp_tries++ ))
+    done
+    if [[ -z "$keys_port" ]]; then
+        print_warn "keys_port не удалось получить за 30 сек, UFW правила для ключей не добавлены"
+        print_info "Исправь вручную после старта: jq -r '.accessKeys[0].port' ${sbconf}"
+    fi
 
     cat > "$OTL_ENV" << EOF
 SERVER_IP="${server_ip}"
@@ -4391,11 +4574,14 @@ otl_add_key() {
     print_ok "Ключ создан (id: ${key_id})"
     # - PUT /name возвращает 204, это не ошибка -
     if [[ -n "$key_name" ]]; then
-        local status
+        # - jq -n --arg: безопасный escape кавычек, слэшей и юникода в имени -
+        # - сырое тело "{\"name\":\"${key_name}\"}" ломается если name содержит " или \ -
+        local name_json status
+        name_json=$(jq -nc --arg n "$key_name" '{name: $n}' 2>/dev/null || echo "{}")
         status=$(curl -fsk -o /dev/null -w "%{http_code}" \
             -X PUT "${api_url}/access-keys/${key_id}/name" \
             -H "Content-Type: application/json" \
-            -d "{\"name\":\"${key_name}\"}" 2>/dev/null || echo "000")
+            -d "$name_json" 2>/dev/null || echo "000")
         [[ "$status" == "204" || "$status" == "200" ]] && print_ok "Имя: ${key_name}" \
             || print_warn "Имя не задано (HTTP ${status})"
     fi
@@ -5837,23 +6023,21 @@ mbl_install() {
     done
 
     # - пароль сервера (для подключения клиентов) -
-    # - read -rs чтобы пароль не светился в терминале -
     local srv_pass=""
     echo -ne "  ${BOLD}Пароль сервера (пустой = без пароля):${NC} "
-    read -rs srv_pass
+    read -r srv_pass
     echo ""
 
     # - пароль SuperUser (администратор): двойной ввод с проверкой -
-    # - read -rs + подтверждение, минимум 6 символов -
     local su_pass="" su_pass2=""
     while true; do
         echo -ne "  ${BOLD}Пароль SuperUser (мин. 6 символов):${NC} "
-        read -rs su_pass; echo ""
+        read -r su_pass; echo ""
         if [[ ${#su_pass} -lt 6 ]]; then
             print_err "Минимум 6 символов"; continue
         fi
         echo -ne "  ${BOLD}Повторите пароль SuperUser:${NC} "
-        read -rs su_pass2; echo ""
+        read -r su_pass2; echo ""
         if [[ "$su_pass" != "$su_pass2" ]]; then
             print_err "Пароли не совпадают"; continue
         fi
@@ -5874,13 +6058,40 @@ mbl_install() {
         print_warn "Конфиг не найден: ${MBL_CONF}"
     fi
 
-    # - задаём SuperUser пароль -
-    murmurd -ini "$MBL_CONF" -supw "$su_pass" 2>/dev/null \
-        && print_ok "SuperUser пароль задан" \
-        || print_warn "Не удалось задать SuperUser пароль через murmurd"
-
-    # - запуск -
+    # - порядок: первый старт для инициализации БД -> stop -> supw -> start -
+    # - если supw до первого старта, БД ещё нет и пароль не запишется -
     systemctl enable "$MBL_SERVICE" 2>/dev/null || true
+    systemctl restart "$MBL_SERVICE"
+
+    # - ждём появления БД до 15 сек -
+    # - MBL_DB по умолчанию /var/lib/mumble-server/mumble-server.sqlite, но путь может отличаться -
+    local db_wait=0 db_found=""
+    while (( db_wait < 15 )); do
+        if [[ -f "$MBL_DB" ]]; then
+            db_found="$MBL_DB"; break
+        fi
+        db_found=$(find /var/lib/mumble-server /var/lib/mumble /var/lib/murmur \
+            -name "*.sqlite" -type f 2>/dev/null | head -1)
+        [[ -n "$db_found" ]] && break
+        sleep 1
+        (( db_wait++ ))
+    done
+
+    if [[ -z "$db_found" ]]; then
+        print_warn "БД Mumble не появилась за 15 сек, SuperUser пароль не задан"
+    else
+        # - останавливаем сервис: murmurd -supw требует эксклюзивный доступ к БД -
+        systemctl stop "$MBL_SERVICE" 2>/dev/null || true
+        sleep 1
+        if murmurd -ini "$MBL_CONF" -supw "$su_pass" 2>/dev/null; then
+            print_ok "SuperUser пароль задан"
+			book_write ".mumble.superuser_pass" "$su_pass"
+        else
+            print_warn "Не удалось задать SuperUser пароль через murmurd"
+        fi
+    fi
+
+    # - финальный запуск -
     systemctl restart "$MBL_SERVICE"
     sleep 2
     if systemctl is-active --quiet "$MBL_SERVICE"; then
@@ -5933,8 +6144,9 @@ mbl_show_status() {
 
 mbl_show_creds() {
     print_section "Данные для подключения"
-    local server_ip port srv_pass
+    local server_ip port srv_pass su_pass
     server_ip=$(book_read ".mumble.server_ip")
+	su_pass=$(book_read ".mumble.superuser_pass")
     [[ -f "$MBL_CONF" ]] && {
         port=$(grep -oP '^port=\K[0-9]+' "$MBL_CONF" || echo "64738")
         srv_pass=$(grep -oP '^serverpassword=\K.*' "$MBL_CONF" || echo "")
@@ -5942,7 +6154,8 @@ mbl_show_creds() {
     echo ""
     echo -e "  ${BOLD}Адрес:${NC}       ${server_ip:-?}:${port:-64738}"
     echo -e "  ${BOLD}Пароль:${NC}      ${srv_pass:-без пароля}"
-    echo -e "  ${BOLD}SuperUser:${NC}   логин SuperUser, пароль задан при установке"
+    echo -e "  ${BOLD}SuperUser:${NC}   логин SuperUser"
+	echo -e "  ${BOLD}Пароль SU:${NC}   ${su_pass:-не сохранён}"
     echo ""
     return 0
 }
@@ -6095,7 +6308,14 @@ EOF
         awg_ifaces+=("$iface"); awg_ips+=("$tip")
         print_ok "Интерфейс: ${iface} -> ${tip}"
     done
-    [[ ${#awg_ips[@]} -eq 0 ]] && print_warn "AWG интерфейсов не найдено, Unbound на 127.0.0.1"
+    if [[ ${#awg_ips[@]} -eq 0 ]]; then
+        echo ""
+        print_warn "AWG интерфейсов не найдено"
+        print_warn "Unbound будет слушать только на 127.0.0.1"
+        print_warn "Клиенты VPN DNS от него не получат, пока не создашь AWG интерфейс"
+        print_info "После создания AWG переустанови Unbound: меню Обслуживание -> Unbound"
+        echo ""
+    fi
 
     # - генерация конфига: секция server (общая для обоих режимов) -
     local iface_lines="    interface: 127.0.0.1"
@@ -6302,9 +6522,13 @@ diag_run() {
     local RPT_TXT="/root/diag_${_TS}.txt"
     local RPT_HTML="/root/diag_${_TS}.html"
     exec 3>&1 4>&2
-    exec > >(tee -a "$RPT_TXT") 2>&1
-    # - страховка: восстановить stdout при любом выходе из функции -
-    trap 'exec 1>&3 2>&4 3>&- 4>&-' RETURN
+    # - сохраняем PID фонового tee: без этого trap закроет pipe, -
+    # - но tee может дописывать буфер уже после выхода из функции, -
+    # - ломая вывод меню главного цикла -
+    exec > >(tee -a "$RPT_TXT"); local _TEE_PID=$!
+    exec 2>&1
+    # - страховка: восстановить stdout + дождаться завершения tee -
+    trap 'exec 1>&3 2>&4 3>&- 4>&-; [[ -n "$_TEE_PID" ]] && wait "$_TEE_PID" 2>/dev/null' RETURN
 
     # --> ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ <--
     local D_CPU="?" D_CORES=1 D_RAM=0 D_RAMFREE=0 D_SWAP=0 D_SWAPUSED=0
@@ -6601,9 +6825,10 @@ diag_run() {
         D_DISK_SPEED=$(dd if=/dev/zero of=/tmp/_disktest bs=1M count=32 conv=fdatasync 2>&1 | grep -oP '[0-9.]+ [MG]B/s' | tail -1 || echo "?")
         rm -f /tmp/_disktest; print_ok "Запись: ${D_DISK_SPEED}"
         df -hT | grep -v "tmpfs\|overlay\|udev" | sed 's/^/  /'
-        while read -r use mp; do local pct=${use%%%}
-            [[ $pct -gt 85 ]] && _dg_red "Диск ${mp}: ${use}|journalctl --vacuum-size=100M"
+        while read -r use mp; do local pct="${use%\%}"
+            [[ "$pct" =~ ^[0-9]+$ && $pct -gt 85 ]] && _dg_red "Диск ${mp}: ${use}|journalctl --vacuum-size=100M"
         done < <(df -h | grep -v tmpfs | awk 'NR>1{print $5, $6}')
+		return 0
     }
     _dg_services() {
         _sv() { local svc="$1" label="$2" st
@@ -6651,6 +6876,7 @@ diag_run() {
             done
         fi
     }
+	
     # --> ПРОКСИ (MTProto, SOCKS5, Hysteria 2) <--
     _dg_proxy() {
         # - MTProto мультиинстанс -
@@ -6721,6 +6947,7 @@ diag_run() {
                 _dg_red "Hysteria 2 #${inst_id} остановлен|systemctl start ${svc}"
             fi
         done
+		
         # - legacy fallback: старый конфиг /etc/hysteria/hysteria.env -
         if [[ $hy2_count -eq 0 && -f /etc/hysteria/hysteria.env ]]; then
             unset PORT VERSION
@@ -6736,6 +6963,7 @@ diag_run() {
             print_info "Hysteria 2: не установлен"
         fi
     }
+	
     # --> TELEGRAM МОНИТОРИНГ <--
     _dg_tgmon() {
         if [[ -f /etc/vps-eli-stack/telegrambot.env ]]; then
@@ -7017,7 +7245,7 @@ CSS
         local mp usedh pcth pct_num t="ok"
         usedh=$(echo "$line" | awk '{print $4}')
         pcth=$(echo "$line" | awk '{print $6}'); mp=$(echo "$line" | awk '{print $7}')
-        pct_num=${pcth%%%}; [[ "$pct_num" =~ ^[0-9]+$ && $pct_num -gt 70 ]] && t="warn"
+        pct_num="${pcth%\%}"; [[ "$pct_num" =~ ^[0-9]+$ && $pct_num -gt 70 ]] && t="warn"
         [[ "$pct_num" =~ ^[0-9]+$ && $pct_num -gt 85 ]] && t="err"
         _hr "${mp}" "${usedh} (${pcth})" "$t"
     done <<< "$(df -hT | grep -v 'tmpfs\|overlay\|udev')"
@@ -7447,14 +7675,7 @@ EOF
 # === 04d_ssh.sh ===
 # --> МОДУЛЬ: SSH <--
 # - смена порта, управление root доступом, fail2ban, генерация ключей -
-
-ssh_get_port() {
-    grep -oP '^\s*Port\s+\K[0-9]+' /etc/ssh/sshd_config 2>/dev/null | head -1 || echo "22"
-}
-
-ssh_restart() {
-    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
-}
+# - базовые ssh_get_port и ssh_restart вынесены в 00_header.sh (нужны раньше, в boot) -
 
 ssh_show_status() {
     print_section "Статус SSH"
@@ -7709,24 +7930,59 @@ ufw_delete_rule() {
 ufw_check_ports() {
     _ufw_guard || return 0
     print_section "Активные порты vs UFW"
-    local ufw_rules; ufw_rules=$(ufw status 2>/dev/null || true)
-    local missing=0
+
+    local ufw_rules
+    ufw_rules=$(ufw status 2>/dev/null || true)
+
+    local missing_rules=()
+
     while IFS= read -r line; do
-        local port proc addr
-        port=$(echo "$line" | awk '{print $5}' | grep -oP ':\K[0-9]+$' || true)
-        proc=$(echo "$line" | grep -oP 'users:\(\("?\K[^",)]+' || echo "-")
+        local proto port proc addr rule_key
+
+        proto=$(echo "$line" | awk '{print $1}' | sed 's/[0-9]*$//')
         addr=$(echo "$line" | awk '{print $5}')
-        [[ -z "$port" ]] && continue
+        port=$(echo "$addr" | grep -oP ':\K[0-9]+$' || true)
+        proc=$(echo "$line" | grep -oP 'users:\(\("?\K[^",)]+' || echo "-")
+
+        [[ -z "$proto" || -z "$port" ]] && continue
         echo "$addr" | grep -qE '^127\.|^\[::1\]' && continue
-        if echo "$ufw_rules" | grep -qE "${port}/(tcp|udp)|${port} "; then
-            echo -e "  ${GREEN}[OK]${NC} ${port}  ${proc}"
+
+        rule_key="${port}/${proto}"
+
+        if echo "$ufw_rules" | grep -qE "(^|[[:space:]])${port}/${proto}([[:space:]]|$)|(^|[[:space:]])${port}([[:space:]]|$)"; then
+            echo -e "  ${GREEN}[OK]${NC} ${port}/${proto}  ${proc}"
         else
-            echo -e "  ${YELLOW}[!]${NC}  ${port}  ${proc}  ${YELLOW}нет правила${NC}"
-            missing=$(( missing + 1 ))
+            echo -e "  ${YELLOW}[!]${NC}  ${port}/${proto}  ${proc}  ${YELLOW}нет правила${NC}"
+            missing_rules+=("${port}:${proto}:${proc}")
         fi
     done < <(ss -tulpn 2>/dev/null | tail -n +2)
+
     echo ""
-    [[ $missing -gt 0 ]] && print_warn "Без правил: ${missing}" || print_ok "Все порты покрыты"
+
+    if [[ ${#missing_rules[@]} -eq 0 ]]; then
+        print_ok "Все порты покрыты"
+        ufw_active || print_warn "UFW неактивен, правила не применяются"
+        return 0
+    fi
+
+    print_warn "Без правил: ${#missing_rules[@]}"
+
+    local confirm=""
+    ask_yn "Добавить все отсутствующие правила?" "n" confirm
+
+    if [[ "$confirm" == "yes" ]]; then
+        local item port proto proc
+        for item in "${missing_rules[@]}"; do
+            port="${item%%:*}"
+            proto_rest="${item#*:}"
+            proto="${proto_rest%%:*}"
+            proc="${item#*:*:}"
+
+            ufw allow "${port}/${proto}" comment "${proc}" 2>/dev/null || true
+            print_ok "Добавлено: ${port}/${proto} (${proc})"
+        done
+    fi
+
     ufw_active || print_warn "UFW неактивен, правила не применяются"
     return 0
 }
