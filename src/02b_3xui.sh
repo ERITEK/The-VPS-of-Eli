@@ -6,7 +6,9 @@ XUI_ENV="${XUI_ENV_DIR}/3xui.env"
 XUI_BACKUP_DIR="${XUI_ENV_DIR}/backups"
 XUI_DIR="/usr/local/x-ui"
 XUI_BIN="${XUI_DIR}/x-ui"
-XUI_DB="${XUI_DIR}/db/x-ui.db"
+# - актуальный дефолт 3X-UI v2.x: /etc/x-ui/x-ui.db (Configuration wiki, Default value: /etc/x-ui) -
+# - старый путь /usr/local/x-ui/db/ больше не используется, в xui_install реальный путь детектится и перезаписывается -
+XUI_DB="/etc/x-ui/x-ui.db"
 XUI_SERVICE="x-ui"
 XUI_UNIT="/etc/systemd/system/x-ui.service"
 
@@ -24,6 +26,21 @@ xui_installed() {
 
 xui_running() {
     systemctl is-active --quiet "$XUI_SERVICE" 2>/dev/null
+}
+
+# - автодетект фактического пути к БД: апстрим мог сменить дефолт -
+# - /etc/x-ui/x-ui.db (v2.x дефолт) | ${XUI_DIR}/db/x-ui.db (legacy) -
+# - при нахождении обновляет глобальную XUI_DB, иначе оставляет как есть -
+_xui_detect_db() {
+    local _cand
+    for _cand in "/etc/x-ui/x-ui.db" "${XUI_DIR}/db/x-ui.db"; do
+        if [[ -f "$_cand" ]]; then XUI_DB="$_cand"; return 0; fi
+    done
+    # - fallback через find, если апстрим уедет ещё раз -
+    local _found
+    _found=$(find /etc/x-ui "$XUI_DIR" -maxdepth 3 -name "x-ui.db" -type f 2>/dev/null | head -1 || true)
+    [[ -n "$_found" ]] && { XUI_DB="$_found"; return 0; }
+    return 1
 }
 
 xui_get_param() {
@@ -275,8 +292,28 @@ xui_install() {
     fi
 
     # - первый запуск для инициализации БД (генерит дефолтные user/pass/path) -
+    # - ждём появления БД до 30 сек, sleep 3 не хватает на слабых VPS -
+    # - без БД setting -username ниже уйдёт в пустоту -
+    # - 3X-UI v2+ держит БД в /etc/x-ui/x-ui.db (дефолт из апстрима), -
+    # - старые версии - в /usr/local/x-ui/db/x-ui.db. Проверяем оба пути. -
     systemctl start "$XUI_SERVICE" || true
-    sleep 3
+    local retries=0 _db_found=""
+    while (( retries < 30 )); do
+        for _cand in "/etc/x-ui/x-ui.db" "${XUI_DIR}/db/x-ui.db"; do
+            if [[ -f "$_cand" ]]; then _db_found="$_cand"; break; fi
+        done
+        [[ -n "$_db_found" ]] && break
+        sleep 1
+        (( retries++ ))
+    done
+    if [[ -z "$_db_found" ]]; then
+        print_err "БД 3X-UI не создана за 30 сек (проверены /etc/x-ui/ и ${XUI_DIR}/db/)"
+        print_info "Проверь: journalctl -u ${XUI_SERVICE} --no-pager -n 50"
+        return 1
+    fi
+    # - фиксируем фактический путь: дальше backup/status/restore будут работать по нему -
+    XUI_DB="$_db_found"
+    print_ok "БД 3X-UI инициализирована (${retries} сек): ${XUI_DB}"
 
     if [[ ! -f "$XUI_BIN" ]]; then
         print_err "Установка не удалась: ${XUI_BIN} не найден"
@@ -345,6 +382,7 @@ EOF
 # --> 3X-UI: СТАТУС <--
 xui_show_status() {
     print_section "Статус 3X-UI"
+    _xui_detect_db 2>/dev/null || true
     if systemctl is-active --quiet "$XUI_SERVICE" 2>/dev/null; then
         local started
         started=$(systemctl show "$XUI_SERVICE" --property=ActiveEnterTimestamp 2>/dev/null | cut -d= -f2 || echo "?")
@@ -406,9 +444,11 @@ xui_show_inbounds() {
     # - trap на cleanup cookie (в нём логин/пароль до ответа сервера) -
     trap 'rm -f "$cookie_jar" 2>/dev/null' RETURN
     local login_result
+    # - --data-urlencode обязателен, иначе спецсимволы в пароле (&, =, %) ломают тело запроса -
     login_result=$(curl -sk --connect-timeout 5 -c "$cookie_jar" \
         -X POST "${base_url}/login" \
-        -d "username=${PANEL_USER}&password=${PANEL_PASS}" 2>/dev/null || echo "")
+        --data-urlencode "username=${PANEL_USER}" \
+        --data-urlencode "password=${PANEL_PASS}" 2>/dev/null || echo "")
     if ! echo "$login_result" | grep -q '"success":true'; then
         print_err "Авторизация не удалась"
         rm -f "$cookie_jar"; return 0
@@ -439,6 +479,7 @@ xui_show_inbounds() {
 # --> 3X-UI: БЭКАП <--
 xui_backup_db() {
     print_section "Бэкап БД"
+    _xui_detect_db 2>/dev/null || true
     [[ ! -f "$XUI_DB" ]] && { print_err "БД не найдена: ${XUI_DB}"; return 0; }
     mkdir -p "$XUI_BACKUP_DIR"
     local backup_file
@@ -456,6 +497,7 @@ xui_reinstall() {
     local confirm=""
     ask_yn "Подтвердить?" "n" confirm
     [[ "$confirm" != "yes" ]] && return 0
+    _xui_detect_db 2>/dev/null || true
     [[ -f "$XUI_DB" ]] && { mkdir -p "$XUI_BACKUP_DIR"; cp -f "$XUI_DB" "${XUI_BACKUP_DIR}/x-ui_pre_reinstall_$(date +%Y%m%d).db"; }
     systemctl stop "$XUI_SERVICE" 2>/dev/null || true
     systemctl disable "$XUI_SERVICE" 2>/dev/null || true
@@ -473,6 +515,7 @@ xui_delete() {
     local confirm=""
     ask_yn "Подтвердить?" "n" confirm
     [[ "$confirm" != "yes" ]] && return 0
+    _xui_detect_db 2>/dev/null || true
     [[ -f "$XUI_DB" ]] && { mkdir -p "$XUI_BACKUP_DIR"; cp -f "$XUI_DB" "${XUI_BACKUP_DIR}/x-ui_final_$(date +%Y%m%d).db" 2>/dev/null || true; }
     systemctl stop "$XUI_SERVICE" 2>/dev/null || true
     systemctl disable "$XUI_SERVICE" 2>/dev/null || true
