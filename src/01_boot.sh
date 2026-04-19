@@ -43,16 +43,18 @@ boot_install_packages() {
     # --> BOOT: KERNEL HEADERS <--
     # - нужны для DKMS (AmneziaWG). Ставим заранее, до установки AWG -
     # - без headers DKMS не соберёт модуль ядра и AWG не заработает -
-    local kver
+    local kver arch
     kver=$(uname -r)
+    # - arch для метапакета, без этого на ARM VPS ставится amd64 -> apt error -
+    arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
     if [[ -d "/lib/modules/${kver}/build" ]]; then
         print_ok "Kernel headers уже установлены (${kver})"
     else
         print_info "Устанавливаю kernel headers для ${kver}..."
         if apt-get -y install -qq "linux-headers-${kver}" 2>/dev/null; then
             print_ok "linux-headers-${kver} установлен"
-        elif apt-get -y install -qq linux-headers-amd64 2>/dev/null; then
-            print_ok "linux-headers-amd64 установлен (метапакет)"
+        elif apt-get -y install -qq "linux-headers-${arch}" 2>/dev/null; then
+            print_ok "linux-headers-${arch} установлен (метапакет)"
         else
             print_warn "Kernel headers не удалось установить"
             print_warn "AWG может потребовать ручную установку headers или стандартное ядро"
@@ -99,9 +101,16 @@ boot_install_docker() {
         else
             local tmp
             tmp=$(mktemp)
-            jq '. + {"default-ulimits": {"nofile": {"Name": "nofile", "Hard": 65536, "Soft": 65536}}}' \
-                "$daemon_json" > "$tmp" && mv "$tmp" "$daemon_json"
-            print_ok "Docker daemon.json: ulimit nofile=65536 добавлен"
+            # - проверяем код возврата jq, иначе при битом json молча оставим мусор -
+            if jq '. + {"default-ulimits": {"nofile": {"Name": "nofile", "Hard": 65536, "Soft": 65536}}}' \
+                "$daemon_json" > "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+                mv "$tmp" "$daemon_json"
+                print_ok "Docker daemon.json: ulimit nofile=65536 добавлен"
+            else
+                rm -f "$tmp"
+                print_err "Не удалось обновить ${daemon_json} (jq ошибка или битый JSON)"
+                return 1
+            fi
         fi
     else
         cat > "$daemon_json" << 'EODAEMON'
@@ -118,7 +127,17 @@ EODAEMON
         print_ok "Docker daemon.json: создан с ulimit nofile=65536"
     fi
 
-    systemctl restart docker 2>/dev/null || true
+    # - restart с проверкой, иначе битый daemon.json оставит Docker лежать -
+    if ! systemctl restart docker 2>/dev/null; then
+        print_err "systemctl restart docker не удался"
+        return 1
+    fi
+    sleep 2
+    if ! systemctl is-active --quiet docker 2>/dev/null; then
+        print_err "Docker не запустился после рестарта (проверь ${daemon_json})"
+        return 1
+    fi
+    print_ok "Docker запущен"
     return 0
 }
 
@@ -130,6 +149,7 @@ boot_setup_swap() {
     local swap_min_mb=448
 
     # - создать и активировать /swapfile заданного размера -
+    # - fallocate работает не везде (ZFS/BTRFS/LXC), fallback на dd -
     _boot_create_swapfile() {
         local size_mb="$1"
         if [[ -f /swapfile ]]; then
@@ -150,14 +170,38 @@ boot_setup_swap() {
             rm -f /swapfile
         fi
         print_info "Создаём /swapfile ${size_mb} MB"
-        fallocate -l "${size_mb}M" /swapfile
-        chmod 600 /swapfile
-        mkswap /swapfile
-        swapon /swapfile
+        # - шаг 1: fallocate, если не сработал - fallback на dd -
+        if ! fallocate -l "${size_mb}M" /swapfile 2>/dev/null; then
+            print_info "fallocate не поддерживается на этой FS, fallback на dd"
+            if ! dd if=/dev/zero of=/swapfile bs=1M count="$size_mb" status=none 2>/dev/null; then
+                print_err "dd не смог создать /swapfile"
+                rm -f /swapfile
+                return 1
+            fi
+        fi
+        # - шаг 2: права строго 600, иначе mkswap даст warning и swapon может отказаться -
+        if ! chmod 600 /swapfile; then
+            print_err "chmod 600 /swapfile не удался"
+            rm -f /swapfile
+            return 1
+        fi
+        # - шаг 3: mkswap -
+        if ! mkswap /swapfile >/dev/null 2>&1; then
+            print_err "mkswap /swapfile не удался"
+            rm -f /swapfile
+            return 1
+        fi
+        # - шаг 4: swapon -
+        if ! swapon /swapfile 2>/dev/null; then
+            print_err "swapon /swapfile не удался"
+            rm -f /swapfile
+            return 1
+        fi
         if ! grep -q "/swapfile" /etc/fstab; then
             echo '/swapfile none swap sw 0 0' >> /etc/fstab
         fi
         print_ok "Swapfile ${size_mb} MB создан и активирован"
+        return 0
     }
 
     local active_swap_mb
