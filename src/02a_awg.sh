@@ -46,21 +46,40 @@ _awg_gen_obf_common() {
     if [[ "$auto" == "yes" ]]; then
         OBF_JC=$(rand_range 3 10)
         OBF_S1=$(rand_range 15 40)
+        # - S1 и S2 в диапазоне 15..40, S1+56 = 71..96 - пересечения никогда нет -
+        # - реально полезная проверка: S1 != S2 (одинаковые = хуже маскировка) -
         local _att=0
         while true; do
             OBF_S2=$(rand_range 15 40)
-            [[ $OBF_S2 -ne $(( OBF_S1 + 56 )) ]] && break
+            [[ "$OBF_S2" -ne "$OBF_S1" ]] && break
             (( _att++ )); [[ $_att -gt 10 ]] && break
         done
         OBF_JMIN=$(rand_range 50 150)
         OBF_JMAX=$(rand_range 500 1000)
     else
-        print_info "Правила: Jmin < Jmax, S1+56 != S2, H1-H4 разные"
+        print_info "Правила: Jmin < Jmax, S1 != S2, H1-H4 разные"
         echo -e "  ${CYAN}Jc - кол-во мусорных пакетов (больше = сложнее распознать VPN, но чуть больше трафика).${NC}"
         echo -e "  ${CYAN}Jmin/Jmax - диапазон размера мусорных пакетов в байтах.${NC}"
-        echo -e "  ${CYAN}S1/S2 - сдвиг заголовков пакетов (влияет на маскировку, S1+56 не равно S2).${NC}"
-        ask "Jc (3-10)" "5" OBF_JC; ask "Jmin (50-150)" "64" OBF_JMIN; ask "Jmax (500-1000)" "1000" OBF_JMAX
-        ask "S1 (15-40)" "20" OBF_S1; ask "S2 (15-40, != S1+56)" "20" OBF_S2
+        echo -e "  ${CYAN}S1/S2 - сдвиг заголовков пакетов (диапазон 15-40, разные значения).${NC}"
+        ask "Jc (3-10)" "5" OBF_JC
+        # - Jmin < Jmax: иначе мусорные пакеты невалидны, AWG падает при старте -
+        while true; do
+            ask "Jmin (50-150)" "64" OBF_JMIN
+            ask "Jmax (500-1000)" "1000" OBF_JMAX
+            if [[ "$OBF_JMIN" =~ ^[0-9]+$ && "$OBF_JMAX" =~ ^[0-9]+$ ]] && (( OBF_JMIN < OBF_JMAX )); then
+                break
+            fi
+            print_err "Jmin должен быть меньше Jmax и оба числа. Повторите ввод"
+        done
+        # - S1 != S2: одинаковые значения ухудшают обфускацию -
+        ask "S1 (15-40)" "20" OBF_S1
+        while true; do
+            ask "S2 (15-40, != S1)" "20" OBF_S2
+            if [[ "$OBF_S2" =~ ^[0-9]+$ ]] && (( OBF_S2 != OBF_S1 )); then
+                break
+            fi
+            print_err "S2 должно быть числом и не равняться S1 (${OBF_S1}). Повторите ввод"
+        done
     fi
 }
 
@@ -145,8 +164,10 @@ _awg_port_blacklist() {
 rand_port_awg() {
     local low=1024 high=9999 port
     local attempts=0 max_attempts=100
+    local span=$(( high - low + 1 ))
     while (( attempts < max_attempts )); do
-        port=$(( RANDOM % (high - low + 1) + low ))
+        # - _rand_bits30 на /dev/urandom, корректно работает при span > 32767 -
+        port=$(( low + $(_rand_bits30 "$span") ))
         if _awg_port_blacklist "$port"; then (( attempts++ )); continue; fi
         if ! ss -ulnp 2>/dev/null | grep -q ":${port} " && \
            ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
@@ -381,7 +402,20 @@ _awg_gen_obf_v1() {
         while [[ "$OBF_H4" == "$OBF_H1" || "$OBF_H4" == "$OBF_H2" || "$OBF_H4" == "$OBF_H3" ]]; do OBF_H4=$(rand_h); done
     else
         echo -e "  ${CYAN}H1-H4 - магические числа в заголовках. Должны быть разными. Любые целые числа.${NC}"
-        ask "H1" "1" OBF_H1; ask "H2" "2" OBF_H2; ask "H3" "3" OBF_H3; ask "H4" "4" OBF_H4
+        # - цикл до корректного набора: все 4 числа и все 4 различны -
+        while true; do
+            ask "H1" "1" OBF_H1; ask "H2" "2" OBF_H2; ask "H3" "3" OBF_H3; ask "H4" "4" OBF_H4
+            if ! [[ "$OBF_H1" =~ ^[0-9]+$ && "$OBF_H2" =~ ^[0-9]+$ && "$OBF_H3" =~ ^[0-9]+$ && "$OBF_H4" =~ ^[0-9]+$ ]]; then
+                print_err "H1-H4 должны быть целыми числами"
+                continue
+            fi
+            if [[ "$OBF_H1" == "$OBF_H2" || "$OBF_H1" == "$OBF_H3" || "$OBF_H1" == "$OBF_H4" \
+               || "$OBF_H2" == "$OBF_H3" || "$OBF_H2" == "$OBF_H4" || "$OBF_H3" == "$OBF_H4" ]]; then
+                print_err "H1-H4 должны быть все разными, повторите ввод"
+                continue
+            fi
+            break
+        done
     fi
 }
 
@@ -395,6 +429,8 @@ _awg_gen_obf_v15() {
 # - проверка пересечения диапазонов "min-max": возвращает 0 если пересекаются -
 _awg_ranges_overlap() {
     local a="$1" b="$2"
+    # - guard на формат: оба аргумента должны быть "число-число", иначе арифметика упадёт -
+    [[ "$a" =~ ^[0-9]+-[0-9]+$ && "$b" =~ ^[0-9]+-[0-9]+$ ]] || return 1
     local a_lo a_hi b_lo b_hi
     a_lo="${a%-*}"; a_hi="${a#*-}"
     b_lo="${b%-*}"; b_hi="${b#*-}"
@@ -858,9 +894,12 @@ awg_remove_peer_by_pubkey() {
             has_match = 0
             for (i = 1; i <= buf_len; i++) {
                 if (buf[i] ~ /^[[:space:]]*PublicKey[[:space:]]*=/) {
-                    split(buf[i], a, "=")
-                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", a[2])
-                    if (a[2] == target) { has_match = 1; break }
+                    # - нельзя split по "=", base64 ключи заканчиваются на "=" или "==" -
+                    # - срезаем только префикс "PublicKey = ", остальное = значение целиком -
+                    key_val = buf[i]
+                    sub(/^[[:space:]]*PublicKey[[:space:]]*=[[:space:]]*/, "", key_val)
+                    gsub(/[[:space:]]+$/, "", key_val)
+                    if (key_val == target) { has_match = 1; break }
                 }
             }
             if (has_match) {
@@ -1120,8 +1159,11 @@ MIGEOF
 # - трёхступенчатый fallback: exact headers -> метапакет -> установка стандартного ядра -
 # - return 0 = headers есть, return 1 = headers нет и не удалось поставить, return 2 = нужен reboot -
 _awg_ensure_headers() {
-    local kver
+    local kver arch
     kver=$(uname -r)
+    # - архитектура нужна для метапакетов linux-headers-* и linux-image-* -
+    # - amd64 на x86_64, arm64 на ARM (Oracle Cloud и прочие ARM VPS) -
+    arch=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
 
     # - шаг 0: уже есть? -
     if [[ -d "/lib/modules/${kver}/build" ]]; then
@@ -1137,12 +1179,12 @@ _awg_ensure_headers() {
     fi
     print_warn "Пакет linux-headers-${kver} не найден в репозитории"
 
-    # - шаг 2: метапакет linux-headers-amd64 (тянет headers для текущего stable ядра) -
-    print_info "Пробую метапакет linux-headers-amd64..."
-    if apt-get install -y -qq linux-headers-amd64 2>/dev/null; then
+    # - шаг 2: метапакет linux-headers-${arch} (тянет headers для текущего stable ядра) -
+    print_info "Пробую метапакет linux-headers-${arch}..."
+    if apt-get install -y -qq "linux-headers-${arch}" 2>/dev/null; then
         # - метапакет мог поставить headers для другой версии ядра -
         if [[ -d "/lib/modules/${kver}/build" ]]; then
-            print_ok "linux-headers-amd64 -> headers для ${kver} появились"
+            print_ok "linux-headers-${arch} -> headers для ${kver} появились"
             return 0
         fi
         print_warn "Метапакет установлен, но headers для ${kver} всё ещё нет"
@@ -1155,9 +1197,9 @@ _awg_ensure_headers() {
     print_info "Решение: установить стандартное ядро Debian + reboot."
     echo ""
     local fallback_pkg=""
-    apt-cache show linux-image-amd64 &>/dev/null && fallback_pkg="linux-image-amd64"
+    apt-cache show "linux-image-${arch}" &>/dev/null && fallback_pkg="linux-image-${arch}"
     if [[ -z "$fallback_pkg" ]]; then
-        print_err "Метапакет linux-image-amd64 не найден в репозитории"
+        print_err "Метапакет linux-image-${arch} не найден в репозитории"
         return 1
     fi
     local do_install=""
@@ -1166,7 +1208,7 @@ _awg_ensure_headers() {
         print_warn "Без kernel headers AWG не заработает"
         return 1
     fi
-    apt-get install -y "$fallback_pkg" "linux-headers-amd64" || {
+    apt-get install -y "$fallback_pkg" "linux-headers-${arch}" || {
         print_err "Не удалось установить ядро"
         return 1
     }
@@ -1258,7 +1300,9 @@ REPOEOF
             mv "$src_list_bak" /etc/apt/sources.list
             print_warn "apt update упал, sources.list восстановлен"
         fi
-        rm -f /etc/apt/sources.list.d/amnezia.list
+        # - чистим оба варианта имени файла, legacy amneziawg.list тоже -
+        rm -f /etc/apt/sources.list.d/amnezia.list \
+              /etc/apt/sources.list.d/amneziawg.list
         return 1
     fi
 
@@ -1928,6 +1972,14 @@ awg_create_iface() {
     local main_iface=""
     [[ -f "$sys_env" ]] && main_iface=$(grep "^MAIN_IFACE=" "$sys_env" | cut -d'"' -f2)
     [[ -z "$main_iface" ]] && main_iface=$(ip route show default 2>/dev/null | awk '/default/{print $5}' | head -1)
+    # - вторая ступень fallback: первый non-lo интерфейс -
+    # - без main_iface PostUp с iptables -o "" упадёт, интерфейс не поднимется -
+    [[ -z "$main_iface" ]] && main_iface=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -v '^lo$' | head -1)
+    if [[ -z "$main_iface" ]]; then
+        print_err "Не удалось определить основной сетевой интерфейс"
+        print_err "Проверь: ip route show default"
+        return 1
+    fi
 
     local endpoint_ip=""
     endpoint_ip=$(grep "^SERVER_IP=" "$sys_env" 2>/dev/null | cut -d'"' -f2 || echo "")
