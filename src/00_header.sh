@@ -122,7 +122,12 @@ validate_port() {
 }
 
 validate_cidr() {
-    [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]
+    local c="$1"
+    [[ "$c" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})/([0-9]{1,2})$ ]] || return 1
+    local o1="${BASH_REMATCH[1]}" o2="${BASH_REMATCH[2]}" o3="${BASH_REMATCH[3]}" o4="${BASH_REMATCH[4]}" m="${BASH_REMATCH[5]}"
+    (( o1 <= 255 && o2 <= 255 && o3 <= 255 && o4 <= 255 )) || return 1
+    (( m >= 0 && m <= 32 )) || return 1
+    return 0
 }
 
 validate_name() {
@@ -147,7 +152,8 @@ _rand_bits30() {
     [[ -z "$span" || "$span" -le 0 ]] && { echo 0; return; }
     local r
     r=$(od -An -N4 -tu4 < /dev/urandom 2>/dev/null | tr -d ' ')
-    [[ -z "$r" ]] && r=$(( (RANDOM << 15) | RANDOM ))
+    # - od может вернуть не-число при странном окружении, guard на арифметику -
+    [[ -z "$r" || ! "$r" =~ ^[0-9]+$ ]] && r=$(( (RANDOM << 15) | RANDOM ))
     echo $(( r % span ))
 }
 
@@ -170,28 +176,31 @@ rand_h_range() {
 }
 
 # - guard на $1 > $2, иначе RANDOM % 0 -> shell падает -
+# - RANDOM в bash даёт только 0..32767, для диапазонов шире используем _rand_bits30 -
 rand_range() {
     local lo="$1" hi="$2"
     if [[ -z "$lo" || -z "$hi" ]]; then echo 0; return 1; fi
     if [[ "$lo" -gt "$hi" ]]; then local t="$lo"; lo="$hi"; hi="$t"; fi
     [[ "$lo" -eq "$hi" ]] && { echo "$lo"; return 0; }
-    echo $(( RANDOM % (hi - lo + 1) + lo ))
+    local span=$(( hi - lo + 1 ))
+    echo $(( lo + $(_rand_bits30 "$span") ))
 }
 
-# - таймаут 100 попыток -
+# - таймаут 100 попыток, при провале возвращает пусто + код 1 -
+# - диапазон может превышать 32767, используем /dev/urandom через _rand_bits30 -
 rand_port() {
     local low="${1:-10000}" high="${2:-60000}" port
     local attempts=0 max_attempts=100
+    local span=$(( high - low + 1 ))
     while (( attempts < max_attempts )); do
-        port=$(( RANDOM % (high - low + 1) + low ))
+        port=$(( low + $(_rand_bits30 "$span") ))
         if ! ss -ulnp 2>/dev/null | grep -q ":${port} " && \
            ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
             echo "$port"; return 0
         fi
         (( attempts++ ))
     done
-    # - исчерпали попытки, возвращаем последний сгенерированный -
-    echo "$port"
+    # - исчерпали попытки, пусто + код 1 чтобы вызывающий не получил занятый порт -
     return 1
 }
 
@@ -308,6 +317,22 @@ book_init() {
         }' > "$_BOOK"
     chmod 600 "$_BOOK"
     return 0
+}
+
+# --> SSH: БАЗОВЫЕ ХЕЛПЕРЫ <--
+# - нужны ещё на этапе boot, до загрузки 04d_ssh.sh -
+# - читаем порт через sshd -T (учитывает Include drop-in), fallback на sshd_config -
+ssh_get_port() {
+    local port
+    port=$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')
+    if [[ -z "$port" ]]; then
+        port=$(grep -oP '^\s*Port\s+\K[0-9]+' /etc/ssh/sshd_config 2>/dev/null | head -1)
+    fi
+    echo "${port:-22}"
+}
+
+ssh_restart() {
+    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
 }
 
 # --> ПРОВЕРКА ROOT <--
