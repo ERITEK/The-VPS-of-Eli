@@ -44,23 +44,21 @@ mbl_install() {
     done
 
     # - пароль сервера (для подключения клиентов) -
-    # - read -rs чтобы пароль не светился в терминале -
     local srv_pass=""
     echo -ne "  ${BOLD}Пароль сервера (пустой = без пароля):${NC} "
-    read -rs srv_pass
+    read -r srv_pass
     echo ""
 
     # - пароль SuperUser (администратор): двойной ввод с проверкой -
-    # - read -rs + подтверждение, минимум 6 символов -
     local su_pass="" su_pass2=""
     while true; do
         echo -ne "  ${BOLD}Пароль SuperUser (мин. 6 символов):${NC} "
-        read -rs su_pass; echo ""
+        read -r su_pass; echo ""
         if [[ ${#su_pass} -lt 6 ]]; then
             print_err "Минимум 6 символов"; continue
         fi
         echo -ne "  ${BOLD}Повторите пароль SuperUser:${NC} "
-        read -rs su_pass2; echo ""
+        read -r su_pass2; echo ""
         if [[ "$su_pass" != "$su_pass2" ]]; then
             print_err "Пароли не совпадают"; continue
         fi
@@ -81,13 +79,40 @@ mbl_install() {
         print_warn "Конфиг не найден: ${MBL_CONF}"
     fi
 
-    # - задаём SuperUser пароль -
-    murmurd -ini "$MBL_CONF" -supw "$su_pass" 2>/dev/null \
-        && print_ok "SuperUser пароль задан" \
-        || print_warn "Не удалось задать SuperUser пароль через murmurd"
-
-    # - запуск -
+    # - порядок: первый старт для инициализации БД -> stop -> supw -> start -
+    # - если supw до первого старта, БД ещё нет и пароль не запишется -
     systemctl enable "$MBL_SERVICE" 2>/dev/null || true
+    systemctl restart "$MBL_SERVICE"
+
+    # - ждём появления БД до 15 сек -
+    # - MBL_DB по умолчанию /var/lib/mumble-server/mumble-server.sqlite, но путь может отличаться -
+    local db_wait=0 db_found=""
+    while (( db_wait < 15 )); do
+        if [[ -f "$MBL_DB" ]]; then
+            db_found="$MBL_DB"; break
+        fi
+        db_found=$(find /var/lib/mumble-server /var/lib/mumble /var/lib/murmur \
+            -name "*.sqlite" -type f 2>/dev/null | head -1)
+        [[ -n "$db_found" ]] && break
+        sleep 1
+        (( db_wait++ ))
+    done
+
+    if [[ -z "$db_found" ]]; then
+        print_warn "БД Mumble не появилась за 15 сек, SuperUser пароль не задан"
+    else
+        # - останавливаем сервис: murmurd -supw требует эксклюзивный доступ к БД -
+        systemctl stop "$MBL_SERVICE" 2>/dev/null || true
+        sleep 1
+        if murmurd -ini "$MBL_CONF" -supw "$su_pass" 2>/dev/null; then
+            print_ok "SuperUser пароль задан"
+			book_write ".mumble.superuser_pass" "$su_pass"
+        else
+            print_warn "Не удалось задать SuperUser пароль через murmurd"
+        fi
+    fi
+
+    # - финальный запуск -
     systemctl restart "$MBL_SERVICE"
     sleep 2
     if systemctl is-active --quiet "$MBL_SERVICE"; then
@@ -140,8 +165,9 @@ mbl_show_status() {
 
 mbl_show_creds() {
     print_section "Данные для подключения"
-    local server_ip port srv_pass
+    local server_ip port srv_pass su_pass
     server_ip=$(book_read ".mumble.server_ip")
+	su_pass=$(book_read ".mumble.superuser_pass")
     [[ -f "$MBL_CONF" ]] && {
         port=$(grep -oP '^port=\K[0-9]+' "$MBL_CONF" || echo "64738")
         srv_pass=$(grep -oP '^serverpassword=\K.*' "$MBL_CONF" || echo "")
@@ -149,7 +175,8 @@ mbl_show_creds() {
     echo ""
     echo -e "  ${BOLD}Адрес:${NC}       ${server_ip:-?}:${port:-64738}"
     echo -e "  ${BOLD}Пароль:${NC}      ${srv_pass:-без пароля}"
-    echo -e "  ${BOLD}SuperUser:${NC}   логин SuperUser, пароль задан при установке"
+    echo -e "  ${BOLD}SuperUser:${NC}   логин SuperUser"
+	echo -e "  ${BOLD}Пароль SU:${NC}   ${su_pass:-не сохранён}"
     echo ""
     return 0
 }
