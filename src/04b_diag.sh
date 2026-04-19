@@ -40,9 +40,13 @@ diag_run() {
     local RPT_TXT="/root/diag_${_TS}.txt"
     local RPT_HTML="/root/diag_${_TS}.html"
     exec 3>&1 4>&2
-    exec > >(tee -a "$RPT_TXT") 2>&1
-    # - страховка: восстановить stdout при любом выходе из функции -
-    trap 'exec 1>&3 2>&4 3>&- 4>&-' RETURN
+    # - сохраняем PID фонового tee: без этого trap закроет pipe, -
+    # - но tee может дописывать буфер уже после выхода из функции, -
+    # - ломая вывод меню главного цикла -
+    exec > >(tee -a "$RPT_TXT"); local _TEE_PID=$!
+    exec 2>&1
+    # - страховка: восстановить stdout + дождаться завершения tee -
+    trap 'exec 1>&3 2>&4 3>&- 4>&-; [[ -n "$_TEE_PID" ]] && wait "$_TEE_PID" 2>/dev/null' RETURN
 
     # --> ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ <--
     local D_CPU="?" D_CORES=1 D_RAM=0 D_RAMFREE=0 D_SWAP=0 D_SWAPUSED=0
@@ -339,9 +343,10 @@ diag_run() {
         D_DISK_SPEED=$(dd if=/dev/zero of=/tmp/_disktest bs=1M count=32 conv=fdatasync 2>&1 | grep -oP '[0-9.]+ [MG]B/s' | tail -1 || echo "?")
         rm -f /tmp/_disktest; print_ok "Запись: ${D_DISK_SPEED}"
         df -hT | grep -v "tmpfs\|overlay\|udev" | sed 's/^/  /'
-        while read -r use mp; do local pct=${use%%%}
-            [[ $pct -gt 85 ]] && _dg_red "Диск ${mp}: ${use}|journalctl --vacuum-size=100M"
+        while read -r use mp; do local pct="${use%\%}"
+            [[ "$pct" =~ ^[0-9]+$ && $pct -gt 85 ]] && _dg_red "Диск ${mp}: ${use}|journalctl --vacuum-size=100M"
         done < <(df -h | grep -v tmpfs | awk 'NR>1{print $5, $6}')
+		return 0
     }
     _dg_services() {
         _sv() { local svc="$1" label="$2" st
@@ -389,6 +394,7 @@ diag_run() {
             done
         fi
     }
+	
     # --> ПРОКСИ (MTProto, SOCKS5, Hysteria 2) <--
     _dg_proxy() {
         # - MTProto мультиинстанс -
@@ -459,6 +465,7 @@ diag_run() {
                 _dg_red "Hysteria 2 #${inst_id} остановлен|systemctl start ${svc}"
             fi
         done
+		
         # - legacy fallback: старый конфиг /etc/hysteria/hysteria.env -
         if [[ $hy2_count -eq 0 && -f /etc/hysteria/hysteria.env ]]; then
             unset PORT VERSION
@@ -474,6 +481,7 @@ diag_run() {
             print_info "Hysteria 2: не установлен"
         fi
     }
+	
     # --> TELEGRAM МОНИТОРИНГ <--
     _dg_tgmon() {
         if [[ -f /etc/vps-eli-stack/telegrambot.env ]]; then
@@ -755,7 +763,7 @@ CSS
         local mp usedh pcth pct_num t="ok"
         usedh=$(echo "$line" | awk '{print $4}')
         pcth=$(echo "$line" | awk '{print $6}'); mp=$(echo "$line" | awk '{print $7}')
-        pct_num=${pcth%%%}; [[ "$pct_num" =~ ^[0-9]+$ && $pct_num -gt 70 ]] && t="warn"
+        pct_num="${pcth%\%}"; [[ "$pct_num" =~ ^[0-9]+$ && $pct_num -gt 70 ]] && t="warn"
         [[ "$pct_num" =~ ^[0-9]+$ && $pct_num -gt 85 ]] && t="err"
         _hr "${mp}" "${usedh} (${pcth})" "$t"
     done <<< "$(df -hT | grep -v 'tmpfs\|overlay\|udev')"
