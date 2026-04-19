@@ -66,7 +66,14 @@ EOF
         awg_ifaces+=("$iface"); awg_ips+=("$tip")
         print_ok "Интерфейс: ${iface} -> ${tip}"
     done
-    [[ ${#awg_ips[@]} -eq 0 ]] && print_warn "AWG интерфейсов не найдено, Unbound на 127.0.0.1"
+    if [[ ${#awg_ips[@]} -eq 0 ]]; then
+        echo ""
+        print_warn "AWG интерфейсов не найдено"
+        print_warn "Unbound будет слушать только на 127.0.0.1"
+        print_warn "Клиенты VPN DNS от него не получат, пока не создашь AWG интерфейс"
+        print_info "После создания AWG переустанови Unbound: меню Обслуживание -> Unbound"
+        echo ""
+    fi
 
     # - генерация конфига: секция server (общая для обоих режимов) -
     local iface_lines="    interface: 127.0.0.1"
@@ -156,11 +163,6 @@ EOF
     else
         print_warn "root.hints: internic.net недоступен, используем встроенный"
     fi
-
-    # - DNSSEC anchor: в Debian/Ubuntu unbound.service сам генерит root.key -
-    # - через ExecStartPre=/usr/libexec/unbound-helper root_trust_anchor_update. -
-    # - Наш вызов unbound-anchor дублировал якорь, получали "trust anchor presented twice". -
-    # - Не трогаем: если файл уже есть, ничего не делаем; если нет - unit создаст при старте -
 
     # - проверка и запуск -
     if unbound-checkconf "$UNBOUND_CONF" 2>/dev/null; then
