@@ -86,24 +86,59 @@ ufw_delete_rule() {
 ufw_check_ports() {
     _ufw_guard || return 0
     print_section "Активные порты vs UFW"
-    local ufw_rules; ufw_rules=$(ufw status 2>/dev/null || true)
-    local missing=0
+
+    local ufw_rules
+    ufw_rules=$(ufw status 2>/dev/null || true)
+
+    local missing_rules=()
+
     while IFS= read -r line; do
-        local port proc addr
-        port=$(echo "$line" | awk '{print $5}' | grep -oP ':\K[0-9]+$' || true)
-        proc=$(echo "$line" | grep -oP 'users:\(\("?\K[^",)]+' || echo "-")
+        local proto port proc addr rule_key
+
+        proto=$(echo "$line" | awk '{print $1}' | sed 's/[0-9]*$//')
         addr=$(echo "$line" | awk '{print $5}')
-        [[ -z "$port" ]] && continue
+        port=$(echo "$addr" | grep -oP ':\K[0-9]+$' || true)
+        proc=$(echo "$line" | grep -oP 'users:\(\("?\K[^",)]+' || echo "-")
+
+        [[ -z "$proto" || -z "$port" ]] && continue
         echo "$addr" | grep -qE '^127\.|^\[::1\]' && continue
-        if echo "$ufw_rules" | grep -qE "${port}/(tcp|udp)|${port} "; then
-            echo -e "  ${GREEN}[OK]${NC} ${port}  ${proc}"
+
+        rule_key="${port}/${proto}"
+
+        if echo "$ufw_rules" | grep -qE "(^|[[:space:]])${port}/${proto}([[:space:]]|$)|(^|[[:space:]])${port}([[:space:]]|$)"; then
+            echo -e "  ${GREEN}[OK]${NC} ${port}/${proto}  ${proc}"
         else
-            echo -e "  ${YELLOW}[!]${NC}  ${port}  ${proc}  ${YELLOW}нет правила${NC}"
-            missing=$(( missing + 1 ))
+            echo -e "  ${YELLOW}[!]${NC}  ${port}/${proto}  ${proc}  ${YELLOW}нет правила${NC}"
+            missing_rules+=("${port}:${proto}:${proc}")
         fi
     done < <(ss -tulpn 2>/dev/null | tail -n +2)
+
     echo ""
-    [[ $missing -gt 0 ]] && print_warn "Без правил: ${missing}" || print_ok "Все порты покрыты"
+
+    if [[ ${#missing_rules[@]} -eq 0 ]]; then
+        print_ok "Все порты покрыты"
+        ufw_active || print_warn "UFW неактивен, правила не применяются"
+        return 0
+    fi
+
+    print_warn "Без правил: ${#missing_rules[@]}"
+
+    local confirm=""
+    ask_yn "Добавить все отсутствующие правила?" "n" confirm
+
+    if [[ "$confirm" == "yes" ]]; then
+        local item port proto proc
+        for item in "${missing_rules[@]}"; do
+            port="${item%%:*}"
+            proto_rest="${item#*:}"
+            proto="${proto_rest%%:*}"
+            proc="${item#*:*:}"
+
+            ufw allow "${port}/${proto}" comment "${proc}" 2>/dev/null || true
+            print_ok "Добавлено: ${port}/${proto} (${proc})"
+        done
+    fi
+
     ufw_active || print_warn "UFW неактивен, правила не применяются"
     return 0
 }
