@@ -50,9 +50,14 @@ otl_install() {
     install_log=$(mktemp /tmp/outline-install-XXXXXX.log)
     print_info "Запуск установщика Jigsaw... (лог: ${install_log})"
 
+    # - синхронный pipe: tee в одну ветку, stderr слит в stdout -
+    # - старый вариант ">(tee) 2>(tee)" запускал tee в фоне, и grep ниже мог отработать -
+    # - до того как tee сбросил последнюю строку с apiUrl. Результат: ключ не находился. -
     yes | bash <(curl -sSL "$OTL_INSTALL_URL") \
         --hostname "$server_ip" --api-port "$api_port" \
-        > >(tee -a "$install_log") 2> >(tee -a "$install_log" >&2) || true
+        2>&1 | tee -a "$install_log" || true
+    # - sync после pipe: убедиться что данные на диске до grep -
+    sync
 
     # - извлекаем ключ из лога -
     local api_json
@@ -81,9 +86,23 @@ EOF
     mgmt_port=$(echo "$api_url" | grep -oP ':\K[0-9]+(?=/)' || echo "$api_port")
     keys_port=""
     local sbconf="/opt/outline/persisted-state/shadowbox_config.json"
-    [[ -f "$sbconf" ]] && keys_port=$(jq -r '.accessKeys[0].port // empty' "$sbconf" 2>/dev/null || true)
-    [[ -z "$keys_port" ]] && keys_port=$(curl -fsk --connect-timeout 5 "${api_url}/server" 2>/dev/null \
-        | grep -oP '"portForNewAccessKeys":\s*\K[0-9]+' || true)
+    # - ждём появления keys_port до 30 сек: контейнер мог ещё не прописать конфиг -
+    # - без keys_port не откроем UFW, клиенты не подключатся -
+    local kp_tries=0
+    while [[ -z "$keys_port" ]] && (( kp_tries < 30 )); do
+        [[ -f "$sbconf" ]] && keys_port=$(jq -r '.accessKeys[0].port // empty' "$sbconf" 2>/dev/null || true)
+        if [[ -z "$keys_port" ]]; then
+            keys_port=$(curl -fsk --connect-timeout 5 "${api_url}/server" 2>/dev/null \
+                | grep -oP '"portForNewAccessKeys":\s*\K[0-9]+' || true)
+        fi
+        [[ -n "$keys_port" ]] && break
+        sleep 1
+        (( kp_tries++ ))
+    done
+    if [[ -z "$keys_port" ]]; then
+        print_warn "keys_port не удалось получить за 30 сек, UFW правила для ключей не добавлены"
+        print_info "Исправь вручную после старта: jq -r '.accessKeys[0].port' ${sbconf}"
+    fi
 
     cat > "$OTL_ENV" << EOF
 SERVER_IP="${server_ip}"
@@ -187,11 +206,14 @@ otl_add_key() {
     print_ok "Ключ создан (id: ${key_id})"
     # - PUT /name возвращает 204, это не ошибка -
     if [[ -n "$key_name" ]]; then
-        local status
+        # - jq -n --arg: безопасный escape кавычек, слэшей и юникода в имени -
+        # - сырое тело "{\"name\":\"${key_name}\"}" ломается если name содержит " или \ -
+        local name_json status
+        name_json=$(jq -nc --arg n "$key_name" '{name: $n}' 2>/dev/null || echo "{}")
         status=$(curl -fsk -o /dev/null -w "%{http_code}" \
             -X PUT "${api_url}/access-keys/${key_id}/name" \
             -H "Content-Type: application/json" \
-            -d "{\"name\":\"${key_name}\"}" 2>/dev/null || echo "000")
+            -d "$name_json" 2>/dev/null || echo "000")
         [[ "$status" == "204" || "$status" == "200" ]] && print_ok "Имя: ${key_name}" \
             || print_warn "Имя не задано (HTTP ${status})"
     fi
