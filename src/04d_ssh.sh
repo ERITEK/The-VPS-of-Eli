@@ -1,13 +1,6 @@
 # --> МОДУЛЬ: SSH <--
 # - смена порта, управление root доступом, fail2ban, генерация ключей -
-
-ssh_get_port() {
-    grep -oP '^\s*Port\s+\K[0-9]+' /etc/ssh/sshd_config 2>/dev/null | head -1 || echo "22"
-}
-
-ssh_restart() {
-    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
-}
+# - базовые ssh_get_port и ssh_restart вынесены в 00_header.sh (нужны раньше, в boot) -
 
 ssh_show_status() {
     print_section "Статус SSH"
