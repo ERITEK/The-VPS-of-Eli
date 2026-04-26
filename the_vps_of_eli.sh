@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
-# The VPS of Eli v3.236
+# The VPS of Eli v4.508
 # Мега-менеджер VPS стека: VPN, связь, обслуживание
 # scrp by ERITEK & Loo1, Claude (Anthropic)
-# Собран: 2026-04-19 rls
+# Собран: 2026-04-26 rls
 # =============================================================================
 
 
 # === 00_header.sh ===
 # --> ЗАГОЛОВОК СКРИПТА <--
-# - The VPS of Eli v3.236: общие функции, переменные, book блок -
+# - The VPS of Eli: общие функции, переменные, book блок -
 
 # - проверка bash -
 if [ -z "$BASH_VERSION" ]; then
@@ -28,7 +28,7 @@ if ! flock -n 200; then
     exit 1
 fi
 
-ELI_VERSION="3.236"
+ELI_VERSION="4.508"
 # shellcheck disable=SC2034
 ELI_CODENAME="The VPS of Eli" # - используется в баннере и book -
 
@@ -38,9 +38,9 @@ CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
 # --> ФУНКЦИИ ВЫВОДА <--
 # - единый набор для всего скрипта -
-print_ok()      { echo -e "  ${GREEN}[OK]${NC} $1"; }
-print_warn()    { echo -e "  ${YELLOW}[!]${NC}  $1"; }
-print_err()     { echo -e "  ${RED}[X]${NC} $1"; }
+print_ok()      { echo -e "  ${GREEN}[-OK-]${NC} $1"; }
+print_warn()    { echo -e "  ${YELLOW}[!!!]${NC}  $1"; }
+print_err()     { echo -e "  ${RED}[xXx]${NC} $1"; }
 print_info()    { echo -e "  ${CYAN}*${NC} $1"; }
 print_section() {
     echo ""
@@ -79,24 +79,100 @@ eli_banner() {
 }
 
 # --> ФУНКЦИИ ВВОДА <--
-# - ask: ввод строки с дефолтом, ask_yn: да/нет -
-ask() {
-    local prompt="$1" default="$2" varname="$3" value=""
-    if [[ -n "$default" ]]; then
-        echo -ne "  ${BOLD}${prompt}${NC} [${default}]: "
+# - Ввод всегда идёт через /dev/tty, а не через текущие stdout/stderr.
+# - Это важно для диагностики: там вывод временно уходит в FIFO/tee.
+# - Не используем read -e с цветным prompt: readline неверно считает ширину ANSI-кодов,
+# - из-за чего Backspace и перерисовка строки дают мусор в терминале.
+eli_tty_reset() {
+    [[ -r /dev/tty ]] && stty sane -ixon -ixoff < /dev/tty 2>/dev/null || true
+}
+
+eli_read_line() {
+    local __eli_prompt="$1" __eli_varname="$2" __eli_default="${3:-}"
+    local __eli_input="" __eli_ch="" __eli_old_stty="" __eli_esc_tail=""
+
+    if [[ -r /dev/tty && -w /dev/tty ]]; then
+        # Если основной вывод сейчас идёт через pipe/FIFO, даём tee допечатать предыдущую строку.
+        [[ ! -t 1 || ! -t 2 ]] && sleep 0.05
+        printf '%b' "$__eli_prompt" > /dev/tty
+
+        __eli_old_stty=$(stty -g < /dev/tty 2>/dev/null || true)
+        stty -echo -icanon min 1 time 0 < /dev/tty 2>/dev/null || true
+
+        while IFS= read -r -s -n 1 __eli_ch < /dev/tty; do
+            case "$__eli_ch" in
+                ""|$'\r'|$'\n')
+                    printf '\n' > /dev/tty
+                    break
+                    ;;
+                $'\177'|$'\b')
+                    if [[ -n "$__eli_input" ]]; then
+                        __eli_input="${__eli_input%?}"
+                        printf '\b \b' > /dev/tty
+                    fi
+                    ;;
+                $'\003')
+                    [[ -n "$__eli_old_stty" ]] && stty "$__eli_old_stty" < /dev/tty 2>/dev/null || eli_tty_reset
+                    printf '\n' > /dev/tty
+                    kill -INT $$
+                    return 130
+                    ;;
+                $'\004')
+                    printf '\n' > /dev/tty
+                    break
+                    ;;
+                $'\025')
+                    while [[ -n "$__eli_input" ]]; do
+                        __eli_input="${__eli_input%?}"
+                        printf '\b \b' > /dev/tty
+                    done
+                    ;;
+                $'\033')
+                    # Игнор ESC/стрелок, чтобы в меню не попадали escape-последовательности.
+                    read -r -s -n 2 -t 0.01 __eli_esc_tail < /dev/tty 2>/dev/null || true
+                    ;;
+                *)
+                    __eli_input+="$__eli_ch"
+                    printf '%s' "$__eli_ch" > /dev/tty
+                    ;;
+            esac
+        done
+
+        [[ -n "$__eli_old_stty" ]] && stty "$__eli_old_stty" < /dev/tty 2>/dev/null || eli_tty_reset
     else
-        echo -ne "  ${BOLD}${prompt}${NC}: "
+        eli_tty_reset
+        printf '%b' "$__eli_prompt" >&2
+        IFS= read -r __eli_input || __eli_input=""
     fi
-    read -r value; value="${value:-$default}"
-    printf -v "$varname" '%s' "$value"
+
+    [[ -z "$__eli_input" && -n "$__eli_default" ]] && __eli_input="$__eli_default"
+    printf -v "$__eli_varname" '%s' "$__eli_input"
+}
+
+eli_read_choice() {
+    eli_read_line "  ${BOLD}Выбор:${NC} " "$1"
+}
+
+ask() {
+    local prompt="$1" default="$2" varname="$3" p
+    if [[ -n "$default" ]]; then
+        p=$(printf '  %b%s%b [%s]: ' "$BOLD" "$prompt" "$NC" "$default")
+    else
+        p=$(printf '  %b%s%b: ' "$BOLD" "$prompt" "$NC")
+    fi
+    eli_read_line "$p" "$varname" "$default"
 }
 
 ask_yn() {
-    local prompt="$1" default="$2" varname="$3" value=""
+    local prompt="$1" default="$2" varname="$3" value="" p
     while true; do
-        [[ "$default" == "y" ]] && echo -ne "  ${BOLD}${prompt}${NC} [Y/n]: " \
-                                 || echo -ne "  ${BOLD}${prompt}${NC} [y/N]: "
-        read -r value; value="${value:-$default}"
+        if [[ "$default" == "y" ]]; then
+            p=$(printf '  %b%s%b [Y/n]: ' "$BOLD" "$prompt" "$NC")
+        else
+            p=$(printf '  %b%s%b [y/N]: ' "$BOLD" "$prompt" "$NC")
+        fi
+
+        eli_read_line "$p" value "$default"
         case "${value,,}" in
             y|yes) printf -v "$varname" 'yes'; return ;;
             n|no)  printf -v "$varname" 'no';  return ;;
@@ -105,12 +181,17 @@ ask_yn() {
     done
 }
 
+# - usage: ask_raw "Текст: " varname [default] -
+ask_raw() {
+    local prompt="$1" varname="$2" default="${3:-}"
+    eli_read_line "$prompt" "$varname" "$default"
+}
+
 # --> ПАУЗА И ВОЗВРАТ В МЕНЮ <--
 # - стандартная пауза после выполнения действия -
 eli_pause() {
     echo ""
-    echo -ne "  ${BOLD}Нажми Enter для возврата в меню...${NC}"
-    read -r _
+    eli_read_line "  ${BOLD}Нажми Enter для возврата в меню...${NC}" _
 }
 
 # --> ВАЛИДАЦИЯ <--
@@ -167,14 +248,17 @@ _rand_bits30() {
 }
 
 rand_h() {
-    printf '%u\n' $(( (RANDOM << 16 | RANDOM) % 2147483647 + 1 ))
+    # - нижняя граница 5: значения 1..4 зарезервированы vanilla WG (Init/Response/Cookie/Transport) -
+    # - диапазон [5, 2147483647], ширина span = 2147483643 -
+    printf '%u\n' $(( 5 + $(_rand_bits30 2147483643) ))
 }
 
 # - диапазон H для AWG 2.0: возвращает "min-max" внутри сегмента [lo, hi] -
 rand_h_range() {
     local lo="$1" hi="$2"
-    if [[ -z "$lo" || -z "$hi" || "$lo" -ge "$hi" ]]; then
-        echo "${lo:-0}-${hi:-0}"; return 1
+    # - guard: невалидные аргументы → пустой stdout + rc=1, без мусора в выводе -
+    if [[ -z "$lo" || -z "$hi" ]] || ! [[ "$lo" =~ ^[0-9]+$ && "$hi" =~ ^[0-9]+$ ]] || (( lo >= hi )); then
+        return 1
     fi
     local mid=$(( (lo + hi) / 2 ))
     local span_lo=$(( mid - lo + 1 ))
@@ -203,8 +287,10 @@ rand_port() {
     local span=$(( high - low + 1 ))
     while (( attempts < max_attempts )); do
         port=$(( low + $(_rand_bits30 "$span") ))
-        if ! ss -ulnp 2>/dev/null | grep -q ":${port} " && \
-           ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+        # - ss без -p: процесс не нужен, -p может требовать прав -
+        # - regex [:.] покрывает IPv4 (:port) и IPv6-mapped (.port) нотацию -
+        if ! ss -H -uln 2>/dev/null | grep -Eq "[:.]${port}[[:space:]]" && \
+           ! ss -H -tln 2>/dev/null | grep -Eq "[:.]${port}[[:space:]]"; then
             echo "$port"; return 0
         fi
         (( attempts++ ))
@@ -260,41 +346,73 @@ _book_ok() {
     command -v jq &>/dev/null && [[ -f "$_BOOK" ]] && jq empty "$_BOOK" 2>/dev/null
 }
 
-book_read() {
+# - превращает "точечный" путь вида .a.3xui.b.1.c в безопасное jq-выражение -
+# - сегменты, которые не являются валидным jq-идентификатором (начинаются с цифры, -
+# - содержат дефис или иные спецсимволы), оборачиваются в кавычки: ."3xui", ."1" -
+# - сегменты, уже обёрнутые в "..." или [...] - оставляются как есть -
+_book_path() {
     local p="$1"
-    [[ "$p" != .* ]] && p=".${p}"
+    [[ -z "$p" ]] && return 1
+    # - если путь совсем не точечный (например '.["x"]'), вернуть как есть -
+    [[ "$p" != .* && "$p" != \[* ]] && p=".${p}"
+    # - быстрый путь: уже квотировано или с индексами - не трогаем -
+    [[ "$p" == *'"'* || "$p" == *'['* ]] && { echo "$p"; return 0; }
+
+    local out="" rest="${p#.}" seg
+    while [[ -n "$rest" ]]; do
+        seg="${rest%%.*}"
+        if [[ "$rest" == *.* ]]; then
+            rest="${rest#*.}"
+        else
+            rest=""
+        fi
+        if [[ "$seg" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+            out+=".${seg}"
+        else
+            # - спецсимволов в наших путях быть не должно, но на всякий - escape двойных кавычек -
+            local esc="${seg//\"/\\\"}"
+            out+=".\"${esc}\""
+        fi
+    done
+    echo "$out"
+}
+
+book_read() {
+    local p; p=$(_book_path "$1") || return 0
     _book_ok && jq -r "${p} // empty" "$_BOOK" 2>/dev/null || echo ""
 }
 
 book_write() {
     _book_ok || return 0
-    local p="$1" v="$2" t="${3:-string}" tmp
-    [[ "$p" != .* ]] && p=".${p}"
-    tmp=$(mktemp)
+    local raw="$1" v="$2" t="${3:-string}" tmp p
+    p=$(_book_path "$raw") || return 1
+    tmp=$(mktemp) || { print_warn "book_write: mktemp failed for ${raw}"; return 1; }
     case "$t" in
         bool|number) jq "${p} = ${v}" "$_BOOK" > "$tmp" 2>/dev/null ;;
         *) jq --arg v "$v" "${p} = \$v" "$_BOOK" > "$tmp" 2>/dev/null ;;
     esac
     if [[ -s "$tmp" ]] && jq empty "$tmp" 2>/dev/null; then
         mv "$tmp" "$_BOOK"; chmod 600 "$_BOOK"
-    else
-        rm -f "$tmp"
+        return 0
     fi
-    return 0
+    rm -f "$tmp"
+    print_warn "book_write failed: ${raw}"
+    return 1
 }
 
 book_write_obj() {
     _book_ok || return 0
-    local p="$1" obj="$2" tmp
-    [[ "$p" != .* ]] && p=".${p}"
-    tmp=$(mktemp)
+    local raw="$1" obj="$2" tmp p
+    p=$(_book_path "$raw") || return 1
+    tmp=$(mktemp) || { print_warn "book_write_obj: mktemp failed for ${raw}"; return 1; }
     jq --argjson obj "$obj" "${p} = \$obj" "$_BOOK" > "$tmp" 2>/dev/null
     if [[ -s "$tmp" ]] && jq empty "$tmp" 2>/dev/null; then
         mv "$tmp" "$_BOOK"; chmod 600 "$_BOOK"
-    else
-        rm -f "$tmp"
+        return 0
     fi
-    return 0
+    rm -f "$tmp"
+    print_warn "book_write_obj failed: ${raw}"
+    return 1
 }
 
 book_init() {
@@ -315,7 +433,7 @@ book_init() {
             "outline":{"installed":false,"server_ip":"","api_port":0,"mgmt_port":0,"keys_port":0,"manager_key_path":"/etc/outline/manager_key.json","api_url":"","installed_at":""},
             "3xui":{"installed":false,"version":"","server_ip":"","panel_port":0,"panel_path":"","panel_user":"","panel_pass":"","db_path":"","installed_at":""},
             "teamspeak":{"installed":false,"version":"","server_ip":"","voice_port":9987,"ft_port":30033,"threads":2,"priv_key":"","db_path":"/opt/teamspeak/tsserver.sqlitedb","installed_at":""},
-            "mumble":{"installed":false,"version":"","server_ip":"","port":64738,"superuser_set":false,"installed_at":""},
+            "mumble":{"installed":false,"version":"","server_ip":"","port":64738,"superuser_set":false,"superuser_pass":"","installed_at":""},
             "unbound":{"installed":false,"listen_ips":[]},
             "ufw":{"active":false},
             "mtproto":{"instances":{}},
@@ -338,6 +456,40 @@ ssh_get_port() {
         port=$(grep -oP '^\s*Port\s+\K[0-9]+' /etc/ssh/sshd_config 2>/dev/null | head -1)
     fi
     echo "${port:-22}"
+}
+
+# - эффективное значение PermitRootLogin: drop-in переопределяет sshd_config -
+ssh_get_permitrootlogin() {
+    local val
+    val=$(sshd -T 2>/dev/null | awk '/^permitrootlogin /{print $2; exit}')
+    if [[ -z "$val" ]]; then
+        val=$(grep -oP '^\s*PermitRootLogin\s+\K\S+' /etc/ssh/sshd_config 2>/dev/null | head -1)
+    fi
+    echo "${val:-yes}"
+}
+
+# - drop-in /etc/ssh/sshd_config.d/99-eli.conf: на Ubuntu cloud-init и Debian с -
+# - 50-cloud-init.conf правка sshd_config теряется. drop-in с приоритетом 99 -
+# - перекрывает любые существующие конфиги. -
+# - arg1: ключ (Port, PermitRootLogin, PasswordAuthentication, ...) -
+# - arg2: значение -
+# - инклюзив-проверка: создаёт Include sshd_config.d/*.conf если его нет в основном -
+ssh_apply_dropin() {
+    local key="$1" val="$2" dropin="/etc/ssh/sshd_config.d/99-eli.conf"
+    [[ -z "$key" || -z "$val" ]] && return 1
+    mkdir -p /etc/ssh/sshd_config.d
+    if [[ ! -f "$dropin" ]]; then
+        printf "# eli stack overrides\n" > "$dropin"
+    fi
+    # - убрать предыдущую запись по этому ключу (если была) и добавить новую -
+    sed -i "/^[[:space:]]*${key}[[:space:]]/Id" "$dropin"
+    printf '%s %s\n' "$key" "$val" >> "$dropin"
+    chmod 644 "$dropin"
+    # - sshd_config может не включать sshd_config.d/*.conf на старых системах -
+    if ! grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' /etc/ssh/sshd_config 2>/dev/null; then
+        printf '\nInclude /etc/ssh/sshd_config.d/*.conf\n' >> /etc/ssh/sshd_config
+    fi
+    return 0
 }
 
 ssh_restart() {
@@ -495,68 +647,69 @@ EODAEMON
     return 0
 }
 
+# --> BOOT: HELPER СОЗДАНИЯ SWAPFILE <--
+# - создать и активировать /swapfile заданного размера -
+# - fallocate работает не везде (ZFS/BTRFS/LXC), fallback на dd -
+_boot_create_swapfile() {
+    local size_mb="$1"
+    if [[ -f /swapfile ]]; then
+        local old_mb
+        old_mb=$(du -m /swapfile 2>/dev/null | awk '{print $1}')
+        if [[ "${old_mb:-0}" -ge "$size_mb" ]]; then
+            print_info "Swapfile уже есть нужного размера (${old_mb} MB)"
+            return 0
+        fi
+        print_info "Swapfile ${old_mb} MB меньше нужного, пересоздаём на ${size_mb} MB"
+        swapoff /swapfile 2>/dev/null || true
+        # - проверяем что swap действительно отключился -
+        if swapon --show 2>/dev/null | grep -q "/swapfile"; then
+            print_warn "Не удалось отключить /swapfile (RAM мало, swap активен)"
+            print_warn "Пропускаю пересоздание, текущий swap остаётся"
+            return 0
+        fi
+        rm -f /swapfile
+    fi
+    print_info "Создаём /swapfile ${size_mb} MB"
+    # - шаг 1: fallocate, если не сработал - fallback на dd -
+    if ! fallocate -l "${size_mb}M" /swapfile 2>/dev/null; then
+        print_info "fallocate не поддерживается на этой FS, fallback на dd"
+        if ! dd if=/dev/zero of=/swapfile bs=1M count="$size_mb" status=none 2>/dev/null; then
+            print_err "dd не смог создать /swapfile"
+            rm -f /swapfile
+            return 1
+        fi
+    fi
+    # - шаг 2: права строго 600, иначе mkswap даст warning и swapon может отказаться -
+    if ! chmod 600 /swapfile; then
+        print_err "chmod 600 /swapfile не удался"
+        rm -f /swapfile
+        return 1
+    fi
+    # - шаг 3: mkswap -
+    if ! mkswap /swapfile >/dev/null 2>&1; then
+        print_err "mkswap /swapfile не удался"
+        rm -f /swapfile
+        return 1
+    fi
+    # - шаг 4: swapon -
+    if ! swapon /swapfile 2>/dev/null; then
+        print_err "swapon /swapfile не удался"
+        rm -f /swapfile
+        return 1
+    fi
+    if ! grep -q "/swapfile" /etc/fstab; then
+        echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    fi
+    print_ok "Swapfile ${size_mb} MB создан и активирован"
+    return 0
+}
+
 # --> BOOT: НАСТРОЙКА SWAP <--
 # - минимум 448 MB swap, swappiness=20 -
 boot_setup_swap() {
     print_section "Настройка Swap"
 
     local swap_min_mb=448
-
-    # - создать и активировать /swapfile заданного размера -
-    # - fallocate работает не везде (ZFS/BTRFS/LXC), fallback на dd -
-    _boot_create_swapfile() {
-        local size_mb="$1"
-        if [[ -f /swapfile ]]; then
-            local old_mb
-            old_mb=$(du -m /swapfile 2>/dev/null | awk '{print $1}')
-            if [[ "${old_mb:-0}" -ge "$size_mb" ]]; then
-                print_info "Swapfile уже есть нужного размера (${old_mb} MB)"
-                return 0
-            fi
-            print_info "Swapfile ${old_mb} MB меньше нужного, пересоздаём на ${size_mb} MB"
-            swapoff /swapfile 2>/dev/null || true
-            # - проверяем что swap действительно отключился -
-            if swapon --show 2>/dev/null | grep -q "/swapfile"; then
-                print_warn "Не удалось отключить /swapfile (RAM мало, swap активен)"
-                print_warn "Пропускаю пересоздание, текущий swap остаётся"
-                return 0
-            fi
-            rm -f /swapfile
-        fi
-        print_info "Создаём /swapfile ${size_mb} MB"
-        # - шаг 1: fallocate, если не сработал - fallback на dd -
-        if ! fallocate -l "${size_mb}M" /swapfile 2>/dev/null; then
-            print_info "fallocate не поддерживается на этой FS, fallback на dd"
-            if ! dd if=/dev/zero of=/swapfile bs=1M count="$size_mb" status=none 2>/dev/null; then
-                print_err "dd не смог создать /swapfile"
-                rm -f /swapfile
-                return 1
-            fi
-        fi
-        # - шаг 2: права строго 600, иначе mkswap даст warning и swapon может отказаться -
-        if ! chmod 600 /swapfile; then
-            print_err "chmod 600 /swapfile не удался"
-            rm -f /swapfile
-            return 1
-        fi
-        # - шаг 3: mkswap -
-        if ! mkswap /swapfile >/dev/null 2>&1; then
-            print_err "mkswap /swapfile не удался"
-            rm -f /swapfile
-            return 1
-        fi
-        # - шаг 4: swapon -
-        if ! swapon /swapfile 2>/dev/null; then
-            print_err "swapon /swapfile не удался"
-            rm -f /swapfile
-            return 1
-        fi
-        if ! grep -q "/swapfile" /etc/fstab; then
-            echo '/swapfile none swap sw 0 0' >> /etc/fstab
-        fi
-        print_ok "Swapfile ${size_mb} MB создан и активирован"
-        return 0
-    }
 
     local active_swap_mb
     active_swap_mb=$(free -m | awk '/^Swap:/{print $2}')
@@ -674,8 +827,7 @@ boot_setup_ssh_port() {
     local new_port=""
     echo -e "  ${CYAN}Смена порта SSH защищает от массовых сканеров на порту 22.${NC}"
     echo -e "  ${CYAN}Рекомендуется: любой свободный порт в диапазоне 10000-60000.${NC}"
-    echo -ne "  ${BOLD}Новый порт SSH (Enter или 0 = оставить ${BOOT_SSH_PORT}):${NC} "
-    read -r new_port
+    ask_raw "$(printf '  \033[1mНовый порт SSH (Enter или 0 = оставить %s):\033[0m ' "$BOOT_SSH_PORT")" new_port
 
     if [[ -z "$new_port" || "$new_port" == "0" ]]; then
         print_info "Порт SSH остаётся: ${BOOT_SSH_PORT}"
@@ -687,30 +839,33 @@ boot_setup_ssh_port() {
         return 1
     fi
 
-    if ss -tnlp 2>/dev/null | grep -q ":${new_port} "; then
+    if ss -H -tln 2>/dev/null | grep -Eq "[:.]${new_port}[[:space:]]"; then
         print_err "Порт ${new_port} уже занят"
         return 1
     fi
 
     print_info "Новый порт SSH: ${new_port}"
 
-    local backup_file
-    backup_file="/etc/ssh/sshd_config.bak.$(date +%F_%H-%M-%S)"
-    cp /etc/ssh/sshd_config "$backup_file"
-    print_info "Бэкап: ${backup_file}"
-
-    sed -i "s/^#*\s*Port .*/Port ${new_port}/" /etc/ssh/sshd_config
-    grep -q "^Port " /etc/ssh/sshd_config || echo "Port ${new_port}" >> /etc/ssh/sshd_config
+    # - drop-in перекрывает /etc/ssh/sshd_config и /etc/ssh/sshd_config.d/50-cloud-init.conf -
+    ssh_apply_dropin "Port" "$new_port"
 
     if ! sshd -t 2>/dev/null; then
-        print_err "sshd_config содержит ошибки! Восстановление из бэкапа..."
-        cp "$backup_file" /etc/ssh/sshd_config
-        print_warn "Восстановлен: ${backup_file}"
+        print_err "sshd_config содержит ошибки! Откат drop-in..."
+        sed -i "/^[[:space:]]*Port[[:space:]]/Id" /etc/ssh/sshd_config.d/99-eli.conf 2>/dev/null
         return 1
     fi
     print_ok "sshd_config OK"
 
     ssh_restart
+    sleep 1
+
+    # - валидация: эффективное значение после restart должно совпадать -
+    local eff_port
+    eff_port=$(ssh_get_port)
+    if [[ "$eff_port" != "$new_port" ]]; then
+        print_err "SSH порт не применился: эффективный ${eff_port}, ожидался ${new_port}"
+        return 1
+    fi
     print_ok "SSH перезапущен на порту ${new_port}"
 
     BOOT_SSH_PORT="$new_port"
@@ -848,8 +1003,7 @@ boot_init_book() {
     book_write ".system.server_ip" \
         "$(curl -4 -fsSL --connect-timeout 5 ifconfig.me 2>/dev/null || echo '')"
     book_write ".system.ssh_port" "$BOOT_SSH_PORT" number
-    book_write ".system.permit_root_login" \
-        "$(grep -oP '^PermitRootLogin\s+\K\S+' /etc/ssh/sshd_config 2>/dev/null || echo 'yes')"
+    book_write ".system.permit_root_login" "$(ssh_get_permitrootlogin)"
 
     if _book_ok; then
         print_ok "book_of_Eli: /etc/vps-eli-stack/book_of_Eli.json"
@@ -984,27 +1138,30 @@ AWG_VER=""
 
 # --> AWG: ВЫБОР ВЕРСИИ ПРОТОКОЛА <--
 # - AWG 1.0 (H+S1/S2) vs AWG 1.5 (+ I1-I5) vs AWG 2.0 (+ ranged H, S3/S4, I1-I5) vs WG -
+# - Keenetic: 1.0 работает на KeeneticOS 4.2+, 1.5/2.0 требуют 5.1+ dev-канал -
 # - P/S хелпа AWG написана идиотом. я АтупеL пока читал -
 _awg_ask_version() {
     echo ""
     echo -e "  ${BOLD}Версия протокола:${NC}"
     echo -e "  ${GREEN}1)${NC} AWG 1.0 (classic) - H1-H4 + S1/S2 + Jc/Jmin/Jmax"
-    echo -e "     ${CYAN}Совместим с Keenetic 4.2+, OpenWrt, все старые клиенты.${NC}"
+    echo -e "     ${CYAN}Keenetic 4.2+ (стабильная), OpenWrt, все старые клиенты.${NC}"
     echo -e "  ${GREEN}2)${NC} AWG 1.5 - + I1-I5 (signature chain/CPS)"
-    echo -e "     ${CYAN}Keenetic 5.1+ Маскировка под реальный протокол (QUIC/DNS).${NC}"
+    echo -e "     ${CYAN}Keenetic 5.1+ dev-канал. Маскировка под DNS/STUN/SIP.${NC}"
     echo -e "  ${GREEN}3)${NC} AWG 2.0 - 1.5 + ranged H + S3/S4"
-    echo -e "     ${CYAN}Keenetic 5.1+, Amnezia 4.8.12.9+. Максимальная обфускация.${NC}"
+    echo -e "     ${CYAN}Keenetic 5.1+ dev-канал, Amnezia 4.8.12.9+. Максимальная обфускация.${NC}"
     echo -e "  ${GREEN}4)${NC} WireGuard vanilla - без обфускации"
-    echo -e "     ${CYAN}Совместим с любым WG клиентом.${NC}"
+    echo -e "     ${CYAN}Любой WG клиент. Легко детектится DPI.${NC}"
     while true; do
-        echo -ne "  ${BOLD}Выбор?${NC} "; read -r _awg_ver_ch
+        ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" _awg_ver_ch
         case "$_awg_ver_ch" in
             1) AWG_VER="1.0"; break ;;
             2) AWG_VER="1.5"
                print_info "AWG 1.5 требует клиент с поддержкой I1-I5"
+               print_info "Keenetic: только 5.1+ dev-канал (на 5.0.8 и ниже будет 'invalid H1 value')"
                break ;;
             3) AWG_VER="2.0"
                print_info "AWG 2.0 требует Amnezia 4.8.12.9+ или AmneziaWG 2.0.0+"
+               print_info "Keenetic: только 5.1+ dev-канал (на 5.0.8 и ниже будет 'invalid H1 value')"
                break ;;
             4) AWG_VER="wg"
                print_info "Обфускация отключена, все клиенты WireGuard совместимы"
@@ -1015,56 +1172,101 @@ _awg_ask_version() {
 }
 
 # --> AWG: ГЕНЕРАЦИЯ ОБФУСКАЦИИ <--
-# - общие параметры Jc/Jmin/Jmax/S1/S2 -
+# - общие параметры Jc/Jmin/Jmax/S1/S2 с учётом MTU -
+# - arg1: auto (yes/no), arg2: MTU (по умолчанию 1320) -
+# - AWG handshake overhead: init=148 байт, response=92 байт, IP+UDP headers=28 байт -
+# - Jmax <= MTU - 176 (148 + 28), S1 <= MTU - 148, S2 <= MTU - 92 -
+# - S1 != S2, S1 + 56 != S2, S2 + 56 != S1 (симметричное правило из kernel README) -
 _awg_gen_obf_common() {
     local auto="$1"
+    local mtu="${2:-1320}"
+    # - лимиты по MTU -
+    local jmax_limit=$(( mtu - 176 ))
+    local s1_limit=$(( mtu - 148 ))
+    local s2_limit=$(( mtu - 92 ))
+    # - верхние границы для auto 15..150, но не больше *_limit если MTU мизерный -
+    local s_hi=150
+    [[ "$s1_limit" -lt "$s_hi" ]] && s_hi="$s1_limit"
+    [[ "$s2_limit" -lt "$s_hi" ]] && s_hi="$s2_limit"
+
     if [[ "$auto" == "yes" ]]; then
-        OBF_JC=$(rand_range 3 10)
-        OBF_S1=$(rand_range 15 40)
-        # - S1 и S2 в диапазоне 15..40, S1+56 = 71..96 - пересечения никогда нет -
-        # - реально полезная проверка: S1 != S2 (одинаковые = хуже маскировка) -
-        local _att=0
-        while true; do
-            OBF_S2=$(rand_range 15 40)
-            [[ "$OBF_S2" -ne "$OBF_S1" ]] && break
-            (( _att++ )); [[ $_att -gt 10 ]] && break
+        OBF_JC=$(rand_range 4 12)
+        OBF_JMIN=$(rand_range 8 200)
+        OBF_JMAX=$(rand_range 200 "$jmax_limit")
+        # - Jmin должен быть строго меньше Jmax, сдвигаем если Jmin слишком близко -
+        [[ "$OBF_JMIN" -ge "$OBF_JMAX" ]] && OBF_JMIN=$(( OBF_JMAX / 2 ))
+
+        OBF_S1=$(rand_range 15 "$s_hi")
+        # - детерминированный выбор S2: строим список "свободных" значений из [15, s_hi] -
+        # - исключаем S1, S1+56, S1-56 (симметричная проверка из kernel README) -
+        local s1_plus=$(( OBF_S1 + 56 ))
+        local s1_minus=$(( OBF_S1 - 56 ))
+        local -a s2_valid=()
+        local v
+        for (( v=15; v<=s_hi; v++ )); do
+            [[ "$v" -eq "$OBF_S1" ]] && continue
+            [[ "$v" -eq "$s1_plus" ]] && continue
+            [[ "$v" -eq "$s1_minus" ]] && continue
+            s2_valid+=("$v")
         done
-        OBF_JMIN=$(rand_range 50 150)
-        OBF_JMAX=$(rand_range 500 1000)
+        # - список не может быть пустым: размер [15..s_hi] минимум 3 значения при MTU >= 1280 -
+        OBF_S2="${s2_valid[$(( RANDOM % ${#s2_valid[@]} ))]}"
     else
-        print_info "Правила: Jmin < Jmax, S1 != S2, H1-H4 разные"
-        echo -e "  ${CYAN}Jc - кол-во мусорных пакетов (больше = сложнее распознать VPN, но чуть больше трафика).${NC}"
-        echo -e "  ${CYAN}Jmin/Jmax - диапазон размера мусорных пакетов в байтах.${NC}"
-        echo -e "  ${CYAN}S1/S2 - сдвиг заголовков пакетов (диапазон 15-40, разные значения).${NC}"
-        ask "Jc (3-10)" "5" OBF_JC
-        # - Jmin < Jmax: иначе мусорные пакеты невалидны, AWG падает при старте -
+        print_info "Правила: Jmin < Jmax, S1 != S2, S1+56 != S2, S2+56 != S1"
+        echo -e "  ${CYAN}Jc - кол-во мусорных пакетов (рекомендуется 4-12, диапазон 1-128).${NC}"
+        echo -e "  ${CYAN}Jmin/Jmax - размер мусорных пакетов, Jmax <= ${jmax_limit} (MTU ${mtu} - 176).${NC}"
+        echo -e "  ${CYAN}S1 - padding init-пакета <= ${s1_limit}. S2 - padding response <= ${s2_limit}.${NC}"
+        # - Jc: 1-128 -
         while true; do
-            ask "Jmin (50-150)" "64" OBF_JMIN
-            ask "Jmax (500-1000)" "1000" OBF_JMAX
-            if [[ "$OBF_JMIN" =~ ^[0-9]+$ && "$OBF_JMAX" =~ ^[0-9]+$ ]] && (( OBF_JMIN < OBF_JMAX )); then
-                break
-            fi
-            print_err "Jmin должен быть меньше Jmax и оба числа. Повторите ввод"
+            ask "Jc (1-128)" "8" OBF_JC
+            [[ "$OBF_JC" =~ ^[0-9]+$ ]] && (( OBF_JC >= 1 && OBF_JC <= 128 )) && break
+            print_err "Jc должен быть целым от 1 до 128"
         done
-        # - S1 != S2: одинаковые значения ухудшают обфускацию -
-        ask "S1 (15-40)" "20" OBF_S1
+        # - Jmin < Jmax, Jmin >= 8, Jmax <= jmax_limit -
         while true; do
-            ask "S2 (15-40, != S1)" "20" OBF_S2
-            if [[ "$OBF_S2" =~ ^[0-9]+$ ]] && (( OBF_S2 != OBF_S1 )); then
+            ask "Jmin (8-${jmax_limit})" "64" OBF_JMIN
+            ask "Jmax (>Jmin, <=${jmax_limit})" "$(( jmax_limit > 1000 ? 1000 : jmax_limit ))" OBF_JMAX
+            if [[ "$OBF_JMIN" =~ ^[0-9]+$ && "$OBF_JMAX" =~ ^[0-9]+$ ]] \
+               && (( OBF_JMIN >= 8 && OBF_JMIN < OBF_JMAX && OBF_JMAX <= jmax_limit )); then
                 break
             fi
-            print_err "S2 должно быть числом и не равняться S1 (${OBF_S1}). Повторите ввод"
+            print_err "Нужно 8 <= Jmin < Jmax <= ${jmax_limit}. Повторите ввод"
+        done
+        # - S1 в диапазоне 0..s1_limit, рекомендуется 15-150 -
+        while true; do
+            ask "S1 (0-${s1_limit}, рекомендуется 15-150)" "20" OBF_S1
+            [[ "$OBF_S1" =~ ^[0-9]+$ ]] && (( OBF_S1 >= 0 && OBF_S1 <= s1_limit )) && break
+            print_err "S1 должно быть целым от 0 до ${s1_limit}"
+        done
+        # - S2 с симметричной проверкой -
+        while true; do
+            ask "S2 (0-${s2_limit}, S1±56 != S2)" "35" OBF_S2
+            if ! [[ "$OBF_S2" =~ ^[0-9]+$ ]] || (( OBF_S2 < 0 || OBF_S2 > s2_limit )); then
+                print_err "S2 должно быть целым от 0 до ${s2_limit}"
+                continue
+            fi
+            if (( OBF_S2 == OBF_S1 )); then
+                print_err "S2 не должно равняться S1 (${OBF_S1})"
+                continue
+            fi
+            if (( OBF_S2 == OBF_S1 + 56 )); then
+                print_err "S2 не должно равняться S1+56 (${OBF_S1}+56=$(( OBF_S1 + 56 )))"
+                continue
+            fi
+            if (( OBF_S2 + 56 == OBF_S1 )); then
+                print_err "S2+56 не должно равняться S1 (текущее S2+56=$(( OBF_S2 + 56 )), S1=${OBF_S1})"
+                continue
+            fi
+            break
         done
     fi
+    return 0
 }
 
 # --> AWG: ПРЕСЕТЫ CPS ДЛЯ I1 (реальные hex snapshots) <--
 # - I1 должен выглядеть как начало реального UDP-протокола для DPI-маскировки -
-# - взято из публичных примеров доки Amnezia и протокольных спецификаций -
-_awg_cps_preset_quic() {
-    # - QUIC Initial (RFC 9000) - маскирует под HTTP/3 -
-    echo "<b 0xc000000001><r 18><b 0x00><r 8><b 0x00040000040000000400><r 1100>"
-}
+# - QUIC preset удалён: структурно некорректен (RFC 9000 требует DCID/SCID/token_length как VarInt) -
+# - TLS ClientHello не делаем: TLS на UDP-порту аномален, хуже чем ничего -
 
 # - генератор hex DNS-запроса типа A для произвольного FQDN -
 # - формат: flags(0100) qd(0001) an(0000) ns(0000) ar(0000) QNAME qtype(0001) qclass(0001) -
@@ -1094,25 +1296,52 @@ AWG_DNS_DOMAINS=(
     "###Глобальные"
     "www.cloudflare.com|Global CDN, правдоподобен в любой стране"
     "www.google.com|Global поиск/Gmail, самый распространённый запрос"
-    "fonts.googleapis.com|Google Fonts, грузится с большинства сайтов"
-    "www.apple.com|Global Apple сервисы"
-    "www.microsoft.com|Global Windows/Office телеметрия"
-    "www.amazon.com|Global AWS и магазин"
-    "www.github.com|Global разработчики"
+    "www.google-analytics.com|Global Google Analytics, на половине сайтов"
+    "ssl.google-analytics.com|Global GA SSL endpoint"
+    "www.googletagmanager.com|Global Google Tag Manager"
+    "fonts.googleapis.com|Global Google Fonts API"
+    "fonts.gstatic.com|Global Google Fonts static"
+    "ajax.googleapis.com|Global Google Hosted Libraries"
+    "cdnjs.cloudflare.com|Global CDN JS библиотек"
+    "cdn.jsdelivr.net|Global jsDelivr CDN"
+    "unpkg.com|Global npm CDN"
+    "static.cloudflareinsights.com|Global Cloudflare аналитика"
+    "connect.facebook.net|Global Facebook SDK/пиксель"
+    "www.apple.com|Global Apple"
+    "configuration.apple.com|Global Apple config"
+    "gsp-ssl.ls.apple.com|Global Apple location"
+    "www.microsoft.com|Global Microsoft"
+    "ctldl.windowsupdate.com|Global Windows Update"
+    "v10.events.data.microsoft.com|Global Windows телеметрия"
+    "time.windows.com|Global Windows NTP"
+    "time.apple.com|Global Apple NTP"
+    "pool.ntp.org|Global NTP pool"
+    "www.amazon.com|Global Amazon"
+    "www.github.com|Global GitHub"
     "###Россия"
     "www.yandex.ru|Россия Яндекс"
-    "mc.yandex.ru|Россия Яндекс.Метрика (грузится с кучи сайтов)"
-    "www.vk.com|Россия VK соцсеть"
-    "www.mail.ru|Россия Mail.ru почта"
+    "mc.yandex.ru|Россия Яндекс.Метрика (на куче сайтов)"
+    "www.vk.com|Россия VK"
+    "www.mail.ru|Россия Mail.ru"
     "www.tinkoff.ru|Россия T-Банк"
+    "www.ozon.ru|Россия Ozon"
+    "www.wildberries.ru|Россия Wildberries"
+    "www.avito.ru|Россия Avito"
     "###СНГ / Средняя Азия"
     "www.kaspi.kz|Казахстан Kaspi банк"
-    "www.beeline.uz|Узбекистан Beeline оператор"
-    "www.onliner.by|Беларусь Onliner портал"
-    "list.am|Армения List.am объявления"
+    "www.beeline.uz|Узбекистан Beeline"
+    "www.onliner.by|Беларусь Onliner"
+    "list.am|Армения List.am"
     "###Турция"
     "www.trt.net.tr|Турция гос. медиа"
-    "www.hurriyet.com.tr|Турция Hurriyet новости"
+    "www.hurriyet.com.tr|Турция Hurriyet"
+    "www.trendyol.com|Турция Trendyol marketplace"
+    "www.sahibinden.com|Турция Sahibinden объявления"
+    "###Иран"
+    "www.digikala.com|Иран Digikala marketplace"
+    "www.divar.ir|Иран Divar объявления"
+    "www.aparat.com|Иран Aparat видеохостинг"
+    "www.snapp.ir|Иран Snapp такси"
     "###Европа"
     "www.bbc.co.uk|UK BBC"
     "www.spiegel.de|DE Spiegel"
@@ -1126,11 +1355,11 @@ AWG_DNS_DOMAINS=(
 
 # --> AWG: RAND_PORT ДЛЯ AWG-ИНТЕРФЕЙСА <--
 # - диапазон 1024-9999 (рекомендация Amnezia, провайдеры режут UDP на high-ports) -
-# - исключаем well-known зарезервированные порты -
+# - исключаем зарезервированные порты -
 _awg_port_blacklist() {
     local p="$1"
     case "$p" in
-        53|80|123|443|853|8080|8443|1194|1701|4500|5060|3478|3479|1812|1813|22|21|25|465|587|993|995|110|143|3306|5432|5900|5901|6881|6882|6883|6884|6885|6886|6887|6888|6889)
+        20|21|22|23|25|53|67|68|69|80|88|110|111|123|135|137|138|139|143|161|162|389|443|445|465|500|514|520|546|547|554|587|631|636|853|873|989|990|993|995|1080|1194|1433|1434|1521|1701|1723|1812|1813|1900|2049|2375|2376|3128|3306|3389|3478|3479|4500|5000|5001|5060|5061|51820|5353|5355|5432|5900|5901|6379|6881|6882|6883|6884|6885|6886|6887|6888|6889|8080|8081|8443|8888|9200|9300|10000|11211|27017|27018|27019)
             return 0 ;;
     esac
     return 1
@@ -1144,13 +1373,15 @@ rand_port_awg() {
         # - _rand_bits30 на /dev/urandom, корректно работает при span > 32767 -
         port=$(( low + $(_rand_bits30 "$span") ))
         if _awg_port_blacklist "$port"; then (( attempts++ )); continue; fi
-        if ! ss -ulnp 2>/dev/null | grep -q ":${port} " && \
-           ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+        # - ss без -p: процесс не нужен, -p может требовать прав в некоторых окружениях -
+        # - regex [:.] покрывает IPv4 (:port) и IPv6-в-mapped нотацию (.port) -
+        if ! ss -H -uln 2>/dev/null | grep -Eq "[:.]${port}[[:space:]]" && \
+           ! ss -H -tln 2>/dev/null | grep -Eq "[:.]${port}[[:space:]]"; then
             echo "$port"; return 0
         fi
         (( attempts++ ))
     done
-    echo "$port"; return 1
+    return 1
 }
 
 _awg_cps_preset_dns() {
@@ -1170,35 +1401,166 @@ _awg_cps_preset_dns() {
     echo "<r 2><b 0x${hex}>"
 }
 
+# --> AWG: ПУЛ ШАБЛОНОВ STUN <--
+# - STUN Binding Request (RFC 5389) с SOFTWARE attribute, имитирует реальные клиенты -
+# - NOFP: 32 байта, без FINGERPRINT. FP: 40 байт, с рандомным FINGERPRINT -
+# - FINGERPRINT в STUN это CRC32, AWG не умеет считать CRC на лету поэтому рандомный -
+# - глубокий DPI с проверкой CRC отбракует, статистический DPI пропустит -
+AWG_CPS_STUN_POOL_NOFP=(
+    "<b 0x0001000c2112a442><r 12><b 0x802200086c69626a696e676c>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200086963652d6c697465>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200084368726f6d69756d>"
+    "<b 0x0001000c2112a442><r 12><b 0x80220008636f7475726e2d34>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200085374756e53657276>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200084c6976654b697453>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200084a616e7573534655>"
+    "<b 0x0001000c2112a442><r 12><b 0x80220008417374657269736b>"
+    "<b 0x000100102112a442><r 12><b 0x80220009706a70726f6a656374000000>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200074a697473692d5800>"
+)
+
+AWG_CPS_STUN_POOL_FP=(
+    "<b 0x000100142112a442><r 12><b 0x802200086c69626a696e676c80280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200086963652d6c69746580280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200084368726f6d69756d80280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x80220008636f7475726e2d3480280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200085374756e5365727680280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200084c6976654b69745380280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200084a616e757353465580280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x80220008417374657269736b80280004><r 4>"
+    "<b 0x000100182112a442><r 12><b 0x80220009706a70726f6a65637400000080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200074a697473692d580080280004><r 4>"
+)
+
+# --> AWG: ПУЛ ШАБЛОНОВ SIP <--
+# - SIP INVITE (RFC 3261) с разными User-Agent: Asterisk, FreeSWITCH, Zoiper, Linphone, MicroSIP, 3CX, X-Lite -
+# - размер 285-310 байт, влезает в MTU 1280+ с запасом -
+# - переменные: user (<rc 8>), domain (<rc 12>), IP октеты (<rd 2>), branch (<rd 10>), tag (<rd 8>), Call-ID (<rc 16>) -
+AWG_CPS_SIP_POOL=(
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a63616c6c657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x40><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a20417374657269736b205042582031382e32302e300d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a202245787422203c7369703a65787440><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a20467265655357495443482d6d6f645f736f6669612f312e31302e31310d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x3b72706f72740d0a46726f6d3a203c7369703a7573657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a205a6f69706572207276322e31302e32302e340d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a7573657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x0d0a435365713a20323020494e564954450d0a557365722d4167656e743a204c696e70686f6e652f352e332e300d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b72706f72743b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a7573657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a204d6963726f5349502f332e32312e330d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a7573657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a2033435850686f6e652f31382e302e300d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a7573657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a206579654265616d2072656c656173652033303033660d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+)
+
 _awg_cps_preset_stun() {
-    # - STUN binding request (RFC 5389) - маскирует под STUN (WebRTC) -
-    echo "<b 0x000100002112a442><r 12>"
+    # - STUN Binding Request (RFC 5389) с SOFTWARE - маскировка под WebRTC/VoIP -
+    # - аргумент: fp=yes - использовать пул с рандомным FINGERPRINT (40 байт), иначе NOFP (32 байта) -
+    local fp="${1:-no}"
+    local -a pool
+    if [[ "$fp" == "yes" ]]; then
+        pool=("${AWG_CPS_STUN_POOL_FP[@]}")
+    else
+        pool=("${AWG_CPS_STUN_POOL_NOFP[@]}")
+    fi
+    echo "${pool[$(( RANDOM % ${#pool[@]} ))]}"
+}
+
+_awg_cps_preset_sip() {
+    # - SIP INVITE с User-Agent реального SIP-клиента - маскировка под VoIP сигналинг -
+    # - случайный шаблон из AWG_CPS_SIP_POOL -
+    echo "${AWG_CPS_SIP_POOL[$(( RANDOM % ${#AWG_CPS_SIP_POOL[@]} ))]}"
+}
+
+# --> AWG: ВАЛИДАЦИЯ CPS-СТРОК <--
+# - проверяет корректность CPS для I1..I5, вызывается при manual-вводе -
+# - разрешённые теги: <b 0xHEX>, <r N>, <rd N>, <rc N>, <t> -
+# - <c> явно запрещён: не реализован в amneziawg-go (issue #120) -
+# - возвращает 0 если OK, 1 если ошибка (сообщение в stderr) -
+_awg_cps_validate() {
+    local s="$1"
+    [[ -z "$s" ]] && return 0
+
+    # - баланс < и > -
+    local opens closes
+    opens=$(tr -cd '<' <<< "$s" | wc -c)
+    closes=$(tr -cd '>' <<< "$s" | wc -c)
+    if [[ "$opens" -ne "$closes" ]]; then
+        echo "CPS: несбалансированные скобки < > (<=${opens}, >=${closes})" >&2
+        return 1
+    fi
+
+    # - проход по тегам: все подстроки вида <...> -
+    local tag rest="$s"
+    while [[ "$rest" =~ \<([^\<\>]*)\> ]]; do
+        tag="${BASH_REMATCH[1]}"
+        rest="${rest#*>}"
+        case "$tag" in
+            t)
+                : ;;
+            c)
+                echo "CPS: тег <c> (packet counter) не реализован в amneziawg-go, нельзя использовать" >&2
+                return 1
+                ;;
+            "b 0x"*)
+                local hex="${tag#b 0x}"
+                if ! [[ "$hex" =~ ^[0-9a-fA-F]+$ ]]; then
+                    echo "CPS: <b 0x${hex}> содержит не-hex символы" >&2
+                    return 1
+                fi
+                if (( ${#hex} % 2 != 0 )); then
+                    echo "CPS: <b 0x${hex}> имеет нечётное кол-во hex-символов (${#hex})" >&2
+                    return 1
+                fi
+                ;;
+            "r "*|"rd "*|"rc "*)
+                local n="${tag##* }"
+                if ! [[ "$n" =~ ^[0-9]+$ ]] || (( n < 1 )); then
+                    echo "CPS: <${tag}> - N должно быть положительным целым" >&2
+                    return 1
+                fi
+                ;;
+            *)
+                echo "CPS: неизвестный тег <${tag}>. Разрешены: <b 0xHEX>, <r N>, <rd N>, <rc N>, <t>" >&2
+                return 1
+                ;;
+        esac
+    done
+
+    # - вне тегов не должно быть других < или > -
+    local stripped
+    stripped=$(echo "$s" | sed -E 's/<[^<>]*>//g')
+    if [[ "$stripped" == *'<'* || "$stripped" == *'>'* ]]; then
+        echo "CPS: лишние < или > вне тегов" >&2
+        return 1
+    fi
+    # - CPS должен состоять только из тегов, текст вне тегов невалиден -
+    if [[ -n "$stripped" ]]; then
+        echo "CPS: текст вне тегов не разрешён ('${stripped}'). Используйте <b 0xHEX> для ASCII" >&2
+        return 1
+    fi
+    return 0
 }
 
 # - описание пресетов для интерактивного выбора -
 # - показывает как работает, где реалистично, какие риски -
 _awg_preset_desc() {
     case "$1" in
-        quic)
-            echo "    Как работает: первый пакет имитирует QUIC Initial (HTTP/3 handshake)."
-            echo "    Реалистично: браузеры Chrome/Safari активно используют HTTP/3, много трафика."
-            echo "    Риски: DPI с глубокой проверкой QUIC увидит что пакет не продолжает QUIC"
-            echo "           сессию (нет ACK, нет валидных QUIC фреймов). Но для статистического"
-            echo "           DPI выглядит нормально."
-            ;;
         dns)
-            echo "    Как работает: первый пакет имитирует DNS query типа A к выбранному домену."
-            echo "    Реалистично: DNS-трафик есть всегда и везде, самый банальный протокол."
-            echo "    Риски: DNS обычно идёт на порт 53 или DoH/DoT. Запрос с AWG-порта на DNS-домен"
-            echo "           через нестандартный порт = слабый признак аномалии. Плюс домен"
-            echo "           отправляется всегда одинаковый - потенциальный фингерпринт."
+            echo "    Как работает: I1 имитирует DNS query типа A к выбранному домену."
+            echo "    Реалистично: DNS-трафик есть всегда, самый банальный протокол."
+            echo "    Риски: DNS обычно идёт на порт 53, запрос на AWG-порту = аномалия для"
+            echo "           современного DPI. Оставлен как fallback, базовые блокировки обходит,"
+            echo "           глубокий DPI (Иран, Китай, РФ 2024+) детектит."
             ;;
         stun)
-            echo "    Как работает: первый пакет имитирует STUN binding request (WebRTC)."
-            echo "    Реалистично: WebRTC активно используется (видеозвонки, голосовые, Telegram calls)."
-            echo "    Риски: STUN короткий (20 байт base), редко летит на случайные порты. Подделка"
-            echo "           пакета STUN от реального трафика WebRTC-сессии отличается отсутствием"
-            echo "           ответа от STUN-сервера."
+            echo "    Как работает: I1 имитирует STUN Binding Request с SOFTWARE attribute."
+            echo "    Реалистично: WebRTC активно используется (звонки, Telegram, Zoom), STUN"
+            echo "           регулярно летит на рандомные порты. Пул 10 шаблонов (libjingle, coturn,"
+            echo "           Chromium, Asterisk и т.д.) - каждый клиент получает случайный."
+            echo "    Риски: глубокий DPI с CRC32-валидацией FINGERPRINT отбракует (если включить FP),"
+            echo "           статистический DPI пропустит. Дефолт по проекту."
+            ;;
+        sip)
+            echo "    Как работает: I1 имитирует SIP INVITE с User-Agent реального клиента."
+            echo "    Реалистично: SIP-сигналинг в VoIP трафике, ~300 байт - типичный размер"
+            echo "           INVITE. Пул 7 шаблонов (Asterisk, FreeSWITCH, Zoiper, Linphone,"
+            echo "           MicroSIP, 3CX, X-Lite) с рандомными user/domain/Call-ID/branch/tag."
+            echo "    Риски: SIP обычно tcp/5060 или udp/5060. На высоких UDP-портах SIP редкий,"
+            echo "           но не невозможный (NAT traversal). На MTU<1420 пакет близко к границе."
             ;;
     esac
 }
@@ -1216,44 +1578,71 @@ _awg_cps_random() {
 }
 
 # --> AWG: ГЕНЕРАЦИЯ I1-I5 <--
-# - auto: для 1.5/2.0 показываем меню выбора пресета (дефолт DNS) + домена (дефолт cloudflare) -
-# - manual: полный ручной ввод с описаниями пресетов и выбор домена для DNS -
+# - auto: меню выбора пресета (DNS / STUN / SIP), дефолт STUN -
+# - STUN: дополнительный вопрос про FINGERPRINT (рандомный CRC32) -
+# - SIP: warning если MTU<1420 (но работает на любом MTU≥1280) -
+# - DNS: warning что уязвимо к современному DPI -
 # - I1 обязателен для 1.5/2.0, I2-I5 - случайные CPS для энтропии -
+# - MTU берётся из переменной окружения TUNNEL_MTU_CURRENT (устанавливается в install flow) -
 _awg_gen_i_packets() {
     local auto="$1"
+    local mtu="${TUNNEL_MTU_CURRENT:-0}"
     OBF_I1=""; OBF_I2=""; OBF_I3=""; OBF_I4=""; OBF_I5=""
 
     if [[ "$auto" == "yes" ]]; then
-        # - даже в auto пользователь выбирает пресет и домен один раз при установке -
         echo ""
         echo -e "  ${CYAN}I1 - первый пакет маскировки. Выбери под что маскировать handshake.${NC}"
         echo ""
-        echo -e "  ${GREEN}q)${NC} ${BOLD}QUIC${NC} (HTTP/3 handshake)"
-        echo -e "  ${GREEN}d)${NC} ${BOLD}DNS${NC} (DNS запрос типа A) ${YELLOW}[дефолт]${NC}"
-        echo -e "  ${GREEN}s)${NC} ${BOLD}STUN${NC} (WebRTC binding)"
+        echo -e "  ${GREEN}s)${NC} ${BOLD}STUN${NC} (WebRTC Binding Request) ${YELLOW}[дефолт]${NC}"
+        echo -e "  ${GREEN}p)${NC} ${BOLD}SIP${NC} (VoIP INVITE)"
+        echo -e "  ${GREEN}d)${NC} ${BOLD}DNS${NC} (DNS query, fallback - уязвим к современному DPI)"
         echo ""
         local _ch=""
         while true; do
-            echo -ne "  ${BOLD}Пресет?${NC} [d]: "; read -r _ch
-            case "${_ch:-d}" in
-                q|Q) AWG_I1_PRESET="quic"; break ;;
-                d|D) AWG_I1_PRESET="dns";  break ;;
+            ask_raw "$(printf '  \033[1mПресет?\033[0m [s]: ')" _ch
+            case "${_ch:-s}" in
                 s|S) AWG_I1_PRESET="stun"; break ;;
-                *) print_warn "q, d или s" ;;
+                p|P) AWG_I1_PRESET="sip";  break ;;
+                d|D) AWG_I1_PRESET="dns";  break ;;
+                *) print_warn "s, p или d" ;;
             esac
         done
 
         case "$AWG_I1_PRESET" in
-            quic) OBF_I1=$(_awg_cps_preset_quic); print_info "I1 пресет: quic" ;;
+            stun)
+                local _fp=""
+                echo ""
+                echo -e "  ${CYAN}STUN FINGERPRINT attribute (опциональный CRC32):${NC}"
+                echo -e "  ${CYAN}  без FP: 32 байта, проще, реже палится на кривых DPI${NC}"
+                echo -e "  ${CYAN}  с рандомным FP: 40 байт, реалистичнее (coturn/libjingle всегда пишут FP),${NC}"
+                echo -e "  ${CYAN}                  но DPI с проверкой CRC32 (Китай GFW) отбракует${NC}"
+                ask_yn "Включить FINGERPRINT (рекомендуется кроме Китая)" "y" _fp
+                if [[ "$_fp" == "yes" ]]; then
+                    OBF_I1=$(_awg_cps_preset_stun yes); print_info "I1 пресет: stun + FP"
+                else
+                    OBF_I1=$(_awg_cps_preset_stun no);  print_info "I1 пресет: stun без FP"
+                fi
+                ;;
+            sip)
+                if [[ "$mtu" -gt 0 && "$mtu" -lt 1420 ]]; then
+                    print_warn "MTU ${mtu} < 1420: SIP-пакет (~300 байт) близко к границе MTU"
+                    print_info "Работать будет, но при глубокой фрагментации handshake может ломаться"
+                    print_info "Рекомендуется MTU 1420 для чистого Ethernet. Отменить? (n = продолжить с SIP)"
+                    local _cont=""
+                    ask_yn "Всё равно использовать SIP?" "y" _cont
+                    [[ "$_cont" != "yes" ]] && { AWG_I1_PRESET="stun"; OBF_I1=$(_awg_cps_preset_stun no); print_info "Откат на STUN без FP"; }
+                fi
+                [[ -z "$OBF_I1" ]] && { OBF_I1=$(_awg_cps_preset_sip); print_info "I1 пресет: sip"; }
+                ;;
             dns)
+                print_warn "DNS preset уязвим к современному DPI (Иран, Китай, РФ 2024+)"
+                print_info "Работает против базовых блокировок (Казахстан, Беларусь, старые сети)"
                 _awg_choose_dns_domain
                 OBF_I1=$(_awg_cps_preset_dns "$AWG_DNS_SELECTED")
                 print_info "I1 пресет: dns (${AWG_DNS_SELECTED})"
                 ;;
-            stun) OBF_I1=$(_awg_cps_preset_stun); print_info "I1 пресет: stun" ;;
         esac
 
-        # - I2-I5 случайные CPS для энтропии -
         OBF_I2=$(_awg_cps_random 2)
         OBF_I3=$(_awg_cps_random 3)
         OBF_I4=$(_awg_cps_random 4)
@@ -1265,32 +1654,61 @@ _awg_gen_i_packets() {
         echo -e "  ${CYAN}Оставь пустым для пропуска пакета. I1 пустой = отключение CPS целиком.${NC}"
         echo ""
         echo -e "  ${BOLD}Готовые пресеты для I1:${NC}"
-        echo -e "  ${GREEN}q)${NC} ${BOLD}QUIC Initial${NC} (маскировка под HTTP/3)"
-        _awg_preset_desc quic
-        echo ""
-        echo -e "  ${GREEN}d)${NC} ${BOLD}DNS query${NC} (маскировка под DNS)"
-        _awg_preset_desc dns
-        echo ""
-        echo -e "  ${GREEN}s)${NC} ${BOLD}STUN${NC} (маскировка под WebRTC)"
+        echo -e "  ${GREEN}s)${NC} ${BOLD}STUN${NC} (WebRTC Binding Request)"
         _awg_preset_desc stun
+        echo ""
+        echo -e "  ${GREEN}p)${NC} ${BOLD}SIP${NC} (VoIP INVITE)"
+        _awg_preset_desc sip
+        echo ""
+        echo -e "  ${GREEN}d)${NC} ${BOLD}DNS${NC} (DNS query - fallback, уязвим к современному DPI)"
+        _awg_preset_desc dns
         echo ""
         echo -e "  ${GREEN}m)${NC} ${BOLD}Ввести вручную${NC}"
         echo ""
         local _ch=""
         while true; do
-            echo -ne "  ${BOLD}Выбор для I1?${NC} [q]: "; read -r _ch
-            case "${_ch:-q}" in
-                q|Q) OBF_I1=$(_awg_cps_preset_quic); break ;;
-                d|D) _awg_choose_dns_domain; OBF_I1=$(_awg_cps_preset_dns "$AWG_DNS_SELECTED"); break ;;
-                s|S) OBF_I1=$(_awg_cps_preset_stun); break ;;
-                m|M) ask "I1 (CPS)" "" OBF_I1; break ;;
-                *) print_warn "q, d, s или m" ;;
+            ask_raw "$(printf '  \033[1mВыбор для I1?\033[0m [s]: ')" _ch
+            case "${_ch:-s}" in
+                s|S)
+                    local _fp=""
+                    ask_yn "Включить FINGERPRINT в STUN (рекомендуется кроме Китая)" "y" _fp
+                    if [[ "$_fp" == "yes" ]]; then
+                        OBF_I1=$(_awg_cps_preset_stun yes)
+                    else
+                        OBF_I1=$(_awg_cps_preset_stun no)
+                    fi
+                    break ;;
+                p|P)
+                    if [[ "$mtu" -gt 0 && "$mtu" -lt 1420 ]]; then
+                        print_warn "MTU ${mtu} < 1420: SIP-пакет ~300 байт близко к границе"
+                    fi
+                    OBF_I1=$(_awg_cps_preset_sip); break ;;
+                d|D)
+                    print_warn "DNS preset уязвим к современному DPI"
+                    _awg_choose_dns_domain
+                    OBF_I1=$(_awg_cps_preset_dns "$AWG_DNS_SELECTED")
+                    break ;;
+                m|M)
+                    while true; do
+                        ask "I1 (CPS)" "" OBF_I1
+                        if _awg_cps_validate "$OBF_I1"; then break; fi
+                        print_err "Исправьте CPS-строку и повторите"
+                    done
+                    break ;;
+                *) print_warn "s, p, d или m" ;;
             esac
         done
-        ask "I2 (CPS, пусто = пропустить)" "$(_awg_cps_random 2)" OBF_I2
-        ask "I3 (CPS, пусто = пропустить)" "$(_awg_cps_random 3)" OBF_I3
-        ask "I4 (CPS, пусто = пропустить)" "$(_awg_cps_random 4)" OBF_I4
-        ask "I5 (CPS, пусто = пропустить)" "$(_awg_cps_random 5)" OBF_I5
+        # - I2-I5: manual с валидацией, пустое = пропустить -
+        local _iv=""
+        for _iv in 2 3 4 5; do
+            while true; do
+                ask "I${_iv} (CPS, пусто = пропустить)" "$(_awg_cps_random "$_iv")" "OBF_I${_iv}"
+                local -n _cur_i="OBF_I${_iv}"
+                if _awg_cps_validate "$_cur_i"; then unset -n _cur_i; break; fi
+                print_err "Исправьте I${_iv} и повторите"
+                unset -n _cur_i
+            done
+        done
     fi
 }
 
@@ -1333,7 +1751,7 @@ _awg_choose_dns_domain() {
 
     local sel=""
     while true; do
-        echo -ne "  ${BOLD}Номер (1-${rand_num})?${NC} [${default_num}]: "; read -r sel
+        ask_raw "$(printf '  \033[1mНомер (1-%s)?\033[0m [%s]: ' "$rand_num" "$default_num")" sel
         [[ -z "$sel" ]] && sel="$default_num"
         if ! [[ "$sel" =~ ^[0-9]+$ ]] || [[ "$sel" -lt 1 || "$sel" -gt "$rand_num" ]]; then
             print_warn "Введи число от 1 до ${rand_num}"
@@ -1365,23 +1783,33 @@ _awg_choose_dns_domain() {
 }
 
 # - AWG 1.0: H1-H4 одиночные значения, без I1-I5 -
+# - arg1: auto, arg2: MTU -
 _awg_gen_obf_v1() {
     local auto="$1"
-    _awg_gen_obf_common "$auto"
+    local mtu="${2:-1320}"
+    _awg_gen_obf_common "$auto" "$mtu"
     OBF_S3=""; OBF_S4=""
     OBF_I1=""; OBF_I2=""; OBF_I3=""; OBF_I4=""; OBF_I5=""
     if [[ "$auto" == "yes" ]]; then
+        # - rand_h теперь гарантирует >= 5 (значения 1..4 зарезервированы vanilla WG) -
         OBF_H1=$(rand_h); OBF_H2=$(rand_h); OBF_H3=$(rand_h); OBF_H4=$(rand_h)
         while [[ "$OBF_H2" == "$OBF_H1" ]]; do OBF_H2=$(rand_h); done
         while [[ "$OBF_H3" == "$OBF_H1" || "$OBF_H3" == "$OBF_H2" ]]; do OBF_H3=$(rand_h); done
         while [[ "$OBF_H4" == "$OBF_H1" || "$OBF_H4" == "$OBF_H2" || "$OBF_H4" == "$OBF_H3" ]]; do OBF_H4=$(rand_h); done
     else
-        echo -e "  ${CYAN}H1-H4 - магические числа в заголовках. Должны быть разными. Любые целые числа.${NC}"
-        # - цикл до корректного набора: все 4 числа и все 4 различны -
+        echo -e "  ${CYAN}H1-H4 - магические числа в заголовках, >= 5 (1..4 зарезервированы vanilla WG).${NC}"
+        echo -e "  ${CYAN}Должны быть все разными. Рекомендуемый диапазон 5..2147483647.${NC}"
         while true; do
-            ask "H1" "1" OBF_H1; ask "H2" "2" OBF_H2; ask "H3" "3" OBF_H3; ask "H4" "4" OBF_H4
+            ask "H1" "$(rand_h)" OBF_H1
+            ask "H2" "$(rand_h)" OBF_H2
+            ask "H3" "$(rand_h)" OBF_H3
+            ask "H4" "$(rand_h)" OBF_H4
             if ! [[ "$OBF_H1" =~ ^[0-9]+$ && "$OBF_H2" =~ ^[0-9]+$ && "$OBF_H3" =~ ^[0-9]+$ && "$OBF_H4" =~ ^[0-9]+$ ]]; then
                 print_err "H1-H4 должны быть целыми числами"
+                continue
+            fi
+            if (( OBF_H1 < 5 || OBF_H2 < 5 || OBF_H3 < 5 || OBF_H4 < 5 )); then
+                print_err "H1-H4 должны быть >= 5 (значения 1..4 зарезервированы vanilla WG)"
                 continue
             fi
             if [[ "$OBF_H1" == "$OBF_H2" || "$OBF_H1" == "$OBF_H3" || "$OBF_H1" == "$OBF_H4" \
@@ -1395,10 +1823,12 @@ _awg_gen_obf_v1() {
 }
 
 # - AWG 1.5: H1-H4 одиночные + I1-I5 -
+# - arg1: auto, arg2: MTU -
 _awg_gen_obf_v15() {
     local auto="$1"
-    _awg_gen_obf_v1 "$auto"
-    _awg_gen_i_packets "$auto"
+    local mtu="${2:-1320}"
+    _awg_gen_obf_v1 "$auto" "$mtu"
+    TUNNEL_MTU_CURRENT="$mtu" _awg_gen_i_packets "$auto"
 }
 
 # - проверка пересечения диапазонов "min-max": возвращает 0 если пересекаются -
@@ -1418,62 +1848,138 @@ _awg_ranges_overlap() {
 }
 
 # - AWG 2.0: S3/S4 + ranged H1-H4 + I1-I5 -
+# - arg1: auto, arg2: MTU -
+# - S3 (cookie packet padding): рекомендованный и технический диапазон 0-64 -
+# - S4 (transport packet padding): рекомендованный и технический диапазон 0-32 -
+# - S3 != S4, S3 + 56 != S4, S4 + 56 != S3 (симметрично S1/S2, по аналогии) -
+# - H1-H4 ranged: 4 равные зоны по ~500M в пространстве [5, 2^31-1] -
+# - в каждой зоне под-диапазон ширины 100-1000, зоны не пересекаются 'задумано' -
 _awg_gen_obf_v2() {
     local auto="$1"
-    _awg_gen_obf_common "$auto"
+    local mtu="${2:-1320}"
+    _awg_gen_obf_common "$auto" "$mtu"
+    local s3_limit=64 s4_limit=32
+
+    # - 4 равные зоны H1-H4, по ~500M значений, by design не пересекаются -
+    local _zones=("5 500000000" "500000001 1000000000" "1000000001 1500000000" "1500000001 2147483647")
+
+    # - локальный хелпер: случайный under-диапазон ширины 100-1000 в пределах [lo, hi] -
+    _awg_h_subrange() {
+        local lo="$1" hi="$2" span start
+        span=$(rand_range 100 1000)
+        start=$(rand_range "$lo" $(( hi - span )))
+        printf '%s-%s\n' "$start" $(( start + span ))
+    }
+
     if [[ "$auto" == "yes" ]]; then
-        OBF_S3=$(rand_range 15 40)
-        OBF_S4=$(rand_range 15 40)
-        # - 4 сегмента разных порядков, гарантированно не пересекаются -
-        # - контрольная проверка ниже: требование Amnezia 2.0, 'раз в год и палка стреляет' -
-        local _segs=("1000 90000" "100000 900000" "1000000 9000000" "10000000 90000000")
-        local _gen_att=0
-        while true; do
-            local _ord=(0 1 2 3) _i _j _tmp
-            for (( _i=3; _i>0; _i-- )); do
-                _j=$(( RANDOM % (_i + 1) ))
-                _tmp=${_ord[$_i]}; _ord[$_i]=${_ord[$_j]}; _ord[$_j]=$_tmp
-            done
-            local _n=1 _lo _hi _si
-            for _si in "${_ord[@]}"; do
-                read -r _lo _hi <<< "${_segs[$_si]}"
-                printf -v "OBF_H${_n}" '%s' "$(rand_h_range "$_lo" "$_hi")"
-                _n=$(( _n + 1 ))
-            done
-            # - контроль непересечения всех 6 пар -
-            local _ok="yes" _pair
-            for _pair in "H1:H2" "H1:H3" "H1:H4" "H2:H3" "H2:H4" "H3:H4"; do
-                local _a="${_pair%:*}" _b="${_pair#*:}"
-                local -n _av_ref="OBF_${_a}"
-                local -n _bv_ref="OBF_${_b}"
-                if _awg_ranges_overlap "$_av_ref" "$_bv_ref"; then
-                    _ok="no"; unset -n _av_ref _bv_ref; break
-                fi
-                unset -n _av_ref _bv_ref
-            done
-            [[ "$_ok" == "yes" ]] && break
-            (( _gen_att++ ))
-            if [[ "$_gen_att" -ge 10 ]]; then
-                print_warn "H1-H4 auto: не удалось исключить пересечение за 10 попыток, оставляю как есть"
-                break
+        # - S3: 0..64, исключая 0 для маскировки (0 = отсутствие паддинга, палится) -
+        OBF_S3=$(rand_range 1 "$s3_limit")
+        # - S4: 0..32 с исключениями S3, S3-56, S3+56 (симметричные правила по аналогии с S1/S2) -
+        local s3_plus=$(( OBF_S3 + 56 ))
+        local s3_minus=$(( OBF_S3 - 56 ))
+        local -a s4_valid=() v
+        for (( v=1; v<=s4_limit; v++ )); do
+            [[ "$v" -eq "$OBF_S3" ]] && continue
+            [[ "$v" -eq "$s3_plus" ]] && continue
+            [[ "$v" -eq "$s3_minus" ]] && continue
+            s4_valid+=("$v")
+        done
+        # - диапазон [1..32] минус максимум 3 значения = минимум 29 вариантов, пустым не будет -
+        OBF_S4="${s4_valid[$(( RANDOM % ${#s4_valid[@]} ))]}"
+
+        # - случайное назначение зон к H1..H4 через shuffle (Fisher-Yates) -
+        local _ord=(0 1 2 3) _i _j _tmp
+        for (( _i=3; _i>0; _i-- )); do
+            _j=$(( RANDOM % (_i + 1) ))
+            _tmp=${_ord[$_i]}; _ord[$_i]=${_ord[$_j]}; _ord[$_j]=$_tmp
+        done
+        local _n=1 _lo _hi _si
+        for _si in "${_ord[@]}"; do
+            read -r _lo _hi <<< "${_zones[$_si]}"
+            printf -v "OBF_H${_n}" '%s' "$(_awg_h_subrange "$_lo" "$_hi")"
+            _n=$(( _n + 1 ))
+        done
+        # - defensive: зоны by design не пересекаются, но если что-то пойдёт не так - ловим -
+        local _pair _a _b
+        for _pair in "H1:H2" "H1:H3" "H1:H4" "H2:H3" "H2:H4" "H3:H4"; do
+            _a="${_pair%:*}"; _b="${_pair#*:}"
+            local -n _av_ref="OBF_${_a}"
+            local -n _bv_ref="OBF_${_b}"
+            if _awg_ranges_overlap "$_av_ref" "$_bv_ref"; then
+                print_warn "H-зоны auto: неожиданное пересечение ${_a}(${_av_ref}) и ${_b}(${_bv_ref})"
             fi
+            unset -n _av_ref _bv_ref
         done
     else
-        echo -e "  ${CYAN}S3/S4 - дополнительные сдвиги заголовков для AWG 2.0 (15-40).${NC}"
-        ask "S3 (15-40)" "20" OBF_S3; ask "S4 (15-40)" "20" OBF_S4
-        echo -e "  ${CYAN}H1-H4 - диапазоны магических чисел в формате min-max.${NC}"
-        echo -e "  ${CYAN}Диапазоны не должны пересекаться между собой.${NC}"
-        local _att=0
+        echo -e "  ${CYAN}S3 (cookie padding) 0-${s3_limit}, S4 (transport padding) 0-${s4_limit}.${NC}"
+        echo -e "  ${CYAN}S3 != S4, S3+56 != S4, S4+56 != S3 (симметричное правило).${NC}"
         while true; do
-            ask "H1 (min-max)" "1000-50000" OBF_H1
-            ask "H2 (min-max)" "100000-500000" OBF_H2
-            ask "H3 (min-max)" "1000000-5000000" OBF_H3
-            ask "H4 (min-max)" "10000000-50000000" OBF_H4
-            # - проверяем все пары на пересечение -
+            ask "S3 (0-${s3_limit})" "20" OBF_S3
+            [[ "$OBF_S3" =~ ^[0-9]+$ ]] && (( OBF_S3 >= 0 && OBF_S3 <= s3_limit )) && break
+            print_err "S3 должно быть целым от 0 до ${s3_limit}"
+        done
+        while true; do
+            ask "S4 (0-${s4_limit})" "15" OBF_S4
+            if ! [[ "$OBF_S4" =~ ^[0-9]+$ ]] || (( OBF_S4 < 0 || OBF_S4 > s4_limit )); then
+                print_err "S4 должно быть целым от 0 до ${s4_limit}"
+                continue
+            fi
+            if (( OBF_S4 == OBF_S3 )); then
+                print_err "S4 не должно равняться S3 (${OBF_S3})"
+                continue
+            fi
+            if (( OBF_S4 == OBF_S3 + 56 )); then
+                print_err "S4 не должно равняться S3+56"
+                continue
+            fi
+            if (( OBF_S4 + 56 == OBF_S3 )); then
+                print_err "S4+56 не должно равняться S3"
+                continue
+            fi
+            break
+        done
+        echo -e "  ${CYAN}H1-H4 - диапазоны магических чисел в формате min-max, >= 5, ширина 100-1000.${NC}"
+        echo -e "  ${CYAN}Диапазоны не должны пересекаться между собой.${NC}"
+        # - дефолты из 4 равных зон, корректные start-end -
+        local _d1 _d2 _d3 _d4 _zlo _zhi
+        read -r _zlo _zhi <<< "${_zones[0]}"; _d1="$(_awg_h_subrange "$_zlo" "$_zhi")"
+        read -r _zlo _zhi <<< "${_zones[1]}"; _d2="$(_awg_h_subrange "$_zlo" "$_zhi")"
+        read -r _zlo _zhi <<< "${_zones[2]}"; _d3="$(_awg_h_subrange "$_zlo" "$_zhi")"
+        read -r _zlo _zhi <<< "${_zones[3]}"; _d4="$(_awg_h_subrange "$_zlo" "$_zhi")"
+        local _att=0 _max_att=3 _pair _a _b _give_up=0
+        while true; do
+            ask "H1 (min-max, зона 1: 5..500M)" "$_d1" OBF_H1
+            ask "H2 (min-max, зона 2: 500M..1G)" "$_d2" OBF_H2
+            ask "H3 (min-max, зона 3: 1G..1.5G)" "$_d3" OBF_H3
+            ask "H4 (min-max, зона 4: 1.5G..2.1G)" "$_d4" OBF_H4
+            # - проверка формата: все четыре "число-число", min >= 5, min <= max -
+            local _fmt_ok="yes" _h _lo _hi
+            for _h in OBF_H1 OBF_H2 OBF_H3 OBF_H4; do
+                local -n _hv="$_h"
+                if ! [[ "$_hv" =~ ^[0-9]+-[0-9]+$ ]]; then
+                    print_err "${_h} должно быть в формате min-max (например 5-1005)"
+                    _fmt_ok="no"; unset -n _hv; break
+                fi
+                _lo="${_hv%-*}"; _hi="${_hv#*-}"
+                if (( _lo < 5 )); then
+                    print_err "${_h}: min должен быть >= 5 (1..4 зарезервированы vanilla WG)"
+                    _fmt_ok="no"; unset -n _hv; break
+                fi
+                if (( _lo > _hi )); then
+                    print_err "${_h}: min (${_lo}) должен быть <= max (${_hi})"
+                    _fmt_ok="no"; unset -n _hv; break
+                fi
+                unset -n _hv
+            done
+            if [[ "$_fmt_ok" != "yes" ]]; then
+                (( _att++ ))
+                [[ $_att -ge $_max_att ]] && { _give_up=1; break; }
+                continue
+            fi
+            # - проверка на пересечение всех пар -
             local _overlap="no"
             for _pair in "H1:H2" "H1:H3" "H1:H4" "H2:H3" "H2:H4" "H3:H4"; do
-                local _a="${_pair%:*}" _b="${_pair#*:}"
-                # - nameref: ссылки на OBF_H1..H4 без eval -
+                _a="${_pair%:*}"; _b="${_pair#*:}"
                 local -n _av_ref="OBF_${_a}"
                 local -n _bv_ref="OBF_${_b}"
                 if _awg_ranges_overlap "$_av_ref" "$_bv_ref"; then
@@ -1485,11 +1991,29 @@ _awg_gen_obf_v2() {
                 unset -n _av_ref _bv_ref
             done
             [[ "$_overlap" == "no" ]] && break
-            (( _att++ )); [[ $_att -ge 3 ]] && { print_warn "Оставляю как есть"; break; }
+            (( _att++ ))
+            [[ $_att -ge $_max_att ]] && { _give_up=1; break; }
         done
+        # - после 3 неудач - автогенерация через ту же зональную механику что в auto-ветке -
+        # - невалидные H1-H4 в конфиг не уходят: либо валидный ввод, либо валидный auto-фоллбек -
+        if [[ $_give_up -eq 1 ]]; then
+            print_warn "Слишком много невалидных вводов, генерирую H1-H4 автоматически"
+            local _ord_f=(0 1 2 3) _i_f _j_f _tmp_f
+            for (( _i_f=3; _i_f>0; _i_f-- )); do
+                _j_f=$(( RANDOM % (_i_f + 1) ))
+                _tmp_f=${_ord_f[$_i_f]}; _ord_f[$_i_f]=${_ord_f[$_j_f]}; _ord_f[$_j_f]=$_tmp_f
+            done
+            local _n_f=1 _lo_f _hi_f _si_f
+            for _si_f in "${_ord_f[@]}"; do
+                read -r _lo_f _hi_f <<< "${_zones[$_si_f]}"
+                printf -v "OBF_H${_n_f}" '%s' "$(_awg_h_subrange "$_lo_f" "$_hi_f")"
+                _n_f=$(( _n_f + 1 ))
+            done
+            print_info "H1=${OBF_H1} H2=${OBF_H2} H3=${OBF_H3} H4=${OBF_H4}"
+        fi
     fi
-    # - I1-I5 для v2 -
-    _awg_gen_i_packets "$auto"
+    # - I1-I5 для v2, пробрасываем MTU в _awg_gen_i_packets через env -
+    TUNNEL_MTU_CURRENT="$mtu" _awg_gen_i_packets "$auto"
 }
 
 # - WireGuard vanilla: все параметры обнулены, совместимость со стандартным WG -
@@ -1793,7 +2317,7 @@ awg_export_keenetic() {
     echo ""
     local sel=""
     while true; do
-        echo -ne "  ${BOLD}Номер клиента (1-${i})?${NC}: "; read -r sel
+        ask_raw "$(printf '  \033[1mНомер клиента (1-%s)?\033[0m: ' "$i")" sel
         [[ "$sel" =~ ^[0-9]+$ ]] && [[ "$sel" -ge 1 && "$sel" -le "$i" ]] && break
         print_warn "1-${i}"
     done
@@ -2047,8 +2571,7 @@ awg_select_iface() {
     fi
     local choice=""
     while true; do
-        echo -ne "  ${BOLD}Выберите интерфейс (1-${count})?${NC} "
-        read -r choice
+        ask_raw "$(printf '  \033[1mВыберите интерфейс (1-%s)?\033[0m ' "$count")" choice
         if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "$count" ]]; then
             AWG_ACTIVE_IFACE="${iface_array[$((choice-1))]}"
             break
@@ -2095,11 +2618,23 @@ awg_migrate_legacy() {
         rm -rf "$old_clients"
     fi
 
+    # - AWG_VERSION в legacy env обычно нет, но если был - сохраняем -
+    local mig_ver="${AWG_VERSION:-1.0}"
+    if [[ -z "${AWG_VERSION:-}" ]]; then
+        print_warn "AWG_VERSION в legacy не указан, ставим 1.0"
+        print_warn "Если сервер был на AWG 1.5/2.0 - проверь параметры I1-I5/S3/S4 в iface_awg0.env вручную"
+    fi
+    # - H1-H4 дефолты: значения 1..4 = vanilla WG, обфускация ломается, генерируем случайные -
+    local mig_h1="${H1:-$(rand_h)}"
+    local mig_h2="${H2:-$(rand_h)}"
+    local mig_h3="${H3:-$(rand_h)}"
+    local mig_h4="${H4:-$(rand_h)}"
+
     cat > "$target_env" << MIGEOF
 # AmneziaWG, параметры интерфейса awg0 (мигрировано)
 IFACE_NAME="awg0"
 IFACE_DESC="основной"
-AWG_VERSION="1.0"
+AWG_VERSION="${mig_ver}"
 SERVER_ENDPOINT_IP="${SERVER_ENDPOINT_IP:-}"
 SERVER_PORT="${SERVER_PORT:-1618}"
 SERVER_TUNNEL_IP="${SERVER_TUNNEL_IP:-10.8.0.1}"
@@ -2112,10 +2647,10 @@ JMIN="${JMIN:-50}"
 JMAX="${JMAX:-1000}"
 S1="${S1:-0}"
 S2="${S2:-0}"
-H1="${H1:-1}"
-H2="${H2:-2}"
-H3="${H3:-3}"
-H4="${H4:-4}"
+H1="${mig_h1}"
+H2="${mig_h2}"
+H3="${mig_h3}"
+H4="${mig_h4}"
 S_MIN="${S_MIN:-15}"
 S_MAX="${S_MAX:-40}"
 JMIN_MIN="${JMIN_MIN:-50}"
@@ -2499,7 +3034,7 @@ SYSEOF
         echo -e "  ${CYAN}UDP порт AmneziaWG. Дефолт 1618, можно любой свободный.${NC}"
         ask "UDP порт" "$srv_port" srv_port
         if ! validate_port "$srv_port"; then print_err "Порт 1-65535"; continue; fi
-        if ss -ulnp 2>/dev/null | grep -q ":${srv_port} "; then
+        if ss -H -uln 2>/dev/null | grep -Eq "[:.]${srv_port}[[:space:]]"; then
             print_warn "Порт ${srv_port} уже занят"; continue
         fi
         break
@@ -2555,7 +3090,7 @@ SYSEOF
         echo -e "  ${GREEN}2)${NC} Дефолт: 8.8.8.8, 1.1.1.1, 9.9.9.9"
         echo ""
         while true; do
-            echo -ne "  ${BOLD}Выбор?${NC} "; read -r dns_ch
+            ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" dns_ch
             case "$dns_ch" in
                 1) client_dns="${srv_tunnel_ip}"; break ;;
                 2) break ;;
@@ -2576,7 +3111,7 @@ SYSEOF
     echo ""
     local allowed="0.0.0.0/0"
     while true; do
-        echo -ne "  ${BOLD}Выбор?${NC} "; read -r rt_ch
+        ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" rt_ch
         case "$rt_ch" in
             1) allowed="0.0.0.0/0"; break ;;
             2) allowed="$tunnel_subnet"; break ;;
@@ -2593,7 +3128,7 @@ SYSEOF
     echo -e "  ${GREEN}2)${NC} 1320 - баланс (рекомендуется 'ЭТО БАЗА')"
     echo -e "  ${GREEN}3)${NC} 1420 - максимальная скорость (чистый Ethernet)"
     while true; do
-        echo -ne "  ${BOLD}Выбор?${NC} [2]: "; read -r mtu_ch
+        ask_raw "$(printf '  \033[1mВыбор?\033[0m [2]: ')" mtu_ch
         case "${mtu_ch:-2}" in
             1) tunnel_mtu="1280"; break ;;
             2) tunnel_mtu="1320"; break ;;
@@ -2614,11 +3149,11 @@ SYSEOF
         local obf_auto=""
         ask_yn "Сгенерировать параметры автоматически?" "y" obf_auto
         case "$AWG_VER" in
-            2.0) _awg_gen_obf_v2  "$obf_auto" ;;
-            1.5) _awg_gen_obf_v15 "$obf_auto" ;;
-            *)   _awg_gen_obf_v1  "$obf_auto" ;;
+            2.0) _awg_gen_obf_v2  "$obf_auto" "$tunnel_mtu" ;;
+            1.5) _awg_gen_obf_v15 "$obf_auto" "$tunnel_mtu" ;;
+            *)   _awg_gen_obf_v1  "$obf_auto" "$tunnel_mtu" ;;
         esac
-        print_ok "Параметры сгенерированы (AWG ${AWG_VER})"
+        print_ok "Параметры сгенерированы (AWG ${AWG_VER}, MTU ${tunnel_mtu})"
         print_info "Jc=${OBF_JC} Jmin=${OBF_JMIN} Jmax=${OBF_JMAX} S1=${OBF_S1} S2=${OBF_S2}"
         [[ -n "$OBF_S3" ]] && print_info "S3=${OBF_S3} S4=${OBF_S4}"
         print_info "H1=${OBF_H1} H2=${OBF_H2} H3=${OBF_H3} H4=${OBF_H4}"
@@ -2631,8 +3166,7 @@ SYSEOF
     echo -e "  ${CYAN}Для каждого будет создан отдельный конфиг-файл с QR-кодом.${NC}"
     local client_count=""
     while true; do
-        echo -ne "  ${BOLD}Сколько клиентов создать (1-50)?${NC} "
-        read -r client_count
+        ask_raw "$(printf '  \033[1mСколько клиентов создать (1-50)?\033[0m ')" client_count
         [[ "$client_count" =~ ^[0-9]+$ ]] && [[ "$client_count" -ge 1 ]] && [[ "$client_count" -le 50 ]] && break
         print_err "Число от 1 до 50"
     done
@@ -2645,7 +3179,7 @@ SYSEOF
             ask "Имя клиента #${ci}" "client${ci}" cname
             if ! validate_name "$cname"; then print_err "Буквы, цифры, дефис, подчёркивание"; continue; fi
             local dup=false
-            for ex in "${client_names[@]:-}"; do [[ "$ex" == "$cname" ]] && dup=true && break; done
+            for ex in "${client_names[@]}"; do [[ "$ex" == "$cname" ]] && dup=true && break; done
             if $dup; then print_err "Имя '${cname}' уже используется"; continue; fi
             client_names+=("$cname"); print_ok "Клиент #${ci}: ${cname}"; break
         done
@@ -2680,7 +3214,7 @@ ListenPort = ${srv_port}
 PrivateKey = ${srv_priv}
 $(_awg_obf_conf_lines)
 PostUp = iptables -A FORWARD -i ${iface} -j ACCEPT; iptables -A FORWARD -o ${iface} -j ACCEPT; iptables -t nat -A POSTROUTING -o ${main_iface} -j MASQUERADE; iptables -t mangle -A FORWARD -o ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu; iptables -t mangle -A FORWARD -i ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostDown = iptables -D FORWARD -i ${iface} -j ACCEPT; iptables -D FORWARD -o ${iface} -j ACCEPT; iptables -t nat -D POSTROUTING -o ${main_iface} -j MASQUERADE; iptables -t mangle -D FORWARD -o ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu; iptables -t mangle -D FORWARD -i ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = iptables -D FORWARD -i ${iface} -j ACCEPT || true; iptables -D FORWARD -o ${iface} -j ACCEPT || true; iptables -t nat -D POSTROUTING -o ${main_iface} -j MASQUERADE || true; iptables -t mangle -D FORWARD -o ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true; iptables -t mangle -D FORWARD -i ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 CONFEOF
     chmod 600 "$conf"
 
@@ -2756,6 +3290,11 @@ TUNNEL_MTU="${tunnel_mtu}"
 $(_awg_obf_env_lines)
 LEGEOF
     chmod 600 "${AWG_SETUP_DIR}/server.env"
+
+    # - выставляем глобально для последующего Keenetic export в текущем shell -
+    SERVER_ENDPOINT_IP="$endpoint_ip"
+    SERVER_PORT="$srv_port"
+    TUNNEL_MTU="$tunnel_mtu"
 
     # - IP forwarding -
     if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.d/99-awg-forward.conf 2>/dev/null; then
@@ -2970,7 +3509,7 @@ awg_create_iface() {
         echo -e "  ${CYAN}UDP порт для этого туннеля (1-65535). Должен быть свободен и не совпадать с другими.${NC}"
         ask "UDP порт" "$port" port
         if ! validate_port "$port"; then print_err "Порт 1-65535"; continue; fi
-        if ss -ulnp 2>/dev/null | grep -q ":${port} "; then print_warn "Занят"; continue; fi
+        if ss -H -uln 2>/dev/null | grep -Eq "[:.]${port}[[:space:]]"; then print_warn "Занят"; continue; fi
         break
     done
 
@@ -3028,7 +3567,7 @@ awg_create_iface() {
         echo -e "  ${GREEN}1)${NC} Unbound: ${srv_tunnel_ip}"
         echo -e "  ${GREEN}2)${NC} Дефолт: 8.8.8.8, 1.1.1.1, 9.9.9.9"
         while true; do
-            echo -ne "  ${BOLD}Выбор?${NC} "; read -r dns_ch
+            ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" dns_ch
             case "$dns_ch" in 1) dns="${srv_tunnel_ip}"; break ;; 2) break ;; *) print_warn "1 или 2" ;; esac
         done
     fi
@@ -3040,7 +3579,7 @@ awg_create_iface() {
     echo -e "  ${GREEN}2)${NC} ${tunnel_subnet} (только туннель)"
     echo -e "  ${GREEN}3)${NC} Вручную"
     while true; do
-        echo -ne "  ${BOLD}Выбор?${NC} "; read -r rt_ch
+        ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" rt_ch
         case "$rt_ch" in
             1) allowed_ips="0.0.0.0/0"; break ;; 2) allowed_ips="$tunnel_subnet"; break ;;
             3) ask "AllowedIPs" "0.0.0.0/0" allowed_ips; break ;; *) print_warn "1, 2 или 3" ;;
@@ -3055,7 +3594,7 @@ awg_create_iface() {
     echo -e "  ${GREEN}2)${NC} 1320 - баланс (рекомендуется)"
     echo -e "  ${GREEN}3)${NC} 1420 - максимальная скорость"
     while true; do
-        echo -ne "  ${BOLD}Выбор?${NC} [2]: "; read -r mtu_ch
+        ask_raw "$(printf '  \033[1mВыбор?\033[0m [2]: ')" mtu_ch
         case "${mtu_ch:-2}" in
             1) tunnel_mtu="1280"; break ;;
             2) tunnel_mtu="1320"; break ;;
@@ -3072,9 +3611,9 @@ awg_create_iface() {
         local gen_obf=""
         ask_yn "Сгенерировать параметры обфускации автоматически?" "y" gen_obf
         case "$AWG_VER" in
-            2.0) _awg_gen_obf_v2  "$gen_obf" ;;
-            1.5) _awg_gen_obf_v15 "$gen_obf" ;;
-            *)   _awg_gen_obf_v1  "$gen_obf" ;;
+            2.0) _awg_gen_obf_v2  "$gen_obf" "$tunnel_mtu" ;;
+            1.5) _awg_gen_obf_v15 "$gen_obf" "$tunnel_mtu" ;;
+            *)   _awg_gen_obf_v1  "$gen_obf" "$tunnel_mtu" ;;
         esac
     fi
 
@@ -3098,7 +3637,7 @@ ListenPort = ${port}
 PrivateKey = ${srv_priv}
 $(_awg_obf_conf_lines)
 PostUp = iptables -A FORWARD -i ${iface} -j ACCEPT; iptables -A FORWARD -o ${iface} -j ACCEPT; iptables -t nat -A POSTROUTING -o ${main_iface} -j MASQUERADE; iptables -t mangle -A FORWARD -o ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu; iptables -t mangle -A FORWARD -i ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostDown = iptables -D FORWARD -i ${iface} -j ACCEPT; iptables -D FORWARD -o ${iface} -j ACCEPT; iptables -t nat -D POSTROUTING -o ${main_iface} -j MASQUERADE; iptables -t mangle -D FORWARD -o ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu; iptables -t mangle -D FORWARD -i ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = iptables -D FORWARD -i ${iface} -j ACCEPT || true; iptables -D FORWARD -o ${iface} -j ACCEPT || true; iptables -t nat -D POSTROUTING -o ${main_iface} -j MASQUERADE || true; iptables -t mangle -D FORWARD -o ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true; iptables -t mangle -D FORWARD -i ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 CONFEOF
     chmod 600 "$conf"
     mkdir -p "$(awg_iface_clients "$iface")"; chmod 700 "$(awg_iface_clients "$iface")"
@@ -3118,6 +3657,11 @@ TUNNEL_MTU="${tunnel_mtu}"
 $(_awg_obf_env_lines)
 ENVEOF
     chmod 600 "$(awg_iface_env "$iface")"
+
+    # - выставляем глобально на случай если в текущем shell дальше потребуется -
+    SERVER_ENDPOINT_IP="$endpoint_ip"
+    SERVER_PORT="$port"
+    TUNNEL_MTU="$tunnel_mtu"
 
     # - IP forwarding + запуск -
     if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.d/99-awg-forward.conf 2>/dev/null; then
@@ -3209,7 +3753,7 @@ awg_change_dns() {
         iface_arr+=("$iface"); i=$(( i + 1 ))
     done
     echo ""
-    echo -ne "  ${BOLD}Выбор?${NC} "; read -r sel
+    ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" sel
     if ! [[ "$sel" =~ ^[0-9]+$ ]] || [[ "$sel" -lt 1 ]] || [[ "$sel" -gt ${#iface_arr[@]} ]]; then
         print_warn "Неверный выбор"; return 0
     fi
@@ -3227,7 +3771,7 @@ awg_change_dns() {
         echo -e "  ${GREEN}1)${NC} Unbound: ${SERVER_TUNNEL_IP}"
         echo -e "  ${GREEN}2)${NC} Дефолт: 8.8.8.8, 1.1.1.1, 9.9.9.9"
         while true; do
-            echo -ne "  ${BOLD}Выбор?${NC} "; read -r dns_ch
+            ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" dns_ch
             case "$dns_ch" in
                 1) new_dns="${SERVER_TUNNEL_IP}"; break ;;
                 2) new_dns="8.8.8.8, 1.1.1.1, 9.9.9.9"; break ;;
@@ -3350,7 +3894,7 @@ awg_add_client() {
         echo -e "  ${GREEN}2)${NC} ${TUNNEL_SUBNET}"
         echo -e "  ${GREEN}3)${NC} Вручную"
         while true; do
-            echo -ne "  ${BOLD}Выбор?${NC} "; read -r rc
+            ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" rc
             case "$rc" in
                 1) client_allowed="0.0.0.0/0"; break ;;
                 2) client_allowed="$TUNNEL_SUBNET"; break ;;
@@ -3902,12 +4446,11 @@ _xui_fetch_release_info() {
     local arch
     arch=$(_xui_arch)
     local tag
-    tag=$(curl -fsSL --connect-timeout 10 "$XUI_API_URL" 2>/dev/null \
-        | grep '"tag_name":' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+    # - jq уже доступен (boot_install_packages его ставит) -
+    tag=$(curl -fsSL --connect-timeout 10 "$XUI_API_URL" 2>/dev/null | jq -r '.tag_name // empty' 2>/dev/null)
     if [[ -z "$tag" ]]; then
         # - fallback через IPv4 -
-        tag=$(curl -4 -fsSL --connect-timeout 10 "$XUI_API_URL" 2>/dev/null \
-            | grep '"tag_name":' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+        tag=$(curl -4 -fsSL --connect-timeout 10 "$XUI_API_URL" 2>/dev/null | jq -r '.tag_name // empty' 2>/dev/null)
     fi
     if [[ -z "$tag" ]]; then
         print_err "Не удалось получить версию 3X-UI с GitHub API"
@@ -4058,8 +4601,8 @@ xui_install() {
     panel_path="/$(rand_str 16)"
     echo -e "  ${CYAN}URL путь к панели. Случайный путь защищает от сканеров.${NC}"
     while true; do
-        echo -ne "  ${BOLD}URL путь панели${NC} [${panel_path}] (или введи вручную): "
-        read -r _input
+        local _input=""
+        ask_raw "$(printf '  \033[1mURL путь панели\033[0m [%s] (или введи вручную): ' "$panel_path")" _input
         _input="${_input:-$panel_path}"
         [[ "$_input" != /* ]] && _input="/${_input}"
         if [[ ${#_input} -lt 5 ]]; then
@@ -4076,8 +4619,8 @@ xui_install() {
     panel_pass=$(rand_str 16)
     echo -e "  ${CYAN}Логин и пароль для входа в панель.${NC}"
     while true; do
-        echo -ne "  ${BOLD}Логин${NC} [${panel_user}] (или введи вручную, мин. 5 симв.): "
-        read -r _input
+        local _input=""
+        ask_raw "$(printf '  \033[1mЛогин\033[0m [%s] (или введи вручную, мин. 5 симв.): ' "$panel_user")" _input
         _input="${_input:-$panel_user}"
         if [[ ${#_input} -lt 5 ]]; then
             print_err "Логин минимум 5 символов"; continue
@@ -4086,8 +4629,8 @@ xui_install() {
         break
     done
     while true; do
-        echo -ne "  ${BOLD}Пароль${NC} [${panel_pass}] (или введи вручную, мин. 8 симв.): "
-        read -r _input
+        local _input=""
+        ask_raw "$(printf '  \033[1mПароль\033[0m [%s] (или введи вручную, мин. 8 симв.): ' "$panel_pass")" _input
         _input="${_input:-$panel_pass}"
         if [[ ${#_input} -lt 8 ]]; then
             print_err "Пароль минимум 8 символов"; continue
@@ -4154,10 +4697,19 @@ xui_install() {
     fi
     print_ok "3X-UI установлен"
 
-    # - настройка через CLI: наши параметры применяются гарантированно -
-    "$XUI_BIN" setting -port "$panel_port" >/dev/null 2>&1 || true
-    "$XUI_BIN" setting -webBasePath "$panel_path" >/dev/null 2>&1 || true
-    "$XUI_BIN" setting -username "$panel_user" -password "$panel_pass" >/dev/null 2>&1 || true
+    # - настройка через CLI: наши параметры должны примениться гарантированно -
+    if ! "$XUI_BIN" setting -port "$panel_port" >/dev/null 2>&1; then
+        print_err "Не удалось применить порт панели через 'x-ui setting -port'"
+        return 1
+    fi
+    if ! "$XUI_BIN" setting -webBasePath "$panel_path" >/dev/null 2>&1; then
+        print_err "Не удалось применить webBasePath через 'x-ui setting -webBasePath'"
+        return 1
+    fi
+    if ! "$XUI_BIN" setting -username "$panel_user" -password "$panel_pass" >/dev/null 2>&1; then
+        print_err "Не удалось применить логин/пароль через 'x-ui setting'"
+        return 1
+    fi
     "$XUI_BIN" migrate >/dev/null 2>&1 || true
     systemctl restart "$XUI_SERVICE" 2>/dev/null || true
     sleep 3
@@ -4319,7 +4871,7 @@ xui_backup_db() {
     backup_file="${XUI_BACKUP_DIR}/x-ui_$(date +%Y%m%d_%H%M%S).db"
     cp -f "$XUI_DB" "$backup_file"; chmod 600 "$backup_file"
     print_ok "Бэкап: ${backup_file} ($(du -h "$backup_file" | awk '{print $1}'))"
-    find "$XUI_BACKUP_DIR" -name "x-ui_*.db" -mtime +30 -delete 2>/dev/null || true
+    find "$XUI_BACKUP_DIR" -type f -name "x-ui_*.db" -mtime +30 -delete 2>/dev/null || true
     return 0
 }
 
@@ -4356,7 +4908,9 @@ xui_delete() {
     rm -f /usr/bin/x-ui "$XUI_UNIT" 2>/dev/null || true
     if [[ -f "$XUI_ENV" ]] && command -v ufw &>/dev/null; then
         local p; p=$(grep "^PANEL_PORT=" "$XUI_ENV" | cut -d'"' -f2)
-        [[ -n "$p" ]] && ufw delete allow "${p}/tcp" 2>/dev/null || true
+        if [[ -n "$p" ]]; then
+            ufw delete allow "${p}/tcp" 2>/dev/null || true
+        fi
     fi
     rm -f "$XUI_ENV" 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
@@ -4447,7 +5001,8 @@ EOF
 
     # - ждём запуска контейнера -
     for i in $(seq 1 15); do
-        docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^shadowbox$" && break; sleep 2
+        docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^shadowbox$" && break
+        (( i < 15 )) && sleep 2
     done
 
     local mgmt_port keys_port
@@ -4484,18 +5039,22 @@ EOF
     # - UFW -
     if command -v ufw &>/dev/null; then
         ufw allow "${mgmt_port}/tcp" comment "Outline API" 2>/dev/null || true
-        [[ -n "$keys_port" ]] && {
+        if [[ -n "$keys_port" ]]; then
             ufw allow "${keys_port}/tcp" comment "Outline keys TCP" 2>/dev/null || true
             ufw allow "${keys_port}/udp" comment "Outline keys UDP" 2>/dev/null || true
-        }
+        fi
     fi
 
     # - book -
+    # - keys_port может быть пустым если container не вернул accessKeyPort -
+    # - унифицируем на 0 чтобы jq не упал на пустом значении -
+    local _kp="$keys_port"
+    [[ "$_kp" =~ ^[0-9]+$ ]] || _kp="0"
     book_write ".outline.installed" "true" bool
     book_write ".outline.server_ip" "$server_ip"
     book_write ".outline.api_port" "$api_port" number
     book_write ".outline.mgmt_port" "${mgmt_port}" number
-    book_write ".outline.keys_port" "${keys_port}" number
+    book_write ".outline.keys_port" "${_kp}" number
     book_write ".outline.api_url" "$api_url"
     book_write ".outline.installed_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -4562,7 +5121,7 @@ otl_add_key() {
     [[ -z "$api_url" ]] && { print_err "apiUrl не найден"; return 0; }
     local key_name=""
     echo -e "  ${CYAN}Имя ключа - для кого этот ключ (например: мама, коллега-Вася). Можно оставить пустым.${NC}"
-    echo -ne "  ${BOLD}Имя ключа:${NC} "; read -r key_name
+    ask_raw "$(printf '  \033[1mИмя ключа:\033[0m ')" key_name
     local result
     result=$(curl -fsk --connect-timeout 5 -X POST "${api_url}/access-keys" 2>/dev/null || echo "")
     if ! echo "$result" | grep -q '"id"'; then
@@ -4611,11 +5170,16 @@ otl_delete() {
     [[ "$confirm" != "yes" ]] && return 0
     docker stop shadowbox watchtower 2>/dev/null || true
     docker rm shadowbox watchtower 2>/dev/null || true
-    docker rmi "$(docker images -q --filter reference='*outline*' 2>/dev/null)" 2>/dev/null || true
+    docker images -q --filter reference='*outline*' 2>/dev/null | xargs -r docker rmi 2>/dev/null || true
     if [[ -f "$OTL_ENV" ]] && command -v ufw &>/dev/null; then
         source "$OTL_ENV"
-        [[ -n "${MGMT_PORT:-}" ]] && ufw delete allow "${MGMT_PORT}/tcp" 2>/dev/null || true
-        [[ -n "${KEYS_PORT:-}" ]] && { ufw delete allow "${KEYS_PORT}/tcp" 2>/dev/null || true; ufw delete allow "${KEYS_PORT}/udp" 2>/dev/null || true; }
+        if [[ -n "${MGMT_PORT:-}" ]]; then
+            ufw delete allow "${MGMT_PORT}/tcp" 2>/dev/null || true
+        fi
+        if [[ -n "${KEYS_PORT:-}" ]]; then
+            ufw delete allow "${KEYS_PORT}/tcp" 2>/dev/null || true
+            ufw delete allow "${KEYS_PORT}/udp" 2>/dev/null || true
+        fi
     fi
     rm -f "$OTL_KEY" "$OTL_ENV" "$OTL_HEALTHCHECK" 2>/dev/null || true
     rm -rf /opt/outline 2>/dev/null || true
@@ -4856,7 +5420,9 @@ mtp_remove() {
 
     docker stop "$CONTAINER" 2>/dev/null || true
     docker rm "$CONTAINER" 2>/dev/null || true
-    [[ -n "$PORT" ]] && command -v ufw &>/dev/null && ufw delete allow "${PORT}/tcp" 2>/dev/null || true
+    if [[ -n "$PORT" ]] && command -v ufw &>/dev/null; then
+        ufw delete allow "${PORT}/tcp" 2>/dev/null || true
+    fi
 
     rm -f "$envf" "$(_mtp_config_path "$inst_id")"
     book_write ".mtproto.instances.${inst_id}" "null" bool
@@ -5160,7 +5726,9 @@ _hy2_select_instance() {
         i=$(( i + 1 ))
     done
     echo "" >&2
-    local sel=""; echo -ne "  ${BOLD}Номер инстанса:${NC} " >&2; read -r sel
+    local sel=""
+    # - функция вызывается через cmd-substitution, поэтому prompt и ввод идут через /dev/tty -
+    eli_read_line "  ${BOLD}Номер инстанса:${NC} " sel
     [[ ! "$sel" =~ ^[0-9]+$ ]] || [[ "$sel" -lt 1 ]] || [[ "$sel" -gt ${#dirs[@]} ]] && { echo ""; return; }
     echo "$(basename "${dirs[$(( sel - 1 ))]}" | sed 's/instance_//')"
 }
@@ -5307,11 +5875,28 @@ hy2_add_user() {
     while true; do
         ask "Имя пользователя" "" uname
         [[ -z "$uname" ]] && { print_err "Обязательно"; continue; }
+        if ! validate_name "$uname"; then
+            print_err "Имя: только буквы, цифры, дефис, подчёркивание (без ':' и пробелов)"
+            continue
+        fi
         grep -q "^${uname}:" "$uf" 2>/dev/null && { print_err "'${uname}' уже есть"; continue; }
         break
     done
-    ask "Пароль" "$upass" upass
-    [[ -z "$upass" ]] && { print_err "Обязательно"; return 1; }
+    while true; do
+        ask "Пароль" "$upass" upass
+        [[ -z "$upass" ]] && { print_err "Обязательно"; continue; }
+        # - users.list парсится через 'IFS=: read', двоеточие в пароле обрежет его -
+        if [[ "$upass" == *:* ]]; then
+            print_err "Пароль не должен содержать ':'"
+            continue
+        fi
+        # - пробелы и табы ломают парсинг строки 'uname:upass' -
+        if [[ "$upass" =~ [[:space:]] ]]; then
+            print_err "Пароль не должен содержать пробельных символов"
+            continue
+        fi
+        break
+    done
 
     echo "${uname}:${upass}" >> "$uf"
     local count; count=$(wc -l < "$uf")
@@ -5402,7 +5987,9 @@ hy2_remove() {
     systemctl stop "$svc" 2>/dev/null || true
     systemctl disable "$svc" 2>/dev/null || true
     rm -f "/etc/systemd/system/${svc}.service"; systemctl daemon-reload
-    [[ -n "$port" ]] && command -v ufw &>/dev/null && ufw delete allow "${port}/udp" 2>/dev/null || true
+    if [[ -n "$port" ]] && command -v ufw &>/dev/null; then
+        ufw delete allow "${port}/udp" 2>/dev/null || true
+    fi
     rm -rf "${idir:?}"
 
     _book_ok && jq --arg i "$inst_id" 'del(.hysteria2.instances[$i])' "$_BOOK" > "${_BOOK}.tmp" 2>/dev/null \
@@ -5518,20 +6105,27 @@ sig_install() {
     # - логика `docker compose up && ! docker-compose up` была инвертирована -
     # - true если compose v2 упал И v1 вернул 0 (бред ебаный?) -
     # - юзаем v2, не получилось -> юзаем v1, если оба мимо -> fail -
-    local sig_up_ok="no"
-    if docker compose up --detach 2>/dev/null; then
+    # - stderr пишем в tmp-лог и показываем юзеру при ошибке -
+    local sig_up_ok="no" sig_up_log
+    sig_up_log=$(mktemp -t signal-proxy-up.XXXXXX.log)
+    if docker compose up --detach >>"$sig_up_log" 2>&1; then
         sig_up_ok="yes"
-    elif docker-compose up --detach 2>/dev/null; then
+    elif docker-compose up --detach >>"$sig_up_log" 2>&1; then
         sig_up_ok="yes"
     fi
     if [[ "$sig_up_ok" != "yes" ]]; then
         print_err "Не удалось запустить Signal Proxy"
+        print_info "Последние строки лога:"
+        tail -n 20 "$sig_up_log" | sed 's/^/    /'
+        print_info "Полный лог: ${sig_up_log}"
         return 1
     fi
+    # - успех, чистим tmp-лог -
+    rm -f "$sig_up_log"
     sleep 3
 
     local running
-    running=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -c "signal\|nginx" || echo "0")
+    running=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -c "signal\|nginx-terminate\|nginx-relay" || echo "0")
     if [[ "$running" -ge 2 ]]; then
         print_ok "Signal Proxy запущен (${running} контейнеров)"
     else
@@ -5688,11 +6282,13 @@ ts_find_db() {
     found=$(find "$TS_DIR" "$TS_DATA_DIR" -name "*.sqlitedb" -type f 2>/dev/null | head -1)
     if [[ -n "$found" ]]; then
         TS_DB="$found"
-        [[ -f "$TS_ENV" ]] && {
-            grep -q "^TS_DB_PATH=" "$TS_ENV" \
-                && sed -i "s|^TS_DB_PATH=.*|TS_DB_PATH=\"${found}\"|" "$TS_ENV" \
-                || echo "TS_DB_PATH=\"${found}\"" >> "$TS_ENV"
-        }
+        if [[ -f "$TS_ENV" ]]; then
+            if grep -q "^TS_DB_PATH=" "$TS_ENV"; then
+                sed -i "s|^TS_DB_PATH=.*|TS_DB_PATH=\"${found}\"|" "$TS_ENV"
+            else
+                echo "TS_DB_PATH=\"${found}\"" >> "$TS_ENV"
+            fi
+        fi
         book_write ".teamspeak.db_path" "$found"
         return 0
     fi
@@ -5700,34 +6296,47 @@ ts_find_db() {
 }
 
 ts_get_version() {
-    [[ -f "$TS_ENV" ]] && grep -oP '^TS_VERSION="\K[^"]+' "$TS_ENV" | head -1 || true
+    if [[ -f "$TS_ENV" ]]; then
+        grep -oP '^TS_VERSION="\K[^"]+' "$TS_ENV" 2>/dev/null | head -1
+    fi
+    return 0
 }
 
-# - возвращает URL на архив с линуксовой сборкой -
-# - сначала ищем .tar.bz2 (текущий формат), fallback на .tar.gz (на случай смены) -
-# - возвращает формат через глобальный TS_ARCHIVE_FMT (bz2|gz) для выбора флага tar -
+# --> TS6: ОПРЕДЕЛЕНИЕ АРХИТЕКТУРЫ ДЛЯ ИМЕНИ АССЕТА <--
+# - возвращает паттерн поиска для типичных вариантов имени: -
+# - "linux[_-]amd64" / "linux[_-]x86[_-]64" для x86_64, "linux[_-]arm64" / "linux[_-]aarch64" для ARM -
+_ts_arch_pattern() {
+    local m
+    m=$(uname -m 2>/dev/null || echo x86_64)
+    case "$m" in
+        x86_64|amd64) echo 'linux[_-](amd64|x86[_-]?64)' ;;
+        aarch64|arm64) echo 'linux[_-](arm64|aarch64)' ;;
+        *) echo "linux[_-]${m}" ;;
+    esac
+}
+
+# - возвращает на stdout строку "url|fmt", где fmt одно из xz|bz2|gz|zst -
+# - формат и URL передаются вместе чтобы пережить вызов через $(...) -
+# - архитектура матчится regex'ом, переживает смену amd64 <-> x86_64 в имени ассета -
+# - перебор форматов от современного к старому: xz (текущий TS6) > bz2 > gz > zst -
 ts_get_latest_url() {
-    local json url
+    local json arch_pat fmt url
     json=$(curl -fsSL --connect-timeout 10 "$TS_GITHUB_API" 2>/dev/null || true)
     [[ -z "$json" ]] && return 1
-    # - .tar.bz2 -
-    url=$(echo "$json" | jq -r \
-        '.assets | map(select((.name | contains("linux_amd64")) and (.name | endswith(".tar.bz2"))))[0].browser_download_url // empty' \
-        2>/dev/null)
-    if [[ -n "$url" && "$url" != "null" ]]; then
-        TS_ARCHIVE_FMT="bz2"
-        echo "$url"
-        return 0
-    fi
-    # - fallback .tar.gz -
-    url=$(echo "$json" | jq -r \
-        '.assets | map(select((.name | contains("linux_amd64")) and (.name | endswith(".tar.gz"))))[0].browser_download_url // empty' \
-        2>/dev/null)
-    if [[ -n "$url" && "$url" != "null" ]]; then
-        TS_ARCHIVE_FMT="gz"
-        echo "$url"
-        return 0
-    fi
+    arch_pat=$(_ts_arch_pattern)
+
+    for fmt in xz bz2 gz zst; do
+        url=$(echo "$json" \
+            | jq -r --arg ap "$arch_pat" --arg ext ".tar.${fmt}" \
+                '.assets
+                 | map(select((.name | test($ap)) and (.name | endswith($ext))))[0]
+                   .browser_download_url // empty' \
+            2>/dev/null)
+        if [[ -n "$url" && "$url" != "null" ]]; then
+            echo "${url}|${fmt}"
+            return 0
+        fi
+    done
     return 1
 }
 
@@ -5741,62 +6350,99 @@ ts_install() {
     if ts_installed 2>/dev/null; then
         print_warn "TeamSpeak уже установлен"; return 0
     fi
-    for pkg in curl jq bzip2; do
+    for pkg in curl jq; do
         command -v "$pkg" &>/dev/null || apt-get install -y -qq "$pkg" || true
     done
+    # - xz-utils для текущего формата TS6 (.tar.xz). При смене формата - доустановка идёт ниже -
+    command -v xz &>/dev/null || apt-get install -y -qq xz-utils 2>/dev/null || true
 
     # - параметры -
     local voice_port="9987" ft_port="30033"
-    local vcpus threads
-    vcpus=$(nproc 2>/dev/null || echo "1")
-    if [[ "$vcpus" -le 1 ]]; then threads=2
-    elif [[ "$vcpus" -le 2 ]]; then threads=3
-    elif [[ "$vcpus" -le 4 ]]; then threads=5
-    else threads=$(( vcpus * 2 )); [[ "$threads" -gt 16 ]] && threads=16; fi
 
     while true; do
         echo -e "  ${CYAN}Основной порт для голосовой связи (UDP). Стандарт: 9987. Клиенты подключаются по нему.${NC}"
         ask "Голосовой порт (UDP)" "$voice_port" voice_port
         validate_port "$voice_port" || { print_err "Порт 1-65535"; continue; }
-        ! ss -ulnp 2>/dev/null | grep -q ":${voice_port} " && break
+        ! ss -H -uln 2>/dev/null | grep -Eq "[:.]${voice_port}[[:space:]]" && break
         print_warn "Занят"
     done
     while true; do
         echo -e "  ${CYAN}Порт для передачи файлов между участниками (TCP). Стандарт: 30033.${NC}"
         ask "Порт файлового трансфера (TCP)" "$ft_port" ft_port
         validate_port "$ft_port" || { print_err "Порт 1-65535"; continue; }
-        ! ss -tlnp 2>/dev/null | grep -q ":${ft_port} " && break
+        ! ss -H -tln 2>/dev/null | grep -Eq "[:.]${ft_port}[[:space:]]" && break
         print_warn "Занят"
     done
-    echo -e "  ${CYAN}Кол-во потоков обработки голоса (1-16). Больше потоков = больше одновременных разговоров.${NC}"
-    echo -e "  ${CYAN}Рекомендация для ${vcpus} vCPU: ${threads} потоков.${NC}"
-    ask "Голосовых потоков (1-16)" "$threads" threads
 
     # - скачивание -
     print_section "Скачивание"
-    local download_url latest_ver
-    download_url=$(ts_get_latest_url)
+    local url_fmt download_url archive_fmt latest_ver
+    url_fmt=$(ts_get_latest_url)
+    download_url="${url_fmt%%|*}"
+    archive_fmt="${url_fmt##*|}"
     latest_ver=$(ts_get_latest_version)
     [[ -z "$download_url" ]] && { print_err "URL не получен с GitHub"; return 1; }
-    print_ok "Версия: ${latest_ver}"
+    print_ok "Версия: ${latest_ver} (формат: ${archive_fmt})"
 
     id "$TS_USER" &>/dev/null || useradd -r -s /bin/false -d "$TS_DIR" -M "$TS_USER"
     mkdir -p "$TS_DIR" "$TS_DATA_DIR" "$TS_LOG_DIR" "$TS_ENV_DIR" "$TS_BACKUP_DIR"
 
     local tmpdir; tmpdir=$(mktemp -d)
-    # - выбор флага tar по формату (bz2|gz) - чтобы переживать будущие смены формата -
-    local tar_flag="j" archive_ext="tar.bz2"
-    if [[ "${TS_ARCHIVE_FMT:-bz2}" == "gz" ]]; then
-        tar_flag="z"
-        archive_ext="tar.gz"
+    # - выбор флага tar по формату; xz/zst поддерживаются современным GNU tar (--auto-compress тоже работает) -
+    local tar_flag archive_ext
+    case "${archive_fmt:-xz}" in
+        xz)  tar_flag="J"; archive_ext="tar.xz" ;;
+        bz2) tar_flag="j"; archive_ext="tar.bz2" ;;
+        gz)  tar_flag="z"; archive_ext="tar.gz" ;;
+        zst) tar_flag="";  archive_ext="tar.zst" ;;
+        *)   tar_flag="J"; archive_ext="tar.xz" ;;
+    esac
+    # - для tar.zst нужен ключ --zstd (нет короткого флага) -
+    # - доустанавливаем декомпрессор если его нет -
+    case "${archive_fmt:-xz}" in
+        xz)  command -v xz   &>/dev/null || apt-get install -y -qq xz-utils  2>/dev/null || true ;;
+        zst) command -v zstd &>/dev/null || apt-get install -y -qq zstd      2>/dev/null || true ;;
+        bz2) command -v bzip2 &>/dev/null || apt-get install -y -qq bzip2    2>/dev/null || true ;;
+    esac
+
+    if ! curl -fsSL --connect-timeout 30 --max-time 120 "$download_url" -o "${tmpdir}/ts6.${archive_ext}"; then
+        print_err "Не удалось скачать TeamSpeak: ${download_url}"
+        rm -rf "$tmpdir"
+        return 1
     fi
-    curl -fsSL --connect-timeout 30 --max-time 120 "$download_url" -o "${tmpdir}/ts6.${archive_ext}"
-    if ! tar -x${tar_flag}f "${tmpdir}/ts6.${archive_ext}" -C "$TS_DIR" --strip-components=1; then
-        print_err "Не удалось распаковать архив"
+    # - распаковка в TS_DIR. strip-components не используем: текущие архивы TS6 без верхней папки -
+    # - на случай возврата вложенной структуры в будущем - проверяем оба варианта ниже -
+    local tar_rc
+    if [[ "$tar_flag" == "" ]]; then
+        tar --zstd -xf "${tmpdir}/ts6.${archive_ext}" -C "$TS_DIR"
+        tar_rc=$?
+    else
+        tar -x${tar_flag}f "${tmpdir}/ts6.${archive_ext}" -C "$TS_DIR"
+        tar_rc=$?
+    fi
+    if [[ $tar_rc -ne 0 ]]; then
+        print_err "Не удалось распаковать архив (формат: ${archive_ext})"
         rm -rf "$tmpdir"
         return 1
     fi
     rm -rf "$tmpdir"
+
+    # - если архив всё-таки с верхней папкой (старый формат) - подтянем содержимое наверх -
+    if [[ ! -f "$TS_BIN" ]]; then
+        local _inner
+        _inner=$(find "$TS_DIR" -maxdepth 2 -name tsserver -type f 2>/dev/null | head -1)
+        if [[ -n "$_inner" ]]; then
+            local _idir; _idir=$(dirname "$_inner")
+            shopt -s dotglob
+            mv "${_idir}"/* "$TS_DIR"/ 2>/dev/null || true
+            shopt -u dotglob
+            rmdir "$_idir" 2>/dev/null || true
+        fi
+    fi
+    if [[ ! -f "$TS_BIN" ]]; then
+        print_err "Бинарь tsserver не найден после распаковки в ${TS_DIR}"
+        return 1
+    fi
     chmod +x "$TS_BIN"
     chown -R "${TS_USER}:${TS_USER}" "$TS_DIR" "$TS_DATA_DIR" "$TS_LOG_DIR"
 
@@ -5811,7 +6457,7 @@ Type=simple
 User=${TS_USER}
 Group=${TS_USER}
 WorkingDirectory=${TS_DIR}
-ExecStart=${TS_BIN} --accept-license --default-voice-port ${voice_port} --filetransfer-port ${ft_port} --log-path ${TS_LOG_DIR}
+ExecStart=${TS_BIN} --accept-license=accept --default-voice-port=${voice_port} --filetransfer-port=${ft_port} --log-path=${TS_LOG_DIR}
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
@@ -5823,19 +6469,34 @@ EOF
     systemctl enable teamspeak
 
     # - первый запуск и перехват ключа -
+    # - TS6 печатает token= в stdout/stderr (попадает в journal) И в лог-файлы в --log-path -
+    # - имя файла: tsserver_YYYY-MM-DD__HH_MM_SS.NNNNNN_INDEX.log -
     print_section "Первый запуск"
     systemctl start teamspeak; sleep 5
     local start_time
     start_time=$(systemctl show teamspeak --property=ActiveEnterTimestamp 2>/dev/null | cut -d= -f2 || date "+%Y-%m-%d %H:%M:%S")
     local priv_key="" attempts=0
     while [[ -z "$priv_key" && $attempts -lt 12 ]]; do
+        # - источник 1: systemd journal -
         priv_key=$(journalctl -u teamspeak --no-pager --since "$start_time" 2>/dev/null \
             | grep -oP '(?<=token=)\S+' | head -1 || true)
+        # - источник 2: лог-файлы в TS_LOG_DIR -
+        if [[ -z "$priv_key" && -d "$TS_LOG_DIR" ]]; then
+            priv_key=$(grep -hoP '(?<=token=)\S+' "$TS_LOG_DIR"/tsserver_*.log 2>/dev/null | head -1 || true)
+        fi
+        # - источник 3: на случай если log-path был проигнорирован, ищем в TS_DIR/logs -
+        if [[ -z "$priv_key" && -d "${TS_DIR}/logs" ]]; then
+            priv_key=$(grep -hoP '(?<=token=)\S+' "${TS_DIR}/logs"/tsserver_*.log 2>/dev/null | head -1 || true)
+        fi
         [[ -z "$priv_key" ]] && sleep 3
         (( attempts++ )) || true
     done
-    [[ -n "$priv_key" ]] && print_ok "Ключ перехвачен!" \
-        || { print_warn "Ключ не перехвачен, ищи: journalctl -u teamspeak | grep token="; priv_key="НЕ_ОПРЕДЕЛЁН"; }
+    if [[ -n "$priv_key" ]]; then
+        print_ok "Ключ перехвачен!"
+    else
+        print_warn "Ключ не перехвачен, ищи: grep -r 'token=' ${TS_LOG_DIR} || journalctl -u teamspeak | grep token="
+        priv_key="НЕ_ОПРЕДЕЛЁН"
+    fi
 
     # - UFW -
     if command -v ufw &>/dev/null; then
@@ -5849,7 +6510,6 @@ EOF
 SERVER_IP="${server_ip}"
 TS_VOICE_PORT="${voice_port}"
 TS_FT_PORT="${ft_port}"
-TS_THREADS="${threads}"
 TS_PRIV_KEY="${priv_key}"
 TS_VERSION="${latest_ver}"
 INSTALLED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -5861,7 +6521,6 @@ EOF
     book_write ".teamspeak.server_ip" "$server_ip"
     book_write ".teamspeak.voice_port" "$voice_port" number
     book_write ".teamspeak.ft_port" "$ft_port" number
-    book_write ".teamspeak.threads" "$threads" number
     book_write ".teamspeak.priv_key" "$priv_key"
     book_write ".teamspeak.version" "$latest_ver"
 
@@ -5880,11 +6539,21 @@ ts_show_status() {
     ts_find_db 2>/dev/null || true
     if systemctl is-active --quiet teamspeak 2>/dev/null; then
         print_ok "Сервис: активен"
-    else print_err "Сервис: не запущен"; fi
+    else
+        print_err "Сервис: не запущен"
+    fi
     [[ -f "$TS_ENV" ]] && { source "$TS_ENV"; print_info "Адрес: ${SERVER_IP:-?}:${TS_VOICE_PORT:-9987}"; print_info "Версия: ${TS_VERSION:-?}"; }
     local vp="${TS_VOICE_PORT:-9987}" fp="${TS_FT_PORT:-30033}"
-    ss -ulnp 2>/dev/null | grep -q ":${vp} " && print_ok "Voice ${vp}/udp: OK" || print_err "Voice ${vp}/udp: не слушает"
-    ss -tlnp 2>/dev/null | grep -q ":${fp} " && print_ok "FT ${fp}/tcp: OK" || print_err "FT ${fp}/tcp: не слушает"
+    if ss -ulnp 2>/dev/null | grep -q ":${vp} "; then
+        print_ok "Voice ${vp}/udp: OK"
+    else
+        print_err "Voice ${vp}/udp: не слушает"
+    fi
+    if ss -tlnp 2>/dev/null | grep -q ":${fp} "; then
+        print_ok "FT ${fp}/tcp: OK"
+    else
+        print_err "FT ${fp}/tcp: не слушает"
+    fi
     return 0
 }
 
@@ -5921,7 +6590,11 @@ ts_update() {
     [[ ! -f "$TS_BIN" ]] && { print_err "Не установлен"; return 0; }
     local cur; cur=$(ts_get_version)
     local lat; lat=$(ts_get_latest_version)
-    local url; url=$(ts_get_latest_url)
+    # - получаем url и формат одной строкой "url|fmt" -
+    local url_fmt url archive_fmt
+    url_fmt=$(ts_get_latest_url)
+    url="${url_fmt%%|*}"
+    archive_fmt="${url_fmt##*|}"
     # - убираем префикс v для корректного сравнения -
     [[ "${cur#v}" == "${lat#v}" ]] && { print_ok "Актуальная версия: ${cur}"; return 0; }
     [[ -z "$url" ]] && { print_err "URL не получен"; return 0; }
@@ -5931,16 +6604,69 @@ ts_update() {
     systemctl stop teamspeak 2>/dev/null || true
     local tmpdir; tmpdir=$(mktemp -d)
     # - выбор флага tar по формату -
-    local tar_flag="j" archive_ext="tar.bz2"
-    if [[ "${TS_ARCHIVE_FMT:-bz2}" == "gz" ]]; then
-        tar_flag="z"
-        archive_ext="tar.gz"
+    local tar_flag archive_ext
+    case "${archive_fmt:-xz}" in
+        xz)  tar_flag="J"; archive_ext="tar.xz" ;;
+        bz2) tar_flag="j"; archive_ext="tar.bz2" ;;
+        gz)  tar_flag="z"; archive_ext="tar.gz" ;;
+        zst) tar_flag="";  archive_ext="tar.zst" ;;
+        *)   tar_flag="J"; archive_ext="tar.xz" ;;
+    esac
+    case "${archive_fmt:-xz}" in
+        xz)  command -v xz   &>/dev/null || apt-get install -y -qq xz-utils  2>/dev/null || true ;;
+        zst) command -v zstd &>/dev/null || apt-get install -y -qq zstd      2>/dev/null || true ;;
+        bz2) command -v bzip2 &>/dev/null || apt-get install -y -qq bzip2    2>/dev/null || true ;;
+    esac
+    # - скачивание: при провале старый бинарник на месте, поднимаем его обратно -
+    if ! curl -fsSL --connect-timeout 30 --max-time 120 "$url" -o "${tmpdir}/ts6.${archive_ext}"; then
+        print_err "Не удалось скачать ${url}"
+        rm -rf "$tmpdir"
+        systemctl start teamspeak 2>/dev/null || true
+        return 1
     fi
-    curl -fsSL --connect-timeout 30 --max-time 120 "$url" -o "${tmpdir}/ts6.${archive_ext}"
-    tar -x${tar_flag}f "${tmpdir}/ts6.${archive_ext}" -C "$TS_DIR" --strip-components=1; rm -rf "$tmpdir"
+    # - распаковка: при провале часть файлов могла затереться, всё равно пытаемся поднять -
+    local tar_rc
+    if [[ "$tar_flag" == "" ]]; then
+        tar --zstd -xf "${tmpdir}/ts6.${archive_ext}" -C "$TS_DIR"
+        tar_rc=$?
+    else
+        tar -x${tar_flag}f "${tmpdir}/ts6.${archive_ext}" -C "$TS_DIR"
+        tar_rc=$?
+    fi
+    if [[ $tar_rc -ne 0 ]]; then
+        print_err "Не удалось распаковать архив (формат: ${archive_ext})"
+        rm -rf "$tmpdir"
+        systemctl start teamspeak 2>/dev/null || true
+        return 1
+    fi
+    rm -rf "$tmpdir"
+
+    # - fallback: если архив всё-таки с верхней папкой - поднимаем содержимое -
+    if [[ ! -f "$TS_BIN" ]]; then
+        local _inner
+        _inner=$(find "$TS_DIR" -maxdepth 2 -name tsserver -type f 2>/dev/null | head -1)
+        if [[ -n "$_inner" ]]; then
+            local _idir; _idir=$(dirname "$_inner")
+            shopt -s dotglob
+            mv "${_idir}"/* "$TS_DIR"/ 2>/dev/null || true
+            shopt -u dotglob
+            rmdir "$_idir" 2>/dev/null || true
+        fi
+    fi
+    if [[ ! -f "$TS_BIN" ]]; then
+        print_err "Бинарь tsserver не найден после распаковки"
+        systemctl start teamspeak 2>/dev/null || true
+        return 1
+    fi
+    rm -rf "$tmpdir"
     chmod +x "$TS_BIN"; chown -R "${TS_USER}:${TS_USER}" "$TS_DIR"
     systemctl start teamspeak; sleep 3
-    systemctl is-active --quiet teamspeak && print_ok "Обновлён до ${lat}" || print_err "Не запустился"
+    if ! systemctl is-active --quiet teamspeak; then
+        print_err "Не запустился после обновления, версия в env/book не обновлена"
+        return 1
+    fi
+    # - версия в env/book обновляется только после подтверждённого запуска -
+    print_ok "Обновлён до ${lat}"
     sed -i "s/^TS_VERSION=.*/TS_VERSION=\"${lat}\"/" "$TS_ENV" 2>/dev/null || true
     book_write ".teamspeak.version" "$lat"
     return 0
@@ -5967,8 +6693,12 @@ ts_delete() {
     rm -f "$TS_UNIT" 2>/dev/null || true; systemctl daemon-reload
     if [[ -f "$TS_ENV" ]] && command -v ufw &>/dev/null; then
         source "$TS_ENV"
-        [[ -n "${TS_VOICE_PORT:-}" ]] && ufw delete allow "${TS_VOICE_PORT}/udp" 2>/dev/null || true
-        [[ -n "${TS_FT_PORT:-}" ]] && ufw delete allow "${TS_FT_PORT}/tcp" 2>/dev/null || true
+        if [[ -n "${TS_VOICE_PORT:-}" ]]; then
+            ufw delete allow "${TS_VOICE_PORT}/udp" 2>/dev/null || true
+        fi
+        if [[ -n "${TS_FT_PORT:-}" ]]; then
+            ufw delete allow "${TS_FT_PORT}/tcp" 2>/dev/null || true
+        fi
     fi
     rm -f "$TS_ENV" 2>/dev/null || true
     book_write ".teamspeak.installed" "false" bool
@@ -6024,20 +6754,19 @@ mbl_install() {
 
     # - пароль сервера (для подключения клиентов) -
     local srv_pass=""
-    echo -ne "  ${BOLD}Пароль сервера (пустой = без пароля):${NC} "
-    read -r srv_pass
+    ask_raw "$(printf '  \033[1mПароль сервера (пустой = без пароля):\033[0m ')" srv_pass
     echo ""
 
     # - пароль SuperUser (администратор): двойной ввод с проверкой -
     local su_pass="" su_pass2=""
     while true; do
-        echo -ne "  ${BOLD}Пароль SuperUser (мин. 6 символов):${NC} "
-        read -r su_pass; echo ""
+        ask_raw "$(printf '  \033[1mПароль SuperUser (мин. 6 символов):\033[0m ')" su_pass
+        echo ""
         if [[ ${#su_pass} -lt 6 ]]; then
             print_err "Минимум 6 символов"; continue
         fi
-        echo -ne "  ${BOLD}Повторите пароль SuperUser:${NC} "
-        read -r su_pass2; echo ""
+        ask_raw "$(printf '  \033[1mПовторите пароль SuperUser:\033[0m ')" su_pass2
+        echo ""
         if [[ "$su_pass" != "$su_pass2" ]]; then
             print_err "Пароли не совпадают"; continue
         fi
@@ -6077,6 +6806,8 @@ mbl_install() {
         (( db_wait++ ))
     done
 
+    # - флаг успеха установки SuperUser пароля, попадает в book/echo условно -
+    local su_set="false"
     if [[ -z "$db_found" ]]; then
         print_warn "БД Mumble не появилась за 15 сек, SuperUser пароль не задан"
     else
@@ -6085,7 +6816,8 @@ mbl_install() {
         sleep 1
         if murmurd -ini "$MBL_CONF" -supw "$su_pass" 2>/dev/null; then
             print_ok "SuperUser пароль задан"
-			book_write ".mumble.superuser_pass" "$su_pass"
+            book_write ".mumble.superuser_pass" "$su_pass"
+            su_set="true"
         else
             print_warn "Не удалось задать SuperUser пароль через murmurd"
         fi
@@ -6113,7 +6845,7 @@ mbl_install() {
     book_write ".mumble.installed" "true" bool
     book_write ".mumble.server_ip" "$server_ip"
     book_write ".mumble.port" "$port" number
-    book_write ".mumble.superuser_set" "true" bool
+    book_write ".mumble.superuser_set" "$su_set" bool
     book_write ".mumble.installed_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     echo ""
@@ -6122,7 +6854,11 @@ mbl_install() {
     echo -e "${GREEN}${BOLD}====================================================${NC}"
     echo -e "  ${BOLD}Адрес:${NC}       ${server_ip}:${port}"
     echo -e "  ${BOLD}Пароль:${NC}      ${srv_pass:-без пароля}"
-    echo -e "  ${BOLD}SuperUser:${NC}   пароль задан (логин: SuperUser)"
+    if [[ "$su_set" == "true" ]]; then
+        echo -e "  ${BOLD}SuperUser:${NC}   пароль задан (логин: SuperUser)"
+    else
+        echo -e "  ${BOLD}SuperUser:${NC}   ${YELLOW}НЕ задан${NC} (логин: SuperUser, задай вручную: murmurd -ini ${MBL_CONF} -supw)"
+    fi
     echo ""
     return 0
 }
@@ -6135,7 +6871,7 @@ mbl_show_status() {
         print_err "Сервис: не запущен"
     fi
     local port=""
-    [[ -f "$MBL_CONF" ]] && port=$(grep -oP '^port=\K[0-9]+' "$MBL_CONF" || echo "64738")
+    [[ -f "$MBL_CONF" ]] && port=$(grep -oP '^port=\K[0-9]+' "$MBL_CONF" 2>/dev/null)
     print_info "Порт: ${port:-64738}"
     local server_ip; server_ip=$(book_read ".mumble.server_ip")
     [[ -n "$server_ip" ]] && print_info "Адрес: ${server_ip}:${port:-64738}"
@@ -6146,16 +6882,16 @@ mbl_show_creds() {
     print_section "Данные для подключения"
     local server_ip port srv_pass su_pass
     server_ip=$(book_read ".mumble.server_ip")
-	su_pass=$(book_read ".mumble.superuser_pass")
+    su_pass=$(book_read ".mumble.superuser_pass")
     [[ -f "$MBL_CONF" ]] && {
-        port=$(grep -oP '^port=\K[0-9]+' "$MBL_CONF" || echo "64738")
-        srv_pass=$(grep -oP '^serverpassword=\K.*' "$MBL_CONF" || echo "")
+        port=$(grep -oP '^port=\K[0-9]+' "$MBL_CONF" 2>/dev/null)
+        srv_pass=$(grep -oP '^serverpassword=\K.*' "$MBL_CONF" 2>/dev/null)
     }
     echo ""
     echo -e "  ${BOLD}Адрес:${NC}       ${server_ip:-?}:${port:-64738}"
     echo -e "  ${BOLD}Пароль:${NC}      ${srv_pass:-без пароля}"
     echo -e "  ${BOLD}SuperUser:${NC}   логин SuperUser"
-	echo -e "  ${BOLD}Пароль SU:${NC}   ${su_pass:-не сохранён}"
+    echo -e "  ${BOLD}Пароль SU:${NC}   ${su_pass:-не сохранён}"
     echo ""
     return 0
 }
@@ -6229,7 +6965,7 @@ mbl_delete() {
     systemctl disable "$MBL_SERVICE" 2>/dev/null || true
     apt-get purge -y -qq mumble-server 2>/dev/null || true
     local port=""
-    [[ -f "$MBL_CONF" ]] && port=$(grep -oP '^port=\K[0-9]+' "$MBL_CONF" || true)
+    [[ -f "$MBL_CONF" ]] && port=$(grep -oP '^port=\K[0-9]+' "$MBL_CONF" 2>/dev/null)
     if [[ -n "$port" ]] && command -v ufw &>/dev/null; then
         ufw delete allow "${port}/tcp" 2>/dev/null || true
         ufw delete allow "${port}/udp" 2>/dev/null || true
@@ -6267,7 +7003,7 @@ unbound_install() {
     echo ""
     local dns_mode="recursive"
     while true; do
-        echo -ne "  ${BOLD}Выбор?${NC} [1]: "; read -r _dm
+        ask_raw "$(printf '  \033[1mВыбор?\033[0m [1]: ')" _dm
         case "${_dm:-1}" in
             1) dns_mode="recursive"; break ;;
             2) dns_mode="forward"; break ;;
@@ -6521,14 +7257,36 @@ diag_run() {
     local _TS; _TS=$(date +%Y%m%d_%H%M%S)
     local RPT_TXT="/root/diag_${_TS}.txt"
     local RPT_HTML="/root/diag_${_TS}.html"
+
+    # - дублирование вывода в файл через named pipe -
+    # - process substitution через >(tee ...) не даёт надёжного PID: $! может -
+    # - указывать не на tee, wait зависает или возвращает 127. mkfifo решает: -
+    # - tee запускается как явный bg-child shell'а, PID гарантированно наш -
+    # - оригинальные stdout/stderr сохранены в fd 3 и 4 -
     exec 3>&1 4>&2
-    # - сохраняем PID фонового tee: без этого trap закроет pipe, -
-    # - но tee может дописывать буфер уже после выхода из функции, -
-    # - ломая вывод меню главного цикла -
-    exec > >(tee -a "$RPT_TXT"); local _TEE_PID=$!
-    exec 2>&1
-    # - страховка: восстановить stdout + дождаться завершения tee -
-    trap 'exec 1>&3 2>&4 3>&- 4>&-; [[ -n "$_TEE_PID" ]] && wait "$_TEE_PID" 2>/dev/null' RETURN
+    local _DG_TMPDIR _DG_FIFO _DG_TEE_PID=""
+    _DG_TMPDIR=$(mktemp -d -t diag.XXXXXXXX)
+    _DG_FIFO="${_DG_TMPDIR}/out"
+    mkfifo -m 600 "$_DG_FIFO"
+    # - tee наследует текущий stdout (экран), далее exec перенаправит stdout в fifo -
+    # - так tee продолжит писать на экран, а функция пишет в pipe -
+    tee -a "$RPT_TXT" < "$_DG_FIFO" &
+    _DG_TEE_PID=$!
+    exec > "$_DG_FIFO" 2>&1
+
+    # - cleanup: закрыть pipe (EOF для tee) -> дождаться tee -> убрать tmp -
+    # - идемпотентно: повторный вызов из разных trap не упадёт -
+    _dg_cleanup() {
+        [[ -z "${_DG_TEE_PID:-}" ]] && return 0
+        exec 1>&3 2>&4 3>&- 4>&- 2>/dev/null || true
+        wait "$_DG_TEE_PID" 2>/dev/null || true
+        [[ -n "${_DG_TMPDIR:-}" && -d "$_DG_TMPDIR" ]] && rm -rf "$_DG_TMPDIR"
+        _DG_TEE_PID=""
+    }
+    # - штатный возврат -
+    trap '_dg_cleanup' RETURN
+    # - Ctrl+C: аккуратно закрыть файл, восстановить терминал, выйти с 130 -
+    trap '_dg_cleanup; trap - INT; kill -INT $$' INT
 
     # --> ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ <--
     local D_CPU="?" D_CORES=1 D_RAM=0 D_RAMFREE=0 D_SWAP=0 D_SWAPUSED=0
@@ -6828,7 +7586,7 @@ diag_run() {
         while read -r use mp; do local pct="${use%\%}"
             [[ "$pct" =~ ^[0-9]+$ && $pct -gt 85 ]] && _dg_red "Диск ${mp}: ${use}|journalctl --vacuum-size=100M"
         done < <(df -h | grep -v tmpfs | awk 'NR>1{print $5, $6}')
-		return 0
+        return 0
     }
     _dg_services() {
         _sv() { local svc="$1" label="$2" st
@@ -6876,7 +7634,7 @@ diag_run() {
             done
         fi
     }
-	
+
     # --> ПРОКСИ (MTProto, SOCKS5, Hysteria 2) <--
     _dg_proxy() {
         # - MTProto мультиинстанс -
@@ -6947,7 +7705,7 @@ diag_run() {
                 _dg_red "Hysteria 2 #${inst_id} остановлен|systemctl start ${svc}"
             fi
         done
-		
+
         # - legacy fallback: старый конфиг /etc/hysteria/hysteria.env -
         if [[ $hy2_count -eq 0 && -f /etc/hysteria/hysteria.env ]]; then
             unset PORT VERSION
@@ -6963,7 +7721,7 @@ diag_run() {
             print_info "Hysteria 2: не установлен"
         fi
     }
-	
+
     # --> TELEGRAM МОНИТОРИНГ <--
     _dg_tgmon() {
         if [[ -f /etc/vps-eli-stack/telegrambot.env ]]; then
@@ -6981,7 +7739,7 @@ diag_run() {
     }
     _dg_maintenance() {
         local jl; jl=$(grep "SystemMaxUse" /etc/systemd/journald.conf.d/size-limit.conf 2>/dev/null | grep -oP '=\K.*' || echo "")
-        local js; js=$(journalctl --disk-usage 2>/dev/null | grep -oP '[\d.]+\s*[KMGT]?B' | tail -1 || echo "?")
+        local js; js=$(journalctl --disk-usage 2>/dev/null | grep -oP '[\d.]+\s*[KMGTPE]i?B?' | tail -1 || echo "?")
         [[ -n "$jl" ]] && { print_ok "Journald: ${js}/${jl}"; D_MAINT_TABLE+=("Journald|[OK] ${js} / ${jl}"); } \
             || { print_warn "Journald: без лимита"; _dg_yellow "Journald без лимита|Запусти Автообслуживание"; D_MAINT_TABLE+=("Journald|[!] Без лимита"); }
         local cr; cr=$(crontab -l 2>/dev/null | grep -v "^#" | grep -c "reboot" | tr -d '[:space:]' || echo "0")
@@ -7309,6 +8067,9 @@ CSS
     echo -e "${BOLD}====================================================${NC}"
     echo ""
     # - FD 3/4 закроются автоматически через trap RETURN -
+    # - cleanup до eli_pause: tee должен закрыться, иначе read зависнет за pipe -
+    _dg_cleanup
+    eli_pause
     return 0
 }
 
@@ -7337,7 +8098,7 @@ _pr_find_file() {
         local found
         found=$(find "$dir" -maxdepth 3 -name "$pattern" \
             -not -name "*-shm" -not -name "*-wal" 2>/dev/null | head -1 || true)
-        [[ -n "$found" ]] && { echo "$found"; return; }
+        [[ -n "$found" ]] && { echo "$found"; return 0; }
     done
     echo ""
 }
@@ -7364,13 +8125,21 @@ prayer_run() {
     print_section "0. Проверка книги (book_of_Eli.json)"
     if [[ ! -f "$_BOOK" ]]; then
         _pr_warn "Книга не найдена, создаём"
-        book_init && _pr_fixed "Книга создана: $_BOOK" || _pr_failed "Не удалось создать книгу"
+        if book_init; then
+            _pr_fixed "Книга создана: $_BOOK"
+        else
+            _pr_failed "Не удалось создать книгу"
+        fi
     elif ! jq empty "$_BOOK" 2>/dev/null; then
         local bak
         bak="${_BOOK}.broken.$(date +%Y%m%d_%H%M%S)"
         mv "$_BOOK" "$bak"
         _pr_warn "JSON повреждён, бэкап: $bak"
-        book_init && _pr_fixed "Книга пересоздана"
+        if book_init; then
+            _pr_fixed "Книга пересоздана"
+        else
+            _pr_failed "Не удалось пересоздать книгу"
+        fi
     else
         _pr_found "Книга в порядке (обновлена: $(book_read '._meta.updated'))"
     fi
@@ -7382,28 +8151,42 @@ prayer_run() {
     if [[ "$real_kernel" != "$book_kernel" ]]; then
         _pr_updated "Ядро: ${book_kernel:-нет} -> $real_kernel"
         book_write ".system.kernel" "$real_kernel"
-    else _pr_found "Ядро: $real_kernel"; fi
+    else
+        _pr_found "Ядро: $real_kernel"
+    fi
 
     local real_ip; real_ip=$(curl -4 -fsSL --connect-timeout 5 ifconfig.me 2>/dev/null || echo "")
     local book_ip; book_ip=$(book_read ".system.server_ip")
-    if [[ -n "$real_ip" && "$real_ip" != "$book_ip" ]]; then
+    if [[ -z "$real_ip" ]]; then
+        _pr_warn "IP: не удалось определить (curl ifconfig.me недоступен)"
+    elif [[ "$real_ip" != "$book_ip" ]]; then
         _pr_updated "IP: ${book_ip:-нет} -> $real_ip"
         book_write ".system.server_ip" "$real_ip"
         book_write "._meta.server_ip" "$real_ip"
-    else _pr_found "IP: $real_ip"; fi
+    else
+        _pr_found "IP: $real_ip"
+    fi
 
-    local real_ssh; real_ssh=$(grep -oP '^Port\s+\K[0-9]+' /etc/ssh/sshd_config 2>/dev/null || echo "22")
+    local real_ssh; real_ssh=$(ssh_get_port)
     local book_ssh; book_ssh=$(book_read ".system.ssh_port")
     if [[ "$real_ssh" != "$book_ssh" ]]; then
         _pr_updated "SSH порт: ${book_ssh:-нет} -> $real_ssh"
         book_write ".system.ssh_port" "$real_ssh" number
-    else _pr_found "SSH порт: $real_ssh"; fi
+    else
+        _pr_found "SSH порт: $real_ssh"
+    fi
 
-    local real_rl; real_rl=$(grep -oP '^PermitRootLogin\s+\K\S+' /etc/ssh/sshd_config 2>/dev/null || echo "")
+    local real_rl; real_rl=$(sshd -T 2>/dev/null | awk '/^permitrootlogin /{print $2; exit}')
+    if [[ -z "$real_rl" ]]; then
+        real_rl=$(grep -oP '^\s*PermitRootLogin\s+\K\S+' /etc/ssh/sshd_config 2>/dev/null | head -1)
+    fi
     [[ -n "$real_rl" ]] && book_write ".system.permit_root_login" "$real_rl"
 
     if command -v ufw &>/dev/null; then
-        local ufw_st; ufw_st=$(ufw status 2>/dev/null | grep -q "^Status: active" && echo "true" || echo "false")
+        local ufw_st="false"
+        if ufw status 2>/dev/null | grep -q "^Status: active"; then
+            ufw_st="true"
+        fi
         book_write ".ufw.active" "$ufw_st" bool
     fi
 
@@ -7423,7 +8206,9 @@ prayer_run() {
         if [[ "$awg_ver" != "$bv" ]]; then
             _pr_updated "AWG: ${bv:-нет} -> $awg_ver"
             book_write ".awg.version" "$awg_ver"
-        else _pr_found "AWG: $awg_ver"; fi
+        else
+            _pr_found "AWG: $awg_ver"
+        fi
 
         # - проверка что модуль ядра загружен (может слететь после обновления ядра) -
         if lsmod 2>/dev/null | grep -q "^amneziawg"; then
@@ -7449,19 +8234,32 @@ prayer_run() {
             fi
         fi
 
+        # - nullglob: если файлов нет, for пропускается вместо итерации с литералом -
+        local _saved_nullglob; _saved_nullglob=$(shopt -p nullglob)
+        shopt -s nullglob
         for env_f in "${AWG_SETUP_DIR}"/iface_*.env; do
-            [[ -f "$env_f" ]] || continue
             # shellcheck disable=SC1090
             source "$env_f" 2>/dev/null || continue
-            local iface="${IFACE_NAME:-}"; [[ -z "$iface" ]] && continue
+            local iface="${IFACE_NAME:-}"
+            [[ -z "$iface" ]] && continue
             _pr_check "Интерфейс: $iface"
             local conf="${AWG_CONF_DIR}/${iface}.conf"
-            [[ -f "$conf" ]] && _pr_found "  Конфиг: $conf" || _pr_warn "  Конфиг не найден: $conf"
+            if [[ -f "$conf" ]]; then
+                _pr_found "  Конфиг: $conf"
+            else
+                _pr_warn "  Конфиг не найден: $conf"
+            fi
             local kf="${AWG_SETUP_DIR}/server_${iface}/server.key"
-            [[ -f "$kf" ]] && _pr_found "  Ключи: OK" || _pr_failed "  Ключ не найден: $kf"
+            if [[ -f "$kf" ]]; then
+                _pr_found "  Ключи: OK"
+            else
+                _pr_failed "  Ключ не найден: $kf"
+            fi
             if systemctl is-active --quiet "awg-quick@${iface}" 2>/dev/null; then
                 _pr_found "  Сервис: активен"
-            else _pr_warn "  Сервис: не активен"; fi
+            else
+                _pr_warn "  Сервис: не активен"
+            fi
 
             local iobj
             # - валидация: --argjson требует валидный JSON (число без пробелов/знаков) -
@@ -7492,6 +8290,8 @@ prayer_run() {
                     "i1":$i1,"i2":$i2,"i3":$i3,"i4":$i4,"i5":$i5}}' 2>/dev/null || echo "{}")
             book_write_obj ".awg.interfaces.${iface}" "$iobj"
         done
+        # - восстанавливаем исходное состояние nullglob -
+        eval "$_saved_nullglob"
     fi
 
     # --> 3. OUTLINE <--
@@ -7502,14 +8302,19 @@ prayer_run() {
         local bkp; bkp=$(book_read ".outline.manager_key_path")
         local rkp=""
         if [[ -n "$bkp" && -f "$bkp" ]]; then
-            rkp="$bkp"; _pr_found "manager_key: $rkp"
+            rkp="$bkp"
+            _pr_found "manager_key: $rkp"
         else
             rkp=$(_pr_find_file "manager_key.json" "/opt/outline/persisted-state" "/opt/outline" "/etc/outline")
-            [[ -n "$rkp" ]] && { _pr_fixed "manager_key найден: $rkp"; book_write ".outline.manager_key_path" "$rkp"; } \
-                || _pr_failed "manager_key.json не найден"
+            if [[ -n "$rkp" ]]; then
+                _pr_fixed "manager_key найден: $rkp"
+                book_write ".outline.manager_key_path" "$rkp"
+            else
+                _pr_failed "manager_key.json не найден"
+            fi
         fi
         if [[ -n "$rkp" && -f "$rkp" ]]; then
-            local au; au=$(grep -oP '"apiUrl":\s*"\K[^"]+' "$rkp" | head -1 || true)
+            local au; au=$(grep -oP '"apiUrl":\s*"\K[^"]+' "$rkp" 2>/dev/null | head -1)
             [[ -n "$au" ]] && book_write ".outline.api_url" "$au"
         fi
         local ol_env="/etc/outline/outline.env"
@@ -7524,9 +8329,14 @@ API_PORT="$(book_read '.outline.api_port')"
 MGMT_PORT="$(book_read '.outline.mgmt_port')"
 KEYS_PORT="$(book_read '.outline.keys_port')"
 EOF
-                chmod 600 "$ol_env"; _pr_fixed "outline.env восстановлен"
-            else _pr_failed "Нет данных для восстановления outline.env"; fi
-        else _pr_found "outline.env: $ol_env"; fi
+                chmod 600 "$ol_env"
+                _pr_fixed "outline.env восстановлен"
+            else
+                _pr_failed "Нет данных для восстановления outline.env"
+            fi
+        else
+            _pr_found "outline.env: $ol_env"
+        fi
     else
         _pr_check "Outline не установлен"
         book_write ".outline.installed" "false" bool
@@ -7536,17 +8346,27 @@ EOF
     print_section "4. 3X-UI"
     if [[ -f "/usr/local/x-ui/x-ui" ]]; then
         book_write ".3xui.installed" "true" bool
-        systemctl is-active --quiet x-ui 2>/dev/null && _pr_found "x-ui: активен" || _pr_warn "x-ui: не активен"
+        if systemctl is-active --quiet x-ui 2>/dev/null; then
+            _pr_found "x-ui: активен"
+        else
+            _pr_warn "x-ui: не активен"
+        fi
         local rv; rv=$(/usr/local/x-ui/x-ui -v 2>/dev/null | head -1 || echo "")
         [[ -n "$rv" ]] && book_write ".3xui.version" "$rv"
         local rd; rd=$(_pr_find_file "x-ui.db" "/usr/local/x-ui" "/etc/x-ui")
-        [[ -n "$rd" ]] && { _pr_found "x-ui.db: $rd"; book_write ".3xui.db_path" "$rd"; } || _pr_failed "x-ui.db не найдена"
+        if [[ -n "$rd" ]]; then
+            _pr_found "x-ui.db: $rd"
+            book_write ".3xui.db_path" "$rd"
+        else
+            _pr_failed "x-ui.db не найдена"
+        fi
         local xe="/etc/3xui/3xui.env"
         if [[ ! -f "$xe" ]]; then
             _pr_warn "3xui.env не найден, восстанавливаем из книги"
             local bp; bp=$(book_read ".3xui.panel_port")
             if [[ -n "$bp" && "$bp" != "0" ]]; then
-                mkdir -p /etc/3xui; chmod 700 /etc/3xui
+                mkdir -p /etc/3xui
+                chmod 700 /etc/3xui
                 cat > "$xe" << EOF
 SERVER_IP="$(book_read '.3xui.server_ip')"
 PANEL_PORT="$(book_read '.3xui.panel_port')"
@@ -7555,8 +8375,11 @@ PANEL_USER="$(book_read '.3xui.panel_user')"
 PANEL_PASS="$(book_read '.3xui.panel_pass')"
 VERSION="${rv}"
 EOF
-                chmod 600 "$xe"; _pr_fixed "3xui.env восстановлен"
-            else _pr_failed "Нет данных для восстановления 3xui.env"; fi
+                chmod 600 "$xe"
+                _pr_fixed "3xui.env восстановлен"
+            else
+                _pr_failed "Нет данных для восстановления 3xui.env"
+            fi
         else
             _pr_found "3xui.env: $xe"
             source "$xe" 2>/dev/null || true
@@ -7566,7 +8389,8 @@ EOF
             [[ -n "${PANEL_PASS:-}" ]] && book_write ".3xui.panel_pass" "${PANEL_PASS}"
         fi
     else
-        _pr_check "3X-UI не установлен"; book_write ".3xui.installed" "false" bool
+        _pr_check "3X-UI не установлен"
+        book_write ".3xui.installed" "false" bool
     fi
 
     # --> 5. TEAMSPEAK <--
@@ -7574,15 +8398,25 @@ EOF
     local tsb="/opt/teamspeak/tsserver"
     if [[ -f "$tsb" ]]; then
         book_write ".teamspeak.installed" "true" bool
-        systemctl is-active --quiet teamspeak 2>/dev/null && _pr_found "teamspeak: активен" || _pr_warn "teamspeak: не активен"
+        if systemctl is-active --quiet teamspeak 2>/dev/null; then
+            _pr_found "teamspeak: активен"
+        else
+            _pr_warn "teamspeak: не активен"
+        fi
         local tdb; tdb=$(_pr_find_file "*.sqlitedb" "/opt/teamspeak" "/var/lib/teamspeak")
-        [[ -n "$tdb" ]] && { _pr_found "БД: $tdb"; book_write ".teamspeak.db_path" "$tdb"; } || _pr_warn "БД не найдена"
+        if [[ -n "$tdb" ]]; then
+            _pr_found "БД: $tdb"
+            book_write ".teamspeak.db_path" "$tdb"
+        else
+            _pr_warn "БД не найдена"
+        fi
         local te="/etc/teamspeak/teamspeak.env"
         if [[ ! -f "$te" ]]; then
             _pr_warn "teamspeak.env не найден, восстанавливаем из книги"
             local tbi; tbi=$(book_read ".teamspeak.server_ip")
             if [[ -n "$tbi" ]]; then
-                mkdir -p /etc/teamspeak; chmod 700 /etc/teamspeak
+                mkdir -p /etc/teamspeak
+                chmod 700 /etc/teamspeak
                 cat > "$te" << EOF
 SERVER_IP="$(book_read '.teamspeak.server_ip')"
 TS_VOICE_PORT="$(book_read '.teamspeak.voice_port')"
@@ -7592,8 +8426,11 @@ TS_PRIV_KEY="$(book_read '.teamspeak.priv_key')"
 TS_VERSION="$(book_read '.teamspeak.version')"
 TS_DB_PATH="${tdb}"
 EOF
-                chmod 600 "$te"; _pr_fixed "teamspeak.env восстановлен"
-            else _pr_failed "Нет данных для восстановления"; fi
+                chmod 600 "$te"
+                _pr_fixed "teamspeak.env восстановлен"
+            else
+                _pr_failed "Нет данных для восстановления"
+            fi
         else
             _pr_found "teamspeak.env: $te"
             source "$te" 2>/dev/null || true
@@ -7603,7 +8440,8 @@ EOF
             [[ -n "${TS_PRIV_KEY:-}" ]] && book_write ".teamspeak.priv_key" "${TS_PRIV_KEY}"
         fi
     else
-        _pr_check "TeamSpeak не установлен"; book_write ".teamspeak.installed" "false" bool
+        _pr_check "TeamSpeak не установлен"
+        book_write ".teamspeak.installed" "false" bool
     fi
 
     # --> 6. UNBOUND <--
@@ -7612,24 +8450,53 @@ EOF
         if systemctl is-active --quiet unbound 2>/dev/null; then
             book_write ".unbound.installed" "true" bool
             _pr_found "Unbound: активен"
-            local tr; tr=$(dig +short +time=2 google.com @127.0.0.1 2>/dev/null | grep -oP '^\d+\.\d+\.\d+\.\d+$' | head -1 || true)
-            [[ -n "$tr" ]] && _pr_found "Резолвинг: OK ($tr)" || _pr_warn "Резолвинг не отвечает"
-        else _pr_warn "Unbound установлен но не запущен"; fi
-    else _pr_check "Unbound не установлен"; fi
+            local tr; tr=$(dig +short +time=2 google.com @127.0.0.1 2>/dev/null | grep -oP '^\d+\.\d+\.\d+\.\d+$' | head -1)
+            if [[ -n "$tr" ]]; then
+                _pr_found "Резолвинг: OK ($tr)"
+            else
+                _pr_warn "Резолвинг не отвечает"
+            fi
+        else
+            _pr_warn "Unbound установлен но не запущен"
+        fi
+    else
+        _pr_check "Unbound не установлен"
+    fi
 
     # --> 7. MUMBLE <--
     print_section "7. Mumble"
+    # - mumble-server и murmurd: оба варианта legacy/upstream проверяем зеркально -
+    local mbl_active="" mbl_installed=""
     if systemctl is-active --quiet mumble-server 2>/dev/null; then
+        mbl_active="mumble-server"
+    elif systemctl is-active --quiet murmurd 2>/dev/null; then
+        mbl_active="murmurd"
+    fi
+    if dpkg -l mumble-server 2>/dev/null | grep -q "^ii"; then
+        mbl_installed="mumble-server"
+    elif dpkg -l murmur 2>/dev/null | grep -q "^ii"; then
+        mbl_installed="murmur"
+    fi
+
+    if [[ -n "$mbl_active" ]]; then
         book_write ".mumble.installed" "true" bool
-        _pr_found "mumble-server: активен"
+        _pr_found "${mbl_active}: активен"
         local mbl_port=""
-        [[ -f /etc/mumble-server.ini ]] && mbl_port=$(grep -oP '^port=\K[0-9]+' /etc/mumble-server.ini || echo "64738")
+        if [[ -f /etc/mumble-server.ini ]]; then
+            mbl_port=$(grep -oP '^port=\K[0-9]+' /etc/mumble-server.ini 2>/dev/null)
+        fi
+        if [[ -z "$mbl_port" && -f /etc/murmur.ini ]]; then
+            mbl_port=$(grep -oP '^port=\K[0-9]+' /etc/murmur.ini 2>/dev/null)
+        fi
         [[ -n "$mbl_port" ]] && book_write ".mumble.port" "$mbl_port" number
         local mbl_ip; mbl_ip=$(book_read ".mumble.server_ip")
-        [[ -z "$mbl_ip" ]] && { mbl_ip=$(curl -4 -fsSL --connect-timeout 5 ifconfig.me 2>/dev/null || echo ""); book_write ".mumble.server_ip" "$mbl_ip"; }
+        if [[ -z "$mbl_ip" ]]; then
+            mbl_ip=$(curl -4 -fsSL --connect-timeout 5 ifconfig.me 2>/dev/null || echo "")
+            [[ -n "$mbl_ip" ]] && book_write ".mumble.server_ip" "$mbl_ip"
+        fi
         _pr_found "Адрес: ${mbl_ip:-?}:${mbl_port:-64738}"
-    elif dpkg -l mumble-server 2>/dev/null | grep -q "^ii"; then
-        _pr_warn "mumble-server установлен но не запущен"
+    elif [[ -n "$mbl_installed" ]]; then
+        _pr_warn "${mbl_installed} установлен но не запущен"
         book_write ".mumble.installed" "true" bool
     else
         _pr_check "Mumble не установлен"
@@ -7641,9 +8508,9 @@ EOF
 
     # --> ИТОГОВЫЙ ОТЧЁТ <--
     echo ""
-    echo -e "${BOLD}${CYAN}+==========================================================+${NC}"
-    echo -e "${BOLD}${CYAN}|                   ИТОГОВЫЙ ОТЧЁТ                        |${NC}"
-    echo -e "${BOLD}${CYAN}+==========================================================+${NC}"
+    echo -e "${BOLD}${CYAN}============================================================${NC}"
+    echo -e "${BOLD}${CYAN}                      ИТОГОВЫЙ ОТЧЁТ${NC}"
+    echo -e "${BOLD}${CYAN}============================================================${NC}"
     echo ""
 
     if [[ ${#_PR_FIXED[@]} -gt 0 ]]; then
@@ -7669,6 +8536,7 @@ EOF
     echo -e "  ${BOLD}Книга:${NC} $_BOOK"
     echo -e "  ${BOLD}Время:${NC} $(date '+%d.%m.%Y %H:%M:%S')"
     echo ""
+    eli_pause
     return 0
 }
 
@@ -7682,7 +8550,9 @@ ssh_show_status() {
     local port; port=$(ssh_get_port)
     print_info "Порт: ${port}"
 
-    local root_pw; root_pw=$(grep -oP '^PermitRootLogin\s+\K\S+' /etc/ssh/sshd_config 2>/dev/null || echo "не задан")
+    # - sshd -T учитывает drop-in конфиги (/etc/ssh/sshd_config.d/*.conf) -
+    local sshd_eff; sshd_eff=$(sshd -T 2>/dev/null || true)
+    local root_pw; root_pw=$(ssh_get_permitrootlogin)
     if [[ "$root_pw" == "prohibit-password" || "$root_pw" == "without-password" ]]; then
         print_ok "Root: только по ключу (${root_pw})"
     elif [[ "$root_pw" == "no" ]]; then
@@ -7691,22 +8561,34 @@ ssh_show_status() {
         print_warn "Root: ${root_pw}"
     fi
 
-    local pass_auth; pass_auth=$(grep -oP '^PasswordAuthentication\s+\K\S+' /etc/ssh/sshd_config 2>/dev/null || echo "не задан")
-    [[ "$pass_auth" == "no" ]] && print_ok "Парольный вход: отключён" || print_warn "Парольный вход: ${pass_auth:-yes}"
+    local pass_auth=""
+    if [[ -n "$sshd_eff" ]]; then
+        pass_auth=$(echo "$sshd_eff" | awk '/^passwordauthentication /{print $2; exit}')
+    fi
+    [[ -z "$pass_auth" ]] && pass_auth=$(grep -oP '^\s*PasswordAuthentication\s+\K\S+' /etc/ssh/sshd_config 2>/dev/null | head -1)
+    if [[ "$pass_auth" == "no" ]]; then
+        print_ok "Парольный вход: отключён"
+    else
+        print_warn "Парольный вход: ${pass_auth:-yes}"
+    fi
 
     if systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null; then
         print_ok "Сервис sshd: активен"
-    else print_err "Сервис sshd: не запущен"; fi
+    else
+        print_err "Сервис sshd: не запущен"
+    fi
 
     if systemctl is-active --quiet fail2ban 2>/dev/null; then
-        local banned; banned=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | grep -oP '\d+' | head -1 || echo "0")
-        print_ok "Fail2ban: активен (заблокировано: ${banned})"
-    else print_warn "Fail2ban: не запущен"; fi
+        local banned; banned=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | grep -oP '\d+' | head -1)
+        print_ok "Fail2ban: активен (заблокировано: ${banned:-0})"
+    else
+        print_warn "Fail2ban: не запущен"
+    fi
 
     local auth_keys="/root/.ssh/authorized_keys"
     if [[ -f "$auth_keys" ]]; then
-        local kc; kc=$(grep -c "^ssh-\|^ecdsa-\|^sk-" "$auth_keys" 2>/dev/null || echo "0")
-        print_info "Ключей root: ${kc}"
+        local kc; kc=$(grep -c "^ssh-\|^ecdsa-\|^sk-" "$auth_keys" 2>/dev/null)
+        print_info "Ключей root: ${kc:-0}"
     fi
     return 0
 }
@@ -7718,29 +8600,47 @@ ssh_change_port() {
     local new_port=""
     while true; do
         echo -e "  ${CYAN}Рекомендуется порт в диапазоне 10000-60000. Запомни его - без него не подключишься!${NC}"
-        echo -ne "  ${BOLD}Новый порт (1-65535):${NC} "; read -r new_port
-        validate_port "$new_port" || { print_err "1-65535"; continue; }
-        [[ "$new_port" == "$current_port" ]] && { print_warn "Уже текущий"; continue; }
-        ss -tlnp 2>/dev/null | grep -q ":${new_port} " && { print_err "Занят"; continue; }
+        ask_raw "$(printf '  \033[1mНовый порт (1-65535):\033[0m ')" new_port
+        if ! validate_port "$new_port"; then
+            print_err "1-65535"
+            continue
+        fi
+        if [[ "$new_port" == "$current_port" ]]; then
+            print_warn "Уже текущий"
+            continue
+        fi
+        if ss -H -tln 2>/dev/null | grep -Eq "[:.]${new_port}[[:space:]]"; then
+            print_err "Занят"
+            continue
+        fi
         break
     done
-    local confirm=""; ask_yn "Сменить ${current_port} -> ${new_port}?" "n" confirm
+    local confirm=""
+    ask_yn "Сменить ${current_port} -> ${new_port}?" "n" confirm
     [[ "$confirm" != "yes" ]] && return 0
 
-    local backup
-    backup="/etc/ssh/sshd_config.bak.$(date +%Y%m%d_%H%M%S)"
-    cp /etc/ssh/sshd_config "$backup"
-    sed -i "s/^#*\s*Port .*/Port ${new_port}/" /etc/ssh/sshd_config
-    grep -q "^Port " /etc/ssh/sshd_config || echo "Port ${new_port}" >> /etc/ssh/sshd_config
+    # - drop-in перекрывает sshd_config и cloud-init drop-in -
+    ssh_apply_dropin "Port" "$new_port"
 
     if ! sshd -t 2>/dev/null; then
-        print_err "Ошибка конфига, восстановление"; cp "$backup" /etc/ssh/sshd_config; return 1
+        print_err "Ошибка конфига, откат drop-in"
+        sed -i "/^[[:space:]]*Port[[:space:]]/Id" /etc/ssh/sshd_config.d/99-eli.conf 2>/dev/null
+        return 1
     fi
     if command -v ufw &>/dev/null; then
         ufw allow "${new_port}/tcp" comment "SSH" 2>/dev/null || true
         ufw delete allow "${current_port}/tcp" 2>/dev/null || true
     fi
     ssh_restart
+    sleep 1
+
+    # - валидация эффективного значения после restart -
+    local eff_port
+    eff_port=$(ssh_get_port)
+    if [[ "$eff_port" != "$new_port" ]]; then
+        print_err "Порт не применился: эффективный ${eff_port}, ожидался ${new_port}"
+        return 1
+    fi
     print_ok "SSH порт: ${new_port}"
     book_write ".system.ssh_port" "$new_port" number
     print_warn "Переподключайся: ssh -p ${new_port} root@IP"
@@ -7749,31 +8649,53 @@ ssh_change_port() {
 
 ssh_root_login() {
     print_section "PermitRootLogin"
-    local current; current=$(grep -oP '^PermitRootLogin\s+\K\S+' /etc/ssh/sshd_config 2>/dev/null || echo "?")
+    local current
+    current=$(ssh_get_permitrootlogin)
     print_info "Текущее: ${current}"
     echo ""
     echo -e "  ${GREEN}1)${NC} prohibit-password (только ключ)"
     echo -e "  ${GREEN}2)${NC} no (полностью запрещён)"
     echo -e "  ${GREEN}3)${NC} yes (разрешён)"
     local choice=""
-    while true; do echo -ne "  ${BOLD}Выбор?${NC} "; read -r choice; [[ "$choice" =~ ^[1-3]$ ]] && break; done
+    while true; do
+        ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" choice
+        [[ "$choice" =~ ^[1-3]$ ]] && break
+    done
     local new_val=""
-    case "$choice" in 1) new_val="prohibit-password" ;; 2) new_val="no" ;; 3) new_val="yes" ;; esac
+    case "$choice" in
+        1) new_val="prohibit-password" ;;
+        2) new_val="no" ;;
+        3) new_val="yes" ;;
+    esac
 
     if [[ "$new_val" != "yes" ]]; then
         local ak="/root/.ssh/authorized_keys"
-        if [[ ! -f "$ak" ]] || ! grep -qE "^ssh-|^ecdsa-" "$ak" 2>/dev/null; then
+        if [[ ! -f "$ak" ]] || ! grep -qE "^ssh-|^ecdsa-|^sk-" "$ak" 2>/dev/null; then
             print_warn "Ключей нет! Рискуешь потерять доступ!"
-            local c=""; ask_yn "Продолжить?" "n" c; [[ "$c" != "yes" ]] && return 0
+            local c=""
+            ask_yn "Продолжить?" "n" c
+            [[ "$c" != "yes" ]] && return 0
         fi
     fi
-    local backup
-    backup="/etc/ssh/sshd_config.bak.$(date +%Y%m%d_%H%M%S)"
-    cp /etc/ssh/sshd_config "$backup"
-    sed -i "s/^#*\s*PermitRootLogin .*/PermitRootLogin ${new_val}/" /etc/ssh/sshd_config
-    grep -q "^PermitRootLogin " /etc/ssh/sshd_config || echo "PermitRootLogin ${new_val}" >> /etc/ssh/sshd_config
-    if ! sshd -t 2>/dev/null; then cp "$backup" /etc/ssh/sshd_config; print_err "Ошибка, восстановлено"; return 1; fi
+
+    # - drop-in перекрывает sshd_config и cloud-init drop-in -
+    ssh_apply_dropin "PermitRootLogin" "$new_val"
+
+    if ! sshd -t 2>/dev/null; then
+        sed -i "/^[[:space:]]*PermitRootLogin[[:space:]]/Id" /etc/ssh/sshd_config.d/99-eli.conf 2>/dev/null
+        print_err "Ошибка конфига, откат drop-in"
+        return 1
+    fi
     ssh_restart
+    sleep 1
+
+    # - валидация эффективного значения -
+    local eff_val
+    eff_val=$(ssh_get_permitrootlogin)
+    if [[ "$eff_val" != "$new_val" ]]; then
+        print_err "PermitRootLogin не применился: эффективный ${eff_val}, ожидался ${new_val}"
+        return 1
+    fi
     print_ok "PermitRootLogin = ${new_val}"
     book_write ".system.permit_root_login" "$new_val"
     return 0
@@ -7784,15 +8706,53 @@ ssh_fail2ban() {
     command -v fail2ban-client &>/dev/null || apt-get install -y -qq fail2ban || true
     local ssh_port; ssh_port=$(ssh_get_port)
     local maxretry="5" bantime="3600" findtime="600"
-    echo -e "  ${CYAN}maxretry - сколько неудачных попыток входа до блокировки IP (рекомендуется 3-5).${NC}"
-    echo -ne "  ${BOLD}maxretry${NC} [${maxretry}]: "; read -r _in; [[ -n "$_in" ]] && maxretry="$_in"
-    echo -e "  ${CYAN}bantime - на сколько секунд блокировать IP (3600 = 1 час, 86400 = сутки).${NC}"
-    echo -ne "  ${BOLD}bantime (сек)${NC} [${bantime}]: "; read -r _in; [[ -n "$_in" ]] && bantime="$_in"
-    echo -e "  ${CYAN}findtime - за какой период считать попытки (600 = 10 минут).${NC}"
-    echo -ne "  ${BOLD}findtime (сек)${NC} [${findtime}]: "; read -r _in; [[ -n "$_in" ]] && findtime="$_in"
+    local _in=""
 
-    local backend logpath=""
-    [[ -f /var/log/auth.log ]] && { backend="auto"; logpath="logpath  = /var/log/auth.log"; } || backend="systemd"
+    echo -e "  ${CYAN}maxretry - сколько неудачных попыток входа до блокировки IP (рекомендуется 3-5).${NC}"
+    while true; do
+        ask_raw "$(printf '  \033[1mmaxretry\033[0m [%s]: ' "$maxretry")" _in
+        if [[ -z "$_in" ]]; then
+            break
+        fi
+        if [[ "$_in" =~ ^[0-9]+$ ]] && (( _in >= 1 )); then
+            maxretry="$_in"
+            break
+        fi
+        print_err "Нужно целое число >= 1"
+    done
+
+    echo -e "  ${CYAN}bantime - на сколько секунд блокировать IP (3600 = 1 час, 86400 = сутки).${NC}"
+    while true; do
+        ask_raw "$(printf '  \033[1mbantime (сек)\033[0m [%s]: ' "$bantime")" _in
+        if [[ -z "$_in" ]]; then
+            break
+        fi
+        if [[ "$_in" =~ ^[0-9]+$ ]] && (( _in >= 60 )); then
+            bantime="$_in"
+            break
+        fi
+        print_err "Нужно целое число >= 60"
+    done
+
+    echo -e "  ${CYAN}findtime - за какой период считать попытки (600 = 10 минут).${NC}"
+    while true; do
+        ask_raw "$(printf '  \033[1mfindtime (сек)\033[0m [%s]: ' "$findtime")" _in
+        if [[ -z "$_in" ]]; then
+            break
+        fi
+        if [[ "$_in" =~ ^[0-9]+$ ]] && (( _in >= 60 )); then
+            findtime="$_in"
+            break
+        fi
+        print_err "Нужно целое число >= 60"
+    done
+
+    # - backend detect: auth.log есть -> auto с явным logpath, иначе systemd -
+    local backend="systemd" logpath=""
+    if [[ -f /var/log/auth.log ]]; then
+        backend="auto"
+        logpath="logpath  = /var/log/auth.log"
+    fi
 
     mkdir -p /etc/fail2ban/jail.d/
     cat > /etc/fail2ban/jail.d/ssh-hardening.local << EOF
@@ -7808,7 +8768,11 @@ EOF
     systemctl enable fail2ban 2>/dev/null || true
     systemctl restart fail2ban 2>/dev/null || true
     sleep 2
-    systemctl is-active --quiet fail2ban && print_ok "Fail2ban запущен" || print_err "Не запустился"
+    if systemctl is-active --quiet fail2ban; then
+        print_ok "Fail2ban запущен"
+    else
+        print_err "Не запустился"
+    fi
     return 0
 }
 
@@ -7817,26 +8781,45 @@ ssh_generate_key() {
     echo -e "  ${GREEN}1)${NC} ed25519 (рекомендуется)"
     echo -e "  ${GREEN}2)${NC} rsa 4096"
     local kt="ed25519" ch=""
-    echo -ne "  ${BOLD}Тип?${NC} [1]: "; read -r ch; [[ "$ch" == "2" ]] && kt="rsa"
+    ask_raw "$(printf '  \033[1mТип?\033[0m [1]: ')" ch
+    [[ "$ch" == "2" ]] && kt="rsa"
     local comment=""
-    echo -ne "  ${BOLD}Комментарий${NC} [vps-key]: "; read -r comment; [[ -z "$comment" ]] && comment="vps-key"
+    ask_raw "$(printf '  \033[1mКомментарий\033[0m [vps-key]: ')" comment
+    [[ -z "$comment" ]] && comment="vps-key"
 
     local kd="/root/.ssh" kn="id_${kt}_vps"
     local kp="${kd}/${kn}"
-    mkdir -p "$kd"; chmod 700 "$kd"
+    mkdir -p "$kd"
+    chmod 700 "$kd"
     if [[ -f "$kp" ]]; then
-        local ow=""; ask_yn "Ключ существует, перезаписать?" "n" ow; [[ "$ow" != "yes" ]] && return 0
+        local ow=""
+        ask_yn "Ключ существует, перезаписать?" "n" ow
+        [[ "$ow" != "yes" ]] && return 0
     fi
-    if [[ "$kt" == "ed25519" ]]; then ssh-keygen -t ed25519 -f "$kp" -C "$comment" -N ""
-    else ssh-keygen -t rsa -b 4096 -f "$kp" -C "$comment" -N ""; fi
-    chmod 600 "$kp"; chmod 644 "${kp}.pub"
+    if [[ "$kt" == "ed25519" ]]; then
+        ssh-keygen -t ed25519 -f "$kp" -C "$comment" -N ""
+    else
+        ssh-keygen -t rsa -b 4096 -f "$kp" -C "$comment" -N ""
+    fi
+    chmod 600 "$kp"
+    chmod 644 "${kp}.pub"
     print_ok "Ключ: ${kp}"
-    echo ""; cat "${kp}.pub" | sed 's/^/    /'; echo ""
+    echo ""
+    sed 's/^/    /' "${kp}.pub"
+    echo ""
 
-    local add=""; ask_yn "Добавить в authorized_keys?" "y" add
+    local add=""
+    ask_yn "Добавить в authorized_keys?" "y" add
     if [[ "$add" == "yes" ]]; then
-        local ak="${kd}/authorized_keys" pub; pub=$(cat "${kp}.pub")
-        grep -qF "$pub" "$ak" 2>/dev/null || { echo "$pub" >> "$ak"; chmod 600 "$ak"; print_ok "Добавлен"; }
+        local ak="${kd}/authorized_keys"
+        local pub; pub=$(cat "${kp}.pub")
+        if grep -qF "$pub" "$ak" 2>/dev/null; then
+            print_info "Ключ уже в authorized_keys"
+        else
+            echo "$pub" >> "$ak"
+            chmod 600 "$ak"
+            print_ok "Добавлен"
+        fi
     fi
     return 0
 }
@@ -7854,14 +8837,36 @@ ufw_active() {
     ufw status 2>/dev/null | grep -q "^Status: active"
 }
 
+# - проверка наличия правила для порта/протокола, работает и при неактивном UFW -
+# - 'ufw show added' выводит "ufw allow 22/tcp" даже когда UFW disabled, в отличие от 'ufw status' -
+_ufw_has_rule() {
+    local port="$1" proto="${2:-}"
+    [[ -z "$port" ]] && return 1
+    local pat
+    if [[ -n "$proto" ]]; then
+        pat="${port}/${proto}"
+    else
+        pat="${port}"
+    fi
+    ufw show added 2>/dev/null | grep -Eq "(^|[[:space:]])${pat}([[:space:]]|$)"
+}
+
 ufw_show_status() {
     _ufw_guard || return 0
     print_section "Статус UFW"
-    if ufw_active; then print_ok "UFW: активен"
-    else print_warn "UFW: неактивен"; fi
+    if ufw_active; then
+        print_ok "UFW: активен"
+    else
+        print_warn "UFW: неактивен"
+    fi
     echo ""
     echo -e "  ${BOLD}Правила:${NC}"
-    ufw status numbered 2>/dev/null | grep -v "^Status:" | sed 's/^/  /' || true
+    if ufw_active; then
+        ufw status numbered 2>/dev/null | grep -v "^Status:" | sed 's/^/  /' || true
+    else
+        # - при выключенном UFW status пуст, показываем отложенные правила -
+        ufw show added 2>/dev/null | grep -v "^Added user rules" | sed 's/^/  /' || true
+    fi
     echo ""
     return 0
 }
@@ -7871,20 +8876,28 @@ ufw_toggle() {
     print_section "Включить / выключить UFW"
     if ufw_active; then
         print_warn "UFW активен"
-        local confirm=""; ask_yn "Отключить UFW?" "n" confirm
+        local confirm=""
+        ask_yn "Отключить UFW?" "n" confirm
         [[ "$confirm" != "yes" ]] && return 0
-        ufw disable; print_ok "UFW отключён"
+        ufw disable
+        print_ok "UFW отключён"
     else
         print_warn "UFW неактивен"
         local ssh_port; ssh_port=$(ssh_get_port)
-        if ! ufw status 2>/dev/null | grep -q "${ssh_port}/tcp\|${ssh_port} "; then
+        # - проверяем через 'ufw show added' (видит правила и при неактивном UFW) -
+        if ! _ufw_has_rule "$ssh_port" "tcp" && ! _ufw_has_rule "$ssh_port"; then
             print_warn "SSH порт ${ssh_port} не найден в правилах!"
-            local add=""; ask_yn "Добавить ${ssh_port}/tcp?" "y" add
-            [[ "$add" == "yes" ]] && ufw allow "${ssh_port}/tcp" comment "SSH" 2>/dev/null || true
+            local add=""
+            ask_yn "Добавить ${ssh_port}/tcp?" "y" add
+            if [[ "$add" == "yes" ]]; then
+                ufw allow "${ssh_port}/tcp" comment "SSH" 2>/dev/null || true
+            fi
         fi
-        local confirm=""; ask_yn "Включить UFW?" "y" confirm
+        local confirm=""
+        ask_yn "Включить UFW?" "y" confirm
         [[ "$confirm" != "yes" ]] && return 0
-        ufw --force enable; print_ok "UFW включён"
+        ufw --force enable
+        print_ok "UFW включён"
     fi
     return 0
 }
@@ -7893,23 +8906,58 @@ ufw_add_port() {
     _ufw_guard || return 0
     print_section "Добавить порт"
     echo -e "  ${CYAN}Форматы: 80 / 80/tcp / 80/udp / 80:90/tcp${NC}"
-    local port_input=""
-    while true; do echo -ne "  ${BOLD}Порт:${NC} "; read -r port_input; [[ -n "$port_input" ]] && break; done
+    local port_input="" port_spec=""
+    while true; do
+        ask_raw "$(printf '  \033[1mПорт:\033[0m ')" port_input
+        [[ -z "$port_input" ]] && continue
 
-    local port_spec="$port_input"
-    if [[ "$port_spec" =~ ^[0-9]+$ ]]; then
-        echo -e "  ${GREEN}1)${NC} tcp  ${GREEN}2)${NC} udp  ${GREEN}3)${NC} tcp+udp"
-        echo -ne "  ${BOLD}Протокол?${NC} "; read -r proto_ch
-        case "$proto_ch" in
-            1) port_spec="${port_input}/tcp" ;; 2) port_spec="${port_input}/udp" ;;
-            3) port_spec="${port_input}" ;; *) port_spec="${port_input}/tcp" ;;
-        esac
-    fi
+        port_spec="$port_input"
+        if [[ "$port_spec" =~ ^[0-9]+$ ]]; then
+            echo -e "  ${GREEN}1)${NC} tcp  ${GREEN}2)${NC} udp  ${GREEN}3)${NC} tcp+udp"
+            local proto_ch=""
+            ask_raw "$(printf '  \033[1mПротокол?\033[0m ')" proto_ch
+            case "$proto_ch" in
+                1) port_spec="${port_input}/tcp" ;;
+                2) port_spec="${port_input}/udp" ;;
+                3) port_spec="${port_input}" ;;
+                *) port_spec="${port_input}/tcp" ;;
+            esac
+        fi
+
+        # - валидация: одиночный порт или диапазон lo:hi, опциональный /tcp|/udp -
+        if ! [[ "$port_spec" =~ ^([0-9]+|[0-9]+:[0-9]+)(/tcp|/udp)?$ ]]; then
+            print_err "Неверный формат. Примеры: 80, 80/tcp, 80:90/udp"
+            continue
+        fi
+        # - извлечение порта/диапазона без протокола, проверка границ -
+        local pp="${port_spec%/*}"
+        if [[ "$pp" == *:* ]]; then
+            local lo="${pp%:*}" hi="${pp#*:}"
+            if (( lo < 1 || lo > 65535 || hi < 1 || hi > 65535 )); then
+                print_err "Порты диапазона должны быть в 1-65535"
+                continue
+            fi
+            if (( lo > hi )); then
+                print_err "В диапазоне lo:hi должно быть lo <= hi (получено ${lo}:${hi})"
+                continue
+            fi
+        else
+            if (( pp < 1 || pp > 65535 )); then
+                print_err "Порт должен быть в 1-65535"
+                continue
+            fi
+        fi
+        break
+    done
+
     local comment=""
     echo -e "  ${CYAN}Комментарий - пометка для чего этот порт (например: nginx, игра). Можно пропустить.${NC}"
     ask "Комментарий (опционально)" "" comment
-    if [[ -n "$comment" ]]; then ufw allow "${port_spec}" comment "${comment}"
-    else ufw allow "${port_spec}"; fi
+    if [[ -n "$comment" ]]; then
+        ufw allow "${port_spec}" comment "${comment}"
+    else
+        ufw allow "${port_spec}"
+    fi
     print_ok "Добавлено: allow ${port_spec}"
     return 0
 }
@@ -7920,10 +8968,18 @@ ufw_delete_rule() {
     ufw status numbered 2>/dev/null | grep -v "^Status:" | sed 's/^/  /'
     echo ""
     local num=""
-    while true; do echo -ne "  ${BOLD}Номер правила:${NC} "; read -r num; [[ "$num" =~ ^[0-9]+$ ]] && break; done
-    local confirm=""; ask_yn "Удалить #${num}?" "n" confirm
+    while true; do
+        ask_raw "$(printf '  \033[1mНомер правила:\033[0m ')" num
+        [[ "$num" =~ ^[0-9]+$ ]] && break
+    done
+    local confirm=""
+    ask_yn "Удалить #${num}?" "n" confirm
     [[ "$confirm" != "yes" ]] && return 0
-    echo "y" | ufw delete "$num" 2>/dev/null && print_ok "Удалено" || print_err "Не удалось"
+    if echo "y" | ufw delete "$num" 2>/dev/null; then
+        print_ok "Удалено"
+    else
+        print_err "Не удалось"
+    fi
     return 0
 }
 
@@ -7937,17 +8993,18 @@ ufw_check_ports() {
     local missing_rules=()
 
     while IFS= read -r line; do
-        local proto port proc addr rule_key
+        local proto port proc addr
+        local rest
 
         proto=$(echo "$line" | awk '{print $1}' | sed 's/[0-9]*$//')
         addr=$(echo "$line" | awk '{print $5}')
-        port=$(echo "$addr" | grep -oP ':\K[0-9]+$' || true)
-        proc=$(echo "$line" | grep -oP 'users:\(\("?\K[^",)]+' || echo "-")
+        port=$(echo "$addr" | grep -oP ':\K[0-9]+$')
+        proc=$(echo "$line" | grep -oP 'users:\(\("?\K[^",)]+')
+        [[ -z "$proc" ]] && proc="-"
 
         [[ -z "$proto" || -z "$port" ]] && continue
-        echo "$addr" | grep -qE '^127\.|^\[::1\]' && continue
-
-        rule_key="${port}/${proto}"
+        # - пропускаем loopback -
+        [[ "$addr" =~ ^127\. || "$addr" =~ ^\[::1\] ]] && continue
 
         if echo "$ufw_rules" | grep -qE "(^|[[:space:]])${port}/${proto}([[:space:]]|$)|(^|[[:space:]])${port}([[:space:]]|$)"; then
             echo -e "  ${GREEN}[OK]${NC} ${port}/${proto}  ${proc}"
@@ -7971,12 +9028,12 @@ ufw_check_ports() {
     ask_yn "Добавить все отсутствующие правила?" "n" confirm
 
     if [[ "$confirm" == "yes" ]]; then
-        local item port proto proc
+        local item port proto proc rest
         for item in "${missing_rules[@]}"; do
             port="${item%%:*}"
-            proto_rest="${item#*:}"
-            proto="${proto_rest%%:*}"
-            proc="${item#*:*:}"
+            rest="${item#*:}"
+            proto="${rest%%:*}"
+            proc="${rest#*:}"
 
             ufw allow "${port}/${proto}" comment "${proc}" 2>/dev/null || true
             print_ok "Добавлено: ${port}/${proto} (${proc})"
@@ -7991,7 +9048,8 @@ ufw_reset() {
     _ufw_guard || return 0
     print_section "Сброс всех правил"
     print_warn "Все правила будут удалены, UFW отключён!"
-    local confirm=""; ask_yn "Подтвердить?" "n" confirm
+    local confirm=""
+    ask_yn "Подтвердить?" "n" confirm
     [[ "$confirm" != "yes" ]] && return 0
     echo "y" | ufw reset 2>/dev/null
     print_ok "UFW сброшен"
@@ -8001,6 +9059,12 @@ ufw_reset() {
 # === 04f_update.sh ===
 # --> МОДУЛЬ: ОБНОВЛЕНИЯ <--
 # - проверка и установка обновлений для всех компонентов стека -
+
+# - архитектура для метапакетов linux-headers-* / linux-image-* -
+# - amd64 на x86_64, arm64 на ARM (Oracle Cloud и прочие ARM VPS) -
+_update_arch() {
+    dpkg --print-architecture 2>/dev/null || echo "amd64"
+}
 
 update_scan() {
     print_section "Проверка обновлений"
@@ -8021,8 +9085,11 @@ update_scan() {
             | grep -oP '"tag_name":\s*"\K[^"]+' || echo "?")
         # - убираем префикс v для корректного сравнения -
         local _xc="${xui_cur#v}" _xl="${xui_lat#v}"
-        [[ "$_xc" == "$_xl" ]] && print_ok "3X-UI: ${xui_cur} (актуальна)" \
-            || print_warn "3X-UI: ${xui_cur} -> ${xui_lat}"
+        if [[ "$_xc" == "$_xl" ]]; then
+            print_ok "3X-UI: ${xui_cur} (актуальна)"
+        else
+            print_warn "3X-UI: ${xui_cur} -> ${xui_lat}"
+        fi
     else
         print_info "3X-UI: не установлен"
     fi
@@ -8033,8 +9100,11 @@ update_scan() {
         ts_cur=$(grep -oP '^TS_VERSION="\K[^"]+' "${TS_ENV:-/etc/teamspeak/teamspeak.env}" 2>/dev/null || echo "?")
         ts_lat=$(ts_get_latest_version 2>/dev/null || echo "?")
         local _tc="${ts_cur#v}" _tl="${ts_lat#v}"
-        [[ "$_tc" == "$_tl" ]] && print_ok "TeamSpeak: ${ts_cur} (актуальна)" \
-            || print_warn "TeamSpeak: ${ts_cur} -> ${ts_lat}"
+        if [[ "$_tc" == "$_tl" ]]; then
+            print_ok "TeamSpeak: ${ts_cur} (актуальна)"
+        else
+            print_warn "TeamSpeak: ${ts_cur} -> ${ts_lat}"
+        fi
     else
         print_info "TeamSpeak: не установлен"
     fi
@@ -8063,7 +9133,10 @@ update_apt() {
     print_section "Обновление системы (apt)"
     local kver_before; kver_before=$(uname -r)
     apt-get update -qq || true
-    apt-get -y upgrade || { print_err "apt upgrade завершился с ошибкой"; return 1; }
+    if ! apt-get -y upgrade; then
+        print_err "apt upgrade завершился с ошибкой"
+        return 1
+    fi
     apt-get -y autoremove -qq || true
     print_ok "Система обновлена"
 
@@ -8071,9 +9144,10 @@ update_apt() {
     if command -v awg &>/dev/null; then
         local kver_now; kver_now=$(uname -r)
         if [[ ! -d "/lib/modules/${kver_now}/build" ]]; then
+            local arch; arch=$(_update_arch)
             print_info "Доустанавливаю kernel headers для ${kver_now} (нужно для AWG)..."
             apt-get install -y -qq "linux-headers-${kver_now}" 2>/dev/null \
-                || apt-get install -y -qq linux-headers-amd64 2>/dev/null || true
+                || apt-get install -y -qq "linux-headers-${arch}" 2>/dev/null || true
         fi
         # - пересборка DKMS на случай обновления ядра -
         dkms autoinstall 2>/dev/null || true
@@ -8091,17 +9165,22 @@ update_apt() {
 update_xui() {
     print_section "Обновление 3X-UI"
     if [[ ! -f "${XUI_BIN:-/usr/local/x-ui/x-ui}" ]]; then
-        print_err "3X-UI не установлен"; return 0
+        print_err "3X-UI не установлен"
+        return 0
     fi
-    local confirm=""; ask_yn "Обновить 3X-UI?" "y" confirm
+    local confirm=""
+    ask_yn "Обновить 3X-UI?" "y" confirm
     [[ "$confirm" != "yes" ]] && return 0
 
     # - бэкап БД -
-    [[ -f "${XUI_DB:-/usr/local/x-ui/db/x-ui.db}" ]] && {
+    if [[ -f "${XUI_DB:-/usr/local/x-ui/db/x-ui.db}" ]]; then
         mkdir -p "${XUI_BACKUP_DIR:-/etc/3xui/backups}"
-        cp -f "${XUI_DB}" "${XUI_BACKUP_DIR}/x-ui_pre_update_$(date +%Y%m%d).db" 2>/dev/null || true
-        print_ok "Бэкап БД создан"
-    }
+        if cp -f "${XUI_DB}" "${XUI_BACKUP_DIR}/x-ui_pre_update_$(date +%Y%m%d).db" 2>/dev/null; then
+            print_ok "Бэкап БД создан"
+        else
+            print_warn "Не удалось создать бэкап БД (продолжаю)"
+        fi
+    fi
 
     # - прямое скачивание tar.gz -
     # - upstream install.sh имеет prompts (port/SSL), которые зависнут -
@@ -8159,12 +9238,18 @@ update_ts() {
 update_otl() {
     print_section "Обновление Outline"
     if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^shadowbox$"; then
-        print_err "Outline не запущен"; return 0
+        print_err "Outline не запущен"
+        return 0
     fi
-    local confirm=""; ask_yn "Обновить Outline (docker pull)?" "y" confirm
+    local confirm=""
+    ask_yn "Обновить Outline (docker pull)?" "y" confirm
     [[ "$confirm" != "yes" ]] && return 0
     local img; img=$(docker inspect shadowbox 2>/dev/null | jq -r '.[0].Config.Image' 2>/dev/null || echo "")
-    [[ -n "$img" ]] && docker pull "$img" 2>/dev/null || true
+    if [[ -n "$img" ]]; then
+        docker pull "$img" 2>/dev/null || true
+    else
+        print_warn "Не удалось определить образ shadowbox, пробую restart без pull"
+    fi
     docker restart shadowbox 2>/dev/null || true
     sleep 5
     local api_url; api_url=$(otl_get_api_url 2>/dev/null || echo "")
@@ -8179,9 +9264,11 @@ update_otl() {
 update_awg() {
     print_section "Обновление AmneziaWG"
     if ! command -v awg &>/dev/null; then
-        print_err "AmneziaWG не установлен"; return 0
+        print_err "AmneziaWG не установлен"
+        return 0
     fi
-    local confirm=""; ask_yn "Обновить AmneziaWG (apt + DKMS)?" "y" confirm
+    local confirm=""
+    ask_yn "Обновить AmneziaWG (apt + DKMS)?" "y" confirm
     [[ "$confirm" != "yes" ]] && return 0
 
     # - останавливаем все интерфейсы -
@@ -8194,14 +9281,24 @@ update_awg() {
     # - ensure headers перед обновлением (ядро могло обновиться) -
     local kver; kver=$(uname -r)
     if [[ ! -d "/lib/modules/${kver}/build" ]]; then
+        local arch; arch=$(_update_arch)
         print_info "Kernel headers отсутствуют для ${kver}, устанавливаю..."
         apt-get install -y -qq "linux-headers-${kver}" 2>/dev/null \
-            || apt-get install -y -qq linux-headers-amd64 2>/dev/null \
+            || apt-get install -y -qq "linux-headers-${arch}" 2>/dev/null \
             || print_warn "Headers не удалось установить"
     fi
 
+    # - запоминаем версию ДО апгрейда чтобы понять реально ли что-то поменялось -
+    local cur_ver; cur_ver=$(awg --version 2>/dev/null | head -1 || echo "?")
+
     apt-get update -qq || true
-    apt-get install -y --only-upgrade amneziawg 2>/dev/null || true
+    local apt_ok="no"
+    if apt-get install -y --only-upgrade amneziawg 2>/dev/null; then
+        apt_ok="yes"
+        print_ok "Пакет amneziawg обновлён через apt"
+    else
+        print_warn "apt-get install --only-upgrade amneziawg не выполнен (репозиторий недоступен или конфликт)"
+    fi
 
     # - ensure module после обновления -
     if ! _awg_ensure_module 2>/dev/null; then
@@ -8220,20 +9317,36 @@ update_awg() {
     done
 
     local new_ver; new_ver=$(awg --version 2>/dev/null | head -1 || echo "?")
-    book_write ".awg.version" "$new_ver"
-    print_ok "AmneziaWG: ${new_ver}"
+    if [[ "$apt_ok" == "yes" && "$new_ver" != "$cur_ver" ]]; then
+        book_write ".awg.version" "$new_ver"
+        print_ok "AmneziaWG: ${cur_ver} -> ${new_ver}"
+    else
+        print_info "AmneziaWG: ${new_ver} (не изменилось)"
+    fi
     return 0
 }
 
 update_all() {
     print_section "Обновление всего стека"
-    local confirm=""; ask_yn "Обновить все компоненты?" "y" confirm
+    local confirm=""
+    ask_yn "Обновить все компоненты?" "y" confirm
     [[ "$confirm" != "yes" ]] && return 0
+
     update_apt || true
-    command -v awg &>/dev/null && { update_awg || true; }
-    [[ -f "${XUI_BIN:-/usr/local/x-ui/x-ui}" ]] && { update_xui || true; }
-    docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^shadowbox$" && { update_otl || true; }
-    [[ -f "${TS_BIN:-/opt/teamspeak/tsserver}" ]] && { ts_update || true; }
+
+    if command -v awg &>/dev/null; then
+        update_awg || true
+    fi
+    if [[ -f "${XUI_BIN:-/usr/local/x-ui/x-ui}" ]]; then
+        update_xui || true
+    fi
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^shadowbox$"; then
+        update_otl || true
+    fi
+    if [[ -f "${TS_BIN:-/opt/teamspeak/tsserver}" ]]; then
+        ts_update || true
+    fi
+
     print_ok "Обновление завершено"
     return 0
 }
@@ -8275,7 +9388,7 @@ Compress=yes
 EOF
     systemctl restart systemd-journald
     journalctl --vacuum-size=300M --vacuum-time=1month >/dev/null 2>&1 || true
-    local jsize; jsize=$(journalctl --disk-usage 2>/dev/null | grep -oP '[\d.]+ [KMGT]?B' | tail -1 || echo "?")
+    local jsize; jsize=$(journalctl --disk-usage 2>/dev/null | grep -oP '[\d.]+\s*[KMGTPE]i?B?' | tail -1 || echo "?")
     print_ok "Journald лимит: 300 MB (текущий: ${jsize})"
 
     # --> DOCKER CLEANUP <--
@@ -8306,7 +9419,7 @@ CLEANUP
     create 0640 root root
 }
 EOF
-        print_ok "Profil AmneziaWG добавлен"
+        print_ok "Профиль AmneziaWG добавлен"
     fi
     logrotate --debug /etc/logrotate.conf >/dev/null 2>&1 \
         && print_ok "Logrotate: конфиг OK" \
@@ -8354,7 +9467,7 @@ DISKMON
     _add_cron "0 1 * * 0 /usr/local/bin/docker-cleanup.sh" "Docker cleanup вс 1:00 UTC"
     _add_cron "0 9 * * * /usr/local/bin/disk-monitor.sh" "Мониторинг диска 9:00 UTC"
     _add_cron "0 3 * * 1 apt-get update -qq && apt-get upgrade --dry-run 2>/dev/null | grep -E '^[0-9]+ upgraded' | logger -t apt-check" "Проверка обновлений пн 3:00 UTC"
-    _add_cron "@reboot sleep 90 && /usr/local/bin/eli-healthcheck.sh" "Healthcheck через 90 сек после reboot"
+    _add_cron "@reboot sleep 90; /usr/local/bin/eli-healthcheck.sh" "Healthcheck через 90 сек после reboot"
 
     echo "$current_cron" | crontab -
     print_ok "Crontab обновлён"
@@ -8550,6 +9663,7 @@ HCEOF
     echo -e "  ${CYAN}*${NC} Healthcheck:     @reboot +90 сек"
     echo -e "  ${CYAN}*${NC} Journald:        лимит 300 MB"
     echo ""
+    eli_pause
     return 0
 }
 
@@ -8799,9 +9913,9 @@ MONEOF
 
     echo ""
     print_ok "Telegram мониторинг настроен"
-	print_info "Бот пришлёт сообщение только при обнаружении проблем"
+    print_info "Бот пришлёт сообщение только при обнаружении проблем"
     print_info "Повтор одного и того же алерта не отправляется, пока состояние не изменится"
-	print_info "Для мониторинга доступности VPS снаружи: uptimerobot.com"
+    print_info "Для мониторинга доступности VPS снаружи: uptimerobot.com"
     return 0
 }
 
@@ -9053,15 +10167,17 @@ backup_create() {
     # - 3X-UI / TeamSpeak (на чистой машине после restore сервис не запустится без unit) -
     mkdir -p "${tmpdir}/system/systemd"
     local unit_count=0
-    for unit_glob in \
-        "/etc/systemd/system/hysteria-*.service" \
-        "/etc/systemd/system/x-ui.service" \
-        "/etc/systemd/system/teamspeak.service"; do
-        for u in $unit_glob; do
-            [[ -f "$u" ]] || continue
-            cp -a "$u" "${tmpdir}/system/systemd/" 2>/dev/null && unit_count=$(( unit_count + 1 ))
-        done
+    local _old_nullglob
+    _old_nullglob=$(shopt -p nullglob 2>/dev/null || true)
+    shopt -s nullglob
+    for u in \
+        /etc/systemd/system/hysteria-*.service \
+        /etc/systemd/system/x-ui.service \
+        /etc/systemd/system/teamspeak.service; do
+        [[ -f "$u" ]] || continue
+        cp -a "$u" "${tmpdir}/system/systemd/" 2>/dev/null && unit_count=$(( unit_count + 1 ))
     done
+    eval "$_old_nullglob"
     if [[ $unit_count -gt 0 ]]; then
         print_ok "systemd units (${unit_count} шт)"
         collected=$(( collected + 1 ))
@@ -9101,7 +10217,7 @@ os="$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'"' -f2 || echo 'unkn
 kernel="$(uname -r)"
 debian_version="${_deb_ver}"
 version_id="${_version_id}"
-eli_version="3.236"
+eli_version="4.508"
 components=${collected}
 METAEOF
 
@@ -9172,7 +10288,9 @@ _bkp_restore_svc() {
     mkdir -p "$(dirname "$dst")"
     cp -a "$src" "$dst" 2>/dev/null || { print_warn "Не удалось скопировать ${label}"; return 1; }
     # - не меняем права если не указан mode (cp -a сохранит исходные из архива) -
-    [[ -n "$mode" ]] && chmod "$mode" "$dst" 2>/dev/null || true
+    if [[ -n "$mode" ]]; then
+        chmod "$mode" "$dst" 2>/dev/null || true
+    fi
     if [[ -n "$svc" ]]; then
         systemctl start "$svc" 2>/dev/null || true
     fi
@@ -9321,51 +10439,82 @@ backup_restore() {
 
     # - 3X-UI -
     if [[ -d "${root}/3xui-env" ]]; then
-        cp -a "${root}/3xui-env" /etc/3xui 2>/dev/null || true
-        chmod 700 /etc/3xui; find /etc/3xui -type f -exec chmod 600 {} \;
-        print_ok "3X-UI env"
-        restored=$(( restored + 1 ))
+        if cp -a "${root}/3xui-env" /etc/3xui 2>/dev/null; then
+            chmod 700 /etc/3xui; find /etc/3xui -type f -exec chmod 600 {} \;
+            print_ok "3X-UI env"
+            restored=$(( restored + 1 ))
+        else
+            print_err "3X-UI env: cp не выполнился"
+        fi
     fi
     if [[ -f "${root}/3xui-db/x-ui.db" ]]; then
         systemctl stop x-ui 2>/dev/null || true
         local xui_db_dst=""
         xui_db_dst=$(find /etc/x-ui /usr/local/x-ui -maxdepth 2 -name "x-ui.db" 2>/dev/null | head -1)
+        # - дефолт для апстрима v2.x: /etc/x-ui/x-ui.db -
+        if [[ -z "$xui_db_dst" ]]; then
+            if [[ -f /etc/x-ui/x-ui || -f /usr/local/x-ui/x-ui ]]; then
+                xui_db_dst="/etc/x-ui/x-ui.db"
+                mkdir -p /etc/x-ui
+            else
+                print_warn "3X-UI БД: пакет не установлен, сначала установи x-ui потом restore"
+                xui_db_dst=""
+            fi
+        fi
         if [[ -n "$xui_db_dst" ]]; then
-            cp -a "${root}/3xui-db/x-ui.db" "$xui_db_dst" 2>/dev/null
-            chmod 600 "$xui_db_dst"
+            if cp -a "${root}/3xui-db/x-ui.db" "$xui_db_dst" 2>/dev/null; then
+                chmod 600 "$xui_db_dst"
+                print_ok "3X-UI база данных -> ${xui_db_dst}"
+                restored=$(( restored + 1 ))
+            else
+                print_err "3X-UI БД: cp не выполнился (${xui_db_dst})"
+            fi
         fi
         systemctl start x-ui 2>/dev/null || true
-        print_ok "3X-UI база данных"
-        restored=$(( restored + 1 ))
     fi
 
     # - Outline -
     if [[ -d "${root}/outline" ]]; then
-        cp -a "${root}/outline" /etc/outline 2>/dev/null || true
-        chmod 700 /etc/outline; find /etc/outline -type f -exec chmod 600 {} \;
-        print_ok "Outline"
-        restored=$(( restored + 1 ))
+        if cp -a "${root}/outline" /etc/outline 2>/dev/null; then
+            chmod 700 /etc/outline; find /etc/outline -type f -exec chmod 600 {} \;
+            print_ok "Outline"
+            restored=$(( restored + 1 ))
+        else
+            print_err "Outline: cp не выполнился"
+        fi
     fi
 
     # - TeamSpeak -
     if [[ -d "${root}/teamspeak-env" ]]; then
-        cp -a "${root}/teamspeak-env" /etc/teamspeak 2>/dev/null || true
-        chmod 700 /etc/teamspeak; find /etc/teamspeak -type f -exec chmod 600 {} \;
-        print_ok "TeamSpeak env"
-        restored=$(( restored + 1 ))
+        if cp -a "${root}/teamspeak-env" /etc/teamspeak 2>/dev/null; then
+            chmod 700 /etc/teamspeak; find /etc/teamspeak -type f -exec chmod 600 {} \;
+            print_ok "TeamSpeak env"
+            restored=$(( restored + 1 ))
+        else
+            print_err "TeamSpeak env: cp не выполнился"
+        fi
     fi
     if [[ -d "${root}/teamspeak-db" ]]; then
         systemctl stop teamspeak 2>/dev/null || true
         local ts_dst=""
         ts_dst=$(find /opt/teamspeak -name "*.sqlitedb" -type f 2>/dev/null | head -1)
+        local ts_dir=""
         if [[ -n "$ts_dst" ]]; then
-            local ts_dir
             ts_dir=$(dirname "$ts_dst")
-            cp -a "${root}/teamspeak-db/"* "${ts_dir}/" 2>/dev/null || true
+        elif [[ -d /opt/teamspeak ]]; then
+            ts_dir="/opt/teamspeak"
+        else
+            print_warn "TeamSpeak SQLite: /opt/teamspeak отсутствует, сначала установи TS потом restore"
+        fi
+        if [[ -n "$ts_dir" ]]; then
+            if cp -a "${root}/teamspeak-db/"* "${ts_dir}/" 2>/dev/null; then
+                print_ok "TeamSpeak SQLite -> ${ts_dir}"
+                restored=$(( restored + 1 ))
+            else
+                print_err "TeamSpeak SQLite: cp не выполнился (${ts_dir})"
+            fi
         fi
         systemctl start teamspeak 2>/dev/null || true
-        print_ok "TeamSpeak SQLite"
-        restored=$(( restored + 1 ))
     fi
 
     # - Mumble: конфиг + sqlite БД -
@@ -9377,7 +10526,9 @@ backup_restore() {
         elif systemctl list-unit-files murmurd.service 2>/dev/null | grep -q murmurd; then
             mbl_svc="murmurd"
         fi
-        [[ -n "$mbl_svc" ]] && systemctl stop "$mbl_svc" 2>/dev/null || true
+        if [[ -n "$mbl_svc" ]]; then
+            systemctl stop "$mbl_svc" 2>/dev/null || true
+        fi
 
         # - конфиг: ini файлы -
         for mcfg in "${root}/mumble/"*.ini; do
@@ -9423,7 +10574,9 @@ backup_restore() {
             break
         done
 
-        [[ -n "$mbl_svc" ]] && systemctl start "$mbl_svc" 2>/dev/null || true
+        if [[ -n "$mbl_svc" ]]; then
+            systemctl start "$mbl_svc" 2>/dev/null || true
+        fi
     fi
 
     # - MTProto -
@@ -9492,10 +10645,11 @@ backup_restore() {
                 systemctl start "$svc_name" 2>/dev/null || true
             done
             # - x-ui и teamspeak запускаем если их бинари на месте -
-            [[ -f /usr/local/x-ui/x-ui ]] && {
+            # - актуальный апстрим v2.x ставит в /etc/x-ui, legacy в /usr/local/x-ui -
+            if [[ -f /usr/local/x-ui/x-ui || -f /etc/x-ui/x-ui ]]; then
                 systemctl enable x-ui 2>/dev/null || true
                 systemctl start x-ui 2>/dev/null || true
-            }
+            fi
             [[ -f /opt/teamspeak/tsserver ]] && {
                 systemctl enable teamspeak 2>/dev/null || true
                 systemctl start teamspeak 2>/dev/null || true
@@ -9505,11 +10659,14 @@ backup_restore() {
 
     # - sshd_config -
     if [[ -f "${root}/system/sshd_config" ]]; then
-        cp -a "${root}/system/sshd_config" /etc/ssh/sshd_config 2>/dev/null
-        chmod 644 /etc/ssh/sshd_config
-        systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
-        print_ok "sshd_config"
-        restored=$(( restored + 1 ))
+        if cp -a "${root}/system/sshd_config" /etc/ssh/sshd_config 2>/dev/null; then
+            chmod 644 /etc/ssh/sshd_config
+            systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
+            print_ok "sshd_config"
+            restored=$(( restored + 1 ))
+        else
+            print_warn "sshd_config: cp не выполнился, конфиг не восстановлен"
+        fi
     fi
 
     # - sysctl -
@@ -9529,16 +10686,27 @@ backup_restore() {
         restored=$(( restored + 1 ))
     fi
 
-    # - Crontab -
+    # - Crontab: merge eli-задач из бэкапа со сторонними из текущего, чтобы не терять чужое -
     if [[ -s "${root}/system/crontab.txt" ]]; then
         echo ""
-        print_warn "Бэкап содержит crontab. Текущий crontab будет заменён."
+        print_info "Бэкап содержит crontab. Сторонние задачи в текущем crontab будут сохранены."
         local cron_ok=""
-        ask_yn "Восстановить crontab?" "y" cron_ok
+        ask_yn "Восстановить eli-задачи из бэкапа (merge со сторонними)?" "y" cron_ok
         if [[ "$cron_ok" == "yes" ]]; then
-            crontab "${root}/system/crontab.txt" 2>/dev/null
-            print_ok "Crontab"
-            restored=$(( restored + 1 ))
+            # - паттерн eli-задач: всё что относится к нашему стеку -
+            local eli_pat='docker-cleanup|eli-healthcheck|eli-tgbot-monitor|disk-monitor|apt-check|/sbin/reboot'
+            local cron_tmp; cron_tmp=$(mktemp)
+            # - сторонние строки из текущего crontab -
+            crontab -l 2>/dev/null | grep -Ev "$eli_pat" > "$cron_tmp" || true
+            # - eli-задачи из бэкапа -
+            grep -E "$eli_pat" "${root}/system/crontab.txt" >> "$cron_tmp" 2>/dev/null || true
+            if crontab "$cron_tmp" 2>/dev/null; then
+                print_ok "Crontab merged (eli-задачи восстановлены, сторонние сохранены)"
+                restored=$(( restored + 1 ))
+            else
+                print_warn "Crontab: установить не удалось"
+            fi
+            rm -f "$cron_tmp"
         else
             print_info "Crontab пропущен"
         fi
@@ -9586,8 +10754,7 @@ menu_vpn() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        echo -ne "  ${BOLD}Выбор:${NC} "
-        read -r choice
+        eli_read_choice choice
 
         case "$choice" in
             1) menu_awg       || { print_warn "Ошибка в разделе AmneziaWG"; eli_pause; } ;;
@@ -9627,13 +10794,12 @@ menu_awg() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        echo -ne "  ${BOLD}Выбор:${NC} "
-        read -r choice
+        eli_read_choice choice
 
         case "$choice" in
-            1) awg_install    || print_warn "Ошибка при установке AWG"; eli_pause ;;
+            1) awg_install    || { print_warn "Ошибка при установке AWG"; eli_pause; } ;;
             2) awg_manage     || { print_warn "Ошибка в управлении AWG"; eli_pause; } ;;
-            3) awg_test_obf   || { print_warn "Ошибка в тесте обфускации"; eli_pause; }; eli_pause ;;
+            3) awg_test_obf   || { print_warn "Ошибка в тесте обфускации"; }; eli_pause ;;
             0) return 0 ;;
             *) print_warn "Введите число от 0 до 3"; eli_pause ;;
         esac
@@ -9667,8 +10833,7 @@ menu_xui() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        echo -ne "  ${BOLD}Выбор:${NC} "
-        read -r choice
+        eli_read_choice choice
 
         case "$choice" in
             1) xui_install       || print_warn "Ошибка при установке 3X-UI" ;;
@@ -9715,8 +10880,7 @@ menu_otl() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        echo -ne "  ${BOLD}Выбор:${NC} "
-        read -r choice
+        eli_read_choice choice
 
         case "$choice" in
             1) otl_install        || print_warn "Ошибка при установке Outline" ;;
@@ -9762,8 +10926,7 @@ menu_proxy() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        echo -ne "  ${BOLD}Выбор:${NC} "
-        read -r choice
+        eli_read_choice choice
 
         case "$choice" in
             1) menu_mtp  || { print_warn "Ошибка в разделе MTProto"; eli_pause; } ;;
@@ -9801,8 +10964,7 @@ menu_mtp() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        echo -ne "  ${BOLD}Выбор:${NC} "
-        read -r choice
+        eli_read_choice choice
 
         case "$choice" in
             1) mtp_add     || print_warn "Ошибка при добавлении MTProto" ;;
@@ -9840,8 +11002,7 @@ menu_s5() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        echo -ne "  ${BOLD}Выбор:${NC} "
-        read -r choice
+        eli_read_choice choice
 
         case "$choice" in
             1) s5_add    || print_warn "Ошибка при добавлении SOCKS5" ;;
@@ -9882,8 +11043,7 @@ menu_hy2() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        echo -ne "  ${BOLD}Выбор:${NC} "
-        read -r choice
+        eli_read_choice choice
 
         case "$choice" in
             1) hy2_add         || print_warn "Ошибка при добавлении Hysteria 2" ;;
@@ -9925,8 +11085,7 @@ menu_sig() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        echo -ne "  ${BOLD}Выбор:${NC} "
-        read -r choice
+        eli_read_choice choice
 
         case "$choice" in
             1) sig_install || print_warn "Ошибка при установке Signal Proxy" ;;
@@ -9963,8 +11122,7 @@ menu_comms() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        echo -ne "  ${BOLD}Выбор:${NC} "
-        read -r choice
+        eli_read_choice choice
 
         case "$choice" in
             1) menu_ts  || { print_warn "Ошибка в разделе TeamSpeak"; eli_pause; } ;;
@@ -10002,8 +11160,7 @@ menu_ts() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        echo -ne "  ${BOLD}Выбор:${NC} "
-        read -r choice
+        eli_read_choice choice
 
         case "$choice" in
             1) ts_install     || print_warn "Ошибка при установке TeamSpeak" ;;
@@ -10045,8 +11202,7 @@ menu_mbl() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        echo -ne "  ${BOLD}Выбор:${NC} "
-        read -r choice
+        eli_read_choice choice
 
         case "$choice" in
             1) mbl_install     || print_warn "Ошибка при установке Mumble" ;;
@@ -10097,17 +11253,16 @@ menu_maint() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        echo -ne "  ${BOLD}Выбор:${NC} "
-        read -r choice
+        eli_read_choice choice
 
         case "$choice" in
             1) menu_unbound    || { print_warn "Ошибка в разделе Unbound"; eli_pause; } ;;
-            2) diag_run        || print_warn "Ошибка при диагностике"; eli_pause ;;
-            3) prayer_run      || print_warn "Ошибка в Prayer of Eli"; eli_pause ;;
+            2) diag_run        || { print_warn "Ошибка при диагностике"; eli_pause; } ;;
+            3) prayer_run      || { print_warn "Ошибка в Prayer of Eli"; eli_pause; } ;;
             4) menu_ssh        || { print_warn "Ошибка в разделе SSH"; eli_pause; } ;;
             5) menu_ufw        || { print_warn "Ошибка в разделе UFW"; eli_pause; } ;;
             6) menu_update     || { print_warn "Ошибка в разделе обновлений"; eli_pause; } ;;
-            7) routine_run     || print_warn "Ошибка при автообслуживании"; eli_pause ;;
+            7) routine_run     || { print_warn "Ошибка при автообслуживании"; eli_pause; } ;;
             8) menu_backup     || { print_warn "Ошибка в разделе бэкапов"; eli_pause; } ;;
             9) menu_tgbot      || { print_warn "Ошибка в разделе Telegram"; eli_pause; } ;;
             0) return 0 ;;
@@ -10142,8 +11297,7 @@ menu_unbound() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        echo -ne "  ${BOLD}Выбор:${NC} "
-        read -r choice
+        eli_read_choice choice
 
         case "$choice" in
             1) unbound_install || print_warn "Ошибка при установке Unbound" ;;
@@ -10182,8 +11336,7 @@ menu_ssh() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        echo -ne "  ${BOLD}Выбор:${NC} "
-        read -r choice
+        eli_read_choice choice
 
         case "$choice" in
             1) ssh_show_status  || print_warn "Ошибка при показе статуса" ;;
@@ -10239,8 +11392,7 @@ menu_ufw() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        echo -ne "  ${BOLD}Выбор:${NC} "
-        read -r choice
+        eli_read_choice choice
 
         case "$choice" in
             1) ufw_show_status || print_warn "Ошибка при показе статуса" ;;
@@ -10281,8 +11433,7 @@ menu_update() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        echo -ne "  ${BOLD}Выбор:${NC} "
-        read -r choice
+        eli_read_choice choice
 
         case "$choice" in
             1) update_scan    || print_warn "Ошибка при проверке обновлений" ;;
@@ -10331,8 +11482,7 @@ awg_manage() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        echo -ne "  ${BOLD}Выбор:${NC} "
-        read -r choice
+        eli_read_choice choice
 
         case "$choice" in
             1) awg_show_status    || print_warn "Ошибка при показе статуса" ;;
@@ -10375,8 +11525,7 @@ menu_backup() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        echo -ne "  ${BOLD}Выбор:${NC} "
-        read -r choice
+        eli_read_choice choice
 
         case "$choice" in
             1) backup_create   || print_warn "Ошибка при создании бэкапа" ;;
@@ -10415,8 +11564,7 @@ menu_tgbot() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        echo -ne "  ${BOLD}Выбор:${NC} "
-        read -r choice
+        eli_read_choice choice
 
         case "$choice" in
             1) tgbot_setup   || print_warn "Ошибка при настройке" ;;
@@ -10445,11 +11593,10 @@ eli_main() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Выход"
         echo ""
-        echo -ne "  ${BOLD}Выбор:${NC} "
-        read -r choice
+        eli_read_choice choice
 
         case "$choice" in
-            1) boot_run   || print_warn "Ошибка в разделе Старт"; eli_pause ;;
+            1) boot_run   || { print_warn "Ошибка в разделе Старт"; eli_pause; } ;;
             2) menu_vpn   || { print_warn "Ошибка в разделе VPN"; eli_pause; } ;;
             3) menu_comms || { print_warn "Ошибка в разделе Связь"; eli_pause; } ;;
             4) menu_maint || { print_warn "Ошибка в разделе Обслуживание"; eli_pause; } ;;
