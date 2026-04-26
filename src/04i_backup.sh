@@ -155,15 +155,17 @@ backup_create() {
     # - 3X-UI / TeamSpeak (на чистой машине после restore сервис не запустится без unit) -
     mkdir -p "${tmpdir}/system/systemd"
     local unit_count=0
-    for unit_glob in \
-        "/etc/systemd/system/hysteria-*.service" \
-        "/etc/systemd/system/x-ui.service" \
-        "/etc/systemd/system/teamspeak.service"; do
-        for u in $unit_glob; do
-            [[ -f "$u" ]] || continue
-            cp -a "$u" "${tmpdir}/system/systemd/" 2>/dev/null && unit_count=$(( unit_count + 1 ))
-        done
+    local _old_nullglob
+    _old_nullglob=$(shopt -p nullglob 2>/dev/null || true)
+    shopt -s nullglob
+    for u in \
+        /etc/systemd/system/hysteria-*.service \
+        /etc/systemd/system/x-ui.service \
+        /etc/systemd/system/teamspeak.service; do
+        [[ -f "$u" ]] || continue
+        cp -a "$u" "${tmpdir}/system/systemd/" 2>/dev/null && unit_count=$(( unit_count + 1 ))
     done
+    eval "$_old_nullglob"
     if [[ $unit_count -gt 0 ]]; then
         print_ok "systemd units (${unit_count} шт)"
         collected=$(( collected + 1 ))
@@ -203,7 +205,7 @@ os="$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'"' -f2 || echo 'unkn
 kernel="$(uname -r)"
 debian_version="${_deb_ver}"
 version_id="${_version_id}"
-eli_version="3.236"
+eli_version="4.508"
 components=${collected}
 METAEOF
 
@@ -274,7 +276,9 @@ _bkp_restore_svc() {
     mkdir -p "$(dirname "$dst")"
     cp -a "$src" "$dst" 2>/dev/null || { print_warn "Не удалось скопировать ${label}"; return 1; }
     # - не меняем права если не указан mode (cp -a сохранит исходные из архива) -
-    [[ -n "$mode" ]] && chmod "$mode" "$dst" 2>/dev/null || true
+    if [[ -n "$mode" ]]; then
+        chmod "$mode" "$dst" 2>/dev/null || true
+    fi
     if [[ -n "$svc" ]]; then
         systemctl start "$svc" 2>/dev/null || true
     fi
@@ -423,51 +427,82 @@ backup_restore() {
 
     # - 3X-UI -
     if [[ -d "${root}/3xui-env" ]]; then
-        cp -a "${root}/3xui-env" /etc/3xui 2>/dev/null || true
-        chmod 700 /etc/3xui; find /etc/3xui -type f -exec chmod 600 {} \;
-        print_ok "3X-UI env"
-        restored=$(( restored + 1 ))
+        if cp -a "${root}/3xui-env" /etc/3xui 2>/dev/null; then
+            chmod 700 /etc/3xui; find /etc/3xui -type f -exec chmod 600 {} \;
+            print_ok "3X-UI env"
+            restored=$(( restored + 1 ))
+        else
+            print_err "3X-UI env: cp не выполнился"
+        fi
     fi
     if [[ -f "${root}/3xui-db/x-ui.db" ]]; then
         systemctl stop x-ui 2>/dev/null || true
         local xui_db_dst=""
         xui_db_dst=$(find /etc/x-ui /usr/local/x-ui -maxdepth 2 -name "x-ui.db" 2>/dev/null | head -1)
+        # - дефолт для апстрима v2.x: /etc/x-ui/x-ui.db -
+        if [[ -z "$xui_db_dst" ]]; then
+            if [[ -f /etc/x-ui/x-ui || -f /usr/local/x-ui/x-ui ]]; then
+                xui_db_dst="/etc/x-ui/x-ui.db"
+                mkdir -p /etc/x-ui
+            else
+                print_warn "3X-UI БД: пакет не установлен, сначала установи x-ui потом restore"
+                xui_db_dst=""
+            fi
+        fi
         if [[ -n "$xui_db_dst" ]]; then
-            cp -a "${root}/3xui-db/x-ui.db" "$xui_db_dst" 2>/dev/null
-            chmod 600 "$xui_db_dst"
+            if cp -a "${root}/3xui-db/x-ui.db" "$xui_db_dst" 2>/dev/null; then
+                chmod 600 "$xui_db_dst"
+                print_ok "3X-UI база данных -> ${xui_db_dst}"
+                restored=$(( restored + 1 ))
+            else
+                print_err "3X-UI БД: cp не выполнился (${xui_db_dst})"
+            fi
         fi
         systemctl start x-ui 2>/dev/null || true
-        print_ok "3X-UI база данных"
-        restored=$(( restored + 1 ))
     fi
 
     # - Outline -
     if [[ -d "${root}/outline" ]]; then
-        cp -a "${root}/outline" /etc/outline 2>/dev/null || true
-        chmod 700 /etc/outline; find /etc/outline -type f -exec chmod 600 {} \;
-        print_ok "Outline"
-        restored=$(( restored + 1 ))
+        if cp -a "${root}/outline" /etc/outline 2>/dev/null; then
+            chmod 700 /etc/outline; find /etc/outline -type f -exec chmod 600 {} \;
+            print_ok "Outline"
+            restored=$(( restored + 1 ))
+        else
+            print_err "Outline: cp не выполнился"
+        fi
     fi
 
     # - TeamSpeak -
     if [[ -d "${root}/teamspeak-env" ]]; then
-        cp -a "${root}/teamspeak-env" /etc/teamspeak 2>/dev/null || true
-        chmod 700 /etc/teamspeak; find /etc/teamspeak -type f -exec chmod 600 {} \;
-        print_ok "TeamSpeak env"
-        restored=$(( restored + 1 ))
+        if cp -a "${root}/teamspeak-env" /etc/teamspeak 2>/dev/null; then
+            chmod 700 /etc/teamspeak; find /etc/teamspeak -type f -exec chmod 600 {} \;
+            print_ok "TeamSpeak env"
+            restored=$(( restored + 1 ))
+        else
+            print_err "TeamSpeak env: cp не выполнился"
+        fi
     fi
     if [[ -d "${root}/teamspeak-db" ]]; then
         systemctl stop teamspeak 2>/dev/null || true
         local ts_dst=""
         ts_dst=$(find /opt/teamspeak -name "*.sqlitedb" -type f 2>/dev/null | head -1)
+        local ts_dir=""
         if [[ -n "$ts_dst" ]]; then
-            local ts_dir
             ts_dir=$(dirname "$ts_dst")
-            cp -a "${root}/teamspeak-db/"* "${ts_dir}/" 2>/dev/null || true
+        elif [[ -d /opt/teamspeak ]]; then
+            ts_dir="/opt/teamspeak"
+        else
+            print_warn "TeamSpeak SQLite: /opt/teamspeak отсутствует, сначала установи TS потом restore"
+        fi
+        if [[ -n "$ts_dir" ]]; then
+            if cp -a "${root}/teamspeak-db/"* "${ts_dir}/" 2>/dev/null; then
+                print_ok "TeamSpeak SQLite -> ${ts_dir}"
+                restored=$(( restored + 1 ))
+            else
+                print_err "TeamSpeak SQLite: cp не выполнился (${ts_dir})"
+            fi
         fi
         systemctl start teamspeak 2>/dev/null || true
-        print_ok "TeamSpeak SQLite"
-        restored=$(( restored + 1 ))
     fi
 
     # - Mumble: конфиг + sqlite БД -
@@ -479,7 +514,9 @@ backup_restore() {
         elif systemctl list-unit-files murmurd.service 2>/dev/null | grep -q murmurd; then
             mbl_svc="murmurd"
         fi
-        [[ -n "$mbl_svc" ]] && systemctl stop "$mbl_svc" 2>/dev/null || true
+        if [[ -n "$mbl_svc" ]]; then
+            systemctl stop "$mbl_svc" 2>/dev/null || true
+        fi
 
         # - конфиг: ini файлы -
         for mcfg in "${root}/mumble/"*.ini; do
@@ -525,7 +562,9 @@ backup_restore() {
             break
         done
 
-        [[ -n "$mbl_svc" ]] && systemctl start "$mbl_svc" 2>/dev/null || true
+        if [[ -n "$mbl_svc" ]]; then
+            systemctl start "$mbl_svc" 2>/dev/null || true
+        fi
     fi
 
     # - MTProto -
@@ -594,10 +633,11 @@ backup_restore() {
                 systemctl start "$svc_name" 2>/dev/null || true
             done
             # - x-ui и teamspeak запускаем если их бинари на месте -
-            [[ -f /usr/local/x-ui/x-ui ]] && {
+            # - актуальный апстрим v2.x ставит в /etc/x-ui, legacy в /usr/local/x-ui -
+            if [[ -f /usr/local/x-ui/x-ui || -f /etc/x-ui/x-ui ]]; then
                 systemctl enable x-ui 2>/dev/null || true
                 systemctl start x-ui 2>/dev/null || true
-            }
+            fi
             [[ -f /opt/teamspeak/tsserver ]] && {
                 systemctl enable teamspeak 2>/dev/null || true
                 systemctl start teamspeak 2>/dev/null || true
@@ -607,11 +647,14 @@ backup_restore() {
 
     # - sshd_config -
     if [[ -f "${root}/system/sshd_config" ]]; then
-        cp -a "${root}/system/sshd_config" /etc/ssh/sshd_config 2>/dev/null
-        chmod 644 /etc/ssh/sshd_config
-        systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
-        print_ok "sshd_config"
-        restored=$(( restored + 1 ))
+        if cp -a "${root}/system/sshd_config" /etc/ssh/sshd_config 2>/dev/null; then
+            chmod 644 /etc/ssh/sshd_config
+            systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
+            print_ok "sshd_config"
+            restored=$(( restored + 1 ))
+        else
+            print_warn "sshd_config: cp не выполнился, конфиг не восстановлен"
+        fi
     fi
 
     # - sysctl -
@@ -631,16 +674,27 @@ backup_restore() {
         restored=$(( restored + 1 ))
     fi
 
-    # - Crontab -
+    # - Crontab: merge eli-задач из бэкапа со сторонними из текущего, чтобы не терять чужое -
     if [[ -s "${root}/system/crontab.txt" ]]; then
         echo ""
-        print_warn "Бэкап содержит crontab. Текущий crontab будет заменён."
+        print_info "Бэкап содержит crontab. Сторонние задачи в текущем crontab будут сохранены."
         local cron_ok=""
-        ask_yn "Восстановить crontab?" "y" cron_ok
+        ask_yn "Восстановить eli-задачи из бэкапа (merge со сторонними)?" "y" cron_ok
         if [[ "$cron_ok" == "yes" ]]; then
-            crontab "${root}/system/crontab.txt" 2>/dev/null
-            print_ok "Crontab"
-            restored=$(( restored + 1 ))
+            # - паттерн eli-задач: всё что относится к нашему стеку -
+            local eli_pat='docker-cleanup|eli-healthcheck|eli-tgbot-monitor|disk-monitor|apt-check|/sbin/reboot'
+            local cron_tmp; cron_tmp=$(mktemp)
+            # - сторонние строки из текущего crontab -
+            crontab -l 2>/dev/null | grep -Ev "$eli_pat" > "$cron_tmp" || true
+            # - eli-задачи из бэкапа -
+            grep -E "$eli_pat" "${root}/system/crontab.txt" >> "$cron_tmp" 2>/dev/null || true
+            if crontab "$cron_tmp" 2>/dev/null; then
+                print_ok "Crontab merged (eli-задачи восстановлены, сторонние сохранены)"
+                restored=$(( restored + 1 ))
+            else
+                print_warn "Crontab: установить не удалось"
+            fi
+            rm -f "$cron_tmp"
         else
             print_info "Crontab пропущен"
         fi
