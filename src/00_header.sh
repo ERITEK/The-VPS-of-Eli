@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # --> ЗАГОЛОВОК СКРИПТА <--
-# - The VPS of Eli v3.236: общие функции, переменные, book блок -
+# - The VPS of Eli: общие функции, переменные, book блок -
 
 # - проверка bash -
 if [ -z "$BASH_VERSION" ]; then
@@ -19,7 +19,7 @@ if ! flock -n 200; then
     exit 1
 fi
 
-ELI_VERSION="3.236"
+ELI_VERSION="4.508"
 # shellcheck disable=SC2034
 ELI_CODENAME="The VPS of Eli" # - используется в баннере и book -
 
@@ -29,9 +29,9 @@ CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
 # --> ФУНКЦИИ ВЫВОДА <--
 # - единый набор для всего скрипта -
-print_ok()      { echo -e "  ${GREEN}[OK]${NC} $1"; }
-print_warn()    { echo -e "  ${YELLOW}[!]${NC}  $1"; }
-print_err()     { echo -e "  ${RED}[X]${NC} $1"; }
+print_ok()      { echo -e "  ${GREEN}[-OK-]${NC} $1"; }
+print_warn()    { echo -e "  ${YELLOW}[!!!]${NC}  $1"; }
+print_err()     { echo -e "  ${RED}[xXx]${NC} $1"; }
 print_info()    { echo -e "  ${CYAN}*${NC} $1"; }
 print_section() {
     echo ""
@@ -70,24 +70,100 @@ eli_banner() {
 }
 
 # --> ФУНКЦИИ ВВОДА <--
-# - ask: ввод строки с дефолтом, ask_yn: да/нет -
-ask() {
-    local prompt="$1" default="$2" varname="$3" value=""
-    if [[ -n "$default" ]]; then
-        echo -ne "  ${BOLD}${prompt}${NC} [${default}]: "
+# - Ввод всегда идёт через /dev/tty, а не через текущие stdout/stderr.
+# - Это важно для диагностики: там вывод временно уходит в FIFO/tee.
+# - Не используем read -e с цветным prompt: readline неверно считает ширину ANSI-кодов,
+# - из-за чего Backspace и перерисовка строки дают мусор в терминале.
+eli_tty_reset() {
+    [[ -r /dev/tty ]] && stty sane -ixon -ixoff < /dev/tty 2>/dev/null || true
+}
+
+eli_read_line() {
+    local __eli_prompt="$1" __eli_varname="$2" __eli_default="${3:-}"
+    local __eli_input="" __eli_ch="" __eli_old_stty="" __eli_esc_tail=""
+
+    if [[ -r /dev/tty && -w /dev/tty ]]; then
+        # Если основной вывод сейчас идёт через pipe/FIFO, даём tee допечатать предыдущую строку.
+        [[ ! -t 1 || ! -t 2 ]] && sleep 0.05
+        printf '%b' "$__eli_prompt" > /dev/tty
+
+        __eli_old_stty=$(stty -g < /dev/tty 2>/dev/null || true)
+        stty -echo -icanon min 1 time 0 < /dev/tty 2>/dev/null || true
+
+        while IFS= read -r -s -n 1 __eli_ch < /dev/tty; do
+            case "$__eli_ch" in
+                ""|$'\r'|$'\n')
+                    printf '\n' > /dev/tty
+                    break
+                    ;;
+                $'\177'|$'\b')
+                    if [[ -n "$__eli_input" ]]; then
+                        __eli_input="${__eli_input%?}"
+                        printf '\b \b' > /dev/tty
+                    fi
+                    ;;
+                $'\003')
+                    [[ -n "$__eli_old_stty" ]] && stty "$__eli_old_stty" < /dev/tty 2>/dev/null || eli_tty_reset
+                    printf '\n' > /dev/tty
+                    kill -INT $$
+                    return 130
+                    ;;
+                $'\004')
+                    printf '\n' > /dev/tty
+                    break
+                    ;;
+                $'\025')
+                    while [[ -n "$__eli_input" ]]; do
+                        __eli_input="${__eli_input%?}"
+                        printf '\b \b' > /dev/tty
+                    done
+                    ;;
+                $'\033')
+                    # Игнор ESC/стрелок, чтобы в меню не попадали escape-последовательности.
+                    read -r -s -n 2 -t 0.01 __eli_esc_tail < /dev/tty 2>/dev/null || true
+                    ;;
+                *)
+                    __eli_input+="$__eli_ch"
+                    printf '%s' "$__eli_ch" > /dev/tty
+                    ;;
+            esac
+        done
+
+        [[ -n "$__eli_old_stty" ]] && stty "$__eli_old_stty" < /dev/tty 2>/dev/null || eli_tty_reset
     else
-        echo -ne "  ${BOLD}${prompt}${NC}: "
+        eli_tty_reset
+        printf '%b' "$__eli_prompt" >&2
+        IFS= read -r __eli_input || __eli_input=""
     fi
-    read -r value; value="${value:-$default}"
-    printf -v "$varname" '%s' "$value"
+
+    [[ -z "$__eli_input" && -n "$__eli_default" ]] && __eli_input="$__eli_default"
+    printf -v "$__eli_varname" '%s' "$__eli_input"
+}
+
+eli_read_choice() {
+    eli_read_line "  ${BOLD}Выбор:${NC} " "$1"
+}
+
+ask() {
+    local prompt="$1" default="$2" varname="$3" p
+    if [[ -n "$default" ]]; then
+        p=$(printf '  %b%s%b [%s]: ' "$BOLD" "$prompt" "$NC" "$default")
+    else
+        p=$(printf '  %b%s%b: ' "$BOLD" "$prompt" "$NC")
+    fi
+    eli_read_line "$p" "$varname" "$default"
 }
 
 ask_yn() {
-    local prompt="$1" default="$2" varname="$3" value=""
+    local prompt="$1" default="$2" varname="$3" value="" p
     while true; do
-        [[ "$default" == "y" ]] && echo -ne "  ${BOLD}${prompt}${NC} [Y/n]: " \
-                                 || echo -ne "  ${BOLD}${prompt}${NC} [y/N]: "
-        read -r value; value="${value:-$default}"
+        if [[ "$default" == "y" ]]; then
+            p=$(printf '  %b%s%b [Y/n]: ' "$BOLD" "$prompt" "$NC")
+        else
+            p=$(printf '  %b%s%b [y/N]: ' "$BOLD" "$prompt" "$NC")
+        fi
+
+        eli_read_line "$p" value "$default"
         case "${value,,}" in
             y|yes) printf -v "$varname" 'yes'; return ;;
             n|no)  printf -v "$varname" 'no';  return ;;
@@ -96,12 +172,17 @@ ask_yn() {
     done
 }
 
+# - usage: ask_raw "Текст: " varname [default] -
+ask_raw() {
+    local prompt="$1" varname="$2" default="${3:-}"
+    eli_read_line "$prompt" "$varname" "$default"
+}
+
 # --> ПАУЗА И ВОЗВРАТ В МЕНЮ <--
 # - стандартная пауза после выполнения действия -
 eli_pause() {
     echo ""
-    echo -ne "  ${BOLD}Нажми Enter для возврата в меню...${NC}"
-    read -r _
+    eli_read_line "  ${BOLD}Нажми Enter для возврата в меню...${NC}" _
 }
 
 # --> ВАЛИДАЦИЯ <--
@@ -158,14 +239,17 @@ _rand_bits30() {
 }
 
 rand_h() {
-    printf '%u\n' $(( (RANDOM << 16 | RANDOM) % 2147483647 + 1 ))
+    # - нижняя граница 5: значения 1..4 зарезервированы vanilla WG (Init/Response/Cookie/Transport) -
+    # - диапазон [5, 2147483647], ширина span = 2147483643 -
+    printf '%u\n' $(( 5 + $(_rand_bits30 2147483643) ))
 }
 
 # - диапазон H для AWG 2.0: возвращает "min-max" внутри сегмента [lo, hi] -
 rand_h_range() {
     local lo="$1" hi="$2"
-    if [[ -z "$lo" || -z "$hi" || "$lo" -ge "$hi" ]]; then
-        echo "${lo:-0}-${hi:-0}"; return 1
+    # - guard: невалидные аргументы → пустой stdout + rc=1, без мусора в выводе -
+    if [[ -z "$lo" || -z "$hi" ]] || ! [[ "$lo" =~ ^[0-9]+$ && "$hi" =~ ^[0-9]+$ ]] || (( lo >= hi )); then
+        return 1
     fi
     local mid=$(( (lo + hi) / 2 ))
     local span_lo=$(( mid - lo + 1 ))
@@ -194,8 +278,10 @@ rand_port() {
     local span=$(( high - low + 1 ))
     while (( attempts < max_attempts )); do
         port=$(( low + $(_rand_bits30 "$span") ))
-        if ! ss -ulnp 2>/dev/null | grep -q ":${port} " && \
-           ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+        # - ss без -p: процесс не нужен, -p может требовать прав -
+        # - regex [:.] покрывает IPv4 (:port) и IPv6-mapped (.port) нотацию -
+        if ! ss -H -uln 2>/dev/null | grep -Eq "[:.]${port}[[:space:]]" && \
+           ! ss -H -tln 2>/dev/null | grep -Eq "[:.]${port}[[:space:]]"; then
             echo "$port"; return 0
         fi
         (( attempts++ ))
@@ -251,41 +337,73 @@ _book_ok() {
     command -v jq &>/dev/null && [[ -f "$_BOOK" ]] && jq empty "$_BOOK" 2>/dev/null
 }
 
-book_read() {
+# - превращает "точечный" путь вида .a.3xui.b.1.c в безопасное jq-выражение -
+# - сегменты, которые не являются валидным jq-идентификатором (начинаются с цифры, -
+# - содержат дефис или иные спецсимволы), оборачиваются в кавычки: ."3xui", ."1" -
+# - сегменты, уже обёрнутые в "..." или [...] - оставляются как есть -
+_book_path() {
     local p="$1"
-    [[ "$p" != .* ]] && p=".${p}"
+    [[ -z "$p" ]] && return 1
+    # - если путь совсем не точечный (например '.["x"]'), вернуть как есть -
+    [[ "$p" != .* && "$p" != \[* ]] && p=".${p}"
+    # - быстрый путь: уже квотировано или с индексами - не трогаем -
+    [[ "$p" == *'"'* || "$p" == *'['* ]] && { echo "$p"; return 0; }
+
+    local out="" rest="${p#.}" seg
+    while [[ -n "$rest" ]]; do
+        seg="${rest%%.*}"
+        if [[ "$rest" == *.* ]]; then
+            rest="${rest#*.}"
+        else
+            rest=""
+        fi
+        if [[ "$seg" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+            out+=".${seg}"
+        else
+            # - спецсимволов в наших путях быть не должно, но на всякий - escape двойных кавычек -
+            local esc="${seg//\"/\\\"}"
+            out+=".\"${esc}\""
+        fi
+    done
+    echo "$out"
+}
+
+book_read() {
+    local p; p=$(_book_path "$1") || return 0
     _book_ok && jq -r "${p} // empty" "$_BOOK" 2>/dev/null || echo ""
 }
 
 book_write() {
     _book_ok || return 0
-    local p="$1" v="$2" t="${3:-string}" tmp
-    [[ "$p" != .* ]] && p=".${p}"
-    tmp=$(mktemp)
+    local raw="$1" v="$2" t="${3:-string}" tmp p
+    p=$(_book_path "$raw") || return 1
+    tmp=$(mktemp) || { print_warn "book_write: mktemp failed for ${raw}"; return 1; }
     case "$t" in
         bool|number) jq "${p} = ${v}" "$_BOOK" > "$tmp" 2>/dev/null ;;
         *) jq --arg v "$v" "${p} = \$v" "$_BOOK" > "$tmp" 2>/dev/null ;;
     esac
     if [[ -s "$tmp" ]] && jq empty "$tmp" 2>/dev/null; then
         mv "$tmp" "$_BOOK"; chmod 600 "$_BOOK"
-    else
-        rm -f "$tmp"
+        return 0
     fi
-    return 0
+    rm -f "$tmp"
+    print_warn "book_write failed: ${raw}"
+    return 1
 }
 
 book_write_obj() {
     _book_ok || return 0
-    local p="$1" obj="$2" tmp
-    [[ "$p" != .* ]] && p=".${p}"
-    tmp=$(mktemp)
+    local raw="$1" obj="$2" tmp p
+    p=$(_book_path "$raw") || return 1
+    tmp=$(mktemp) || { print_warn "book_write_obj: mktemp failed for ${raw}"; return 1; }
     jq --argjson obj "$obj" "${p} = \$obj" "$_BOOK" > "$tmp" 2>/dev/null
     if [[ -s "$tmp" ]] && jq empty "$tmp" 2>/dev/null; then
         mv "$tmp" "$_BOOK"; chmod 600 "$_BOOK"
-    else
-        rm -f "$tmp"
+        return 0
     fi
-    return 0
+    rm -f "$tmp"
+    print_warn "book_write_obj failed: ${raw}"
+    return 1
 }
 
 book_init() {
@@ -306,7 +424,7 @@ book_init() {
             "outline":{"installed":false,"server_ip":"","api_port":0,"mgmt_port":0,"keys_port":0,"manager_key_path":"/etc/outline/manager_key.json","api_url":"","installed_at":""},
             "3xui":{"installed":false,"version":"","server_ip":"","panel_port":0,"panel_path":"","panel_user":"","panel_pass":"","db_path":"","installed_at":""},
             "teamspeak":{"installed":false,"version":"","server_ip":"","voice_port":9987,"ft_port":30033,"threads":2,"priv_key":"","db_path":"/opt/teamspeak/tsserver.sqlitedb","installed_at":""},
-            "mumble":{"installed":false,"version":"","server_ip":"","port":64738,"superuser_set":false,"installed_at":""},
+            "mumble":{"installed":false,"version":"","server_ip":"","port":64738,"superuser_set":false,"superuser_pass":"","installed_at":""},
             "unbound":{"installed":false,"listen_ips":[]},
             "ufw":{"active":false},
             "mtproto":{"instances":{}},
@@ -329,6 +447,40 @@ ssh_get_port() {
         port=$(grep -oP '^\s*Port\s+\K[0-9]+' /etc/ssh/sshd_config 2>/dev/null | head -1)
     fi
     echo "${port:-22}"
+}
+
+# - эффективное значение PermitRootLogin: drop-in переопределяет sshd_config -
+ssh_get_permitrootlogin() {
+    local val
+    val=$(sshd -T 2>/dev/null | awk '/^permitrootlogin /{print $2; exit}')
+    if [[ -z "$val" ]]; then
+        val=$(grep -oP '^\s*PermitRootLogin\s+\K\S+' /etc/ssh/sshd_config 2>/dev/null | head -1)
+    fi
+    echo "${val:-yes}"
+}
+
+# - drop-in /etc/ssh/sshd_config.d/99-eli.conf: на Ubuntu cloud-init и Debian с -
+# - 50-cloud-init.conf правка sshd_config теряется. drop-in с приоритетом 99 -
+# - перекрывает любые существующие конфиги. -
+# - arg1: ключ (Port, PermitRootLogin, PasswordAuthentication, ...) -
+# - arg2: значение -
+# - инклюзив-проверка: создаёт Include sshd_config.d/*.conf если его нет в основном -
+ssh_apply_dropin() {
+    local key="$1" val="$2" dropin="/etc/ssh/sshd_config.d/99-eli.conf"
+    [[ -z "$key" || -z "$val" ]] && return 1
+    mkdir -p /etc/ssh/sshd_config.d
+    if [[ ! -f "$dropin" ]]; then
+        printf "# eli stack overrides\n" > "$dropin"
+    fi
+    # - убрать предыдущую запись по этому ключу (если была) и добавить новую -
+    sed -i "/^[[:space:]]*${key}[[:space:]]/Id" "$dropin"
+    printf '%s %s\n' "$key" "$val" >> "$dropin"
+    chmod 644 "$dropin"
+    # - sshd_config может не включать sshd_config.d/*.conf на старых системах -
+    if ! grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' /etc/ssh/sshd_config 2>/dev/null; then
+        printf '\nInclude /etc/ssh/sshd_config.d/*.conf\n' >> /etc/ssh/sshd_config
+    fi
+    return 0
 }
 
 ssh_restart() {
