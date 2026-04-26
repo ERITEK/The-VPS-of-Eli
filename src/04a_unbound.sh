@@ -25,7 +25,7 @@ unbound_install() {
     echo ""
     local dns_mode="recursive"
     while true; do
-        echo -ne "  ${BOLD}Выбор?${NC} [1]: "; read -r _dm
+        ask_raw "$(printf '  \033[1mВыбор?\033[0m [1]: ')" _dm
         case "${_dm:-1}" in
             1) dns_mode="recursive"; break ;;
             2) dns_mode="forward"; break ;;
