@@ -1,238 +1,230 @@
-# --> МОДУЛЬ: ОБНОВЛЕНИЯ <--
-# - проверка и установка обновлений для всех компонентов стека -
+# --> МОДУЛЬ: UFW <--
+# - управление правилами файрвола: добавление, удаление, проверка покрытия -
 
-update_scan() {
-    print_section "Проверка обновлений"
-
-    # - apt -
-    print_info "Система (apt)..."
-    apt-get update -qq 2>/dev/null || true
-    local apt_upgradable
-    apt_upgradable=$(apt-get upgrade --dry-run 2>/dev/null | grep -oP '^[0-9]+ upgraded' || echo "0 upgraded")
-    print_info "apt: ${apt_upgradable}"
-
-    # - 3X-UI -
-    if [[ -f "${XUI_DIR:-/usr/local/x-ui}/x-ui" ]]; then
-        local xui_cur xui_lat
-        xui_cur=$("${XUI_DIR:-/usr/local/x-ui}/x-ui" -v 2>/dev/null | head -1 || echo "?")
-        xui_lat=$(curl -fsSL --connect-timeout 10 \
-            "https://api.github.com/repos/MHSanaei/3x-ui/releases/latest" 2>/dev/null \
-            | grep -oP '"tag_name":\s*"\K[^"]+' || echo "?")
-        # - убираем префикс v для корректного сравнения -
-        local _xc="${xui_cur#v}" _xl="${xui_lat#v}"
-        [[ "$_xc" == "$_xl" ]] && print_ok "3X-UI: ${xui_cur} (актуальна)" \
-            || print_warn "3X-UI: ${xui_cur} -> ${xui_lat}"
-    else
-        print_info "3X-UI: не установлен"
-    fi
-
-    # - TeamSpeak -
-    if [[ -f "${TS_ENV:-/etc/teamspeak/teamspeak.env}" ]]; then
-        local ts_cur ts_lat
-        ts_cur=$(grep -oP '^TS_VERSION="\K[^"]+' "${TS_ENV:-/etc/teamspeak/teamspeak.env}" 2>/dev/null || echo "?")
-        ts_lat=$(ts_get_latest_version 2>/dev/null || echo "?")
-        local _tc="${ts_cur#v}" _tl="${ts_lat#v}"
-        [[ "$_tc" == "$_tl" ]] && print_ok "TeamSpeak: ${ts_cur} (актуальна)" \
-            || print_warn "TeamSpeak: ${ts_cur} -> ${ts_lat}"
-    else
-        print_info "TeamSpeak: не установлен"
-    fi
-
-    # - Outline -
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^shadowbox$"; then
-        local otl_img
-        otl_img=$(docker inspect shadowbox 2>/dev/null | jq -r '.[0].Config.Image' 2>/dev/null || echo "?")
-        print_info "Outline: образ ${otl_img}"
-        print_info "Обновление: docker pull + restart"
-    else
-        print_info "Outline: не установлен"
-    fi
-
-    # - AWG -
-    if command -v awg &>/dev/null; then
-        local awg_ver; awg_ver=$(awg --version 2>/dev/null | head -1 || echo "?")
-        print_info "AmneziaWG: ${awg_ver}"
-    else
-        print_info "AmneziaWG: не установлен"
-    fi
+_ufw_guard() {
+    command -v ufw &>/dev/null || { print_err "UFW не установлен"; return 1; }
     return 0
 }
 
-update_apt() {
-    print_section "Обновление системы (apt)"
-    local kver_before; kver_before=$(uname -r)
-    apt-get update -qq || true
-    apt-get -y upgrade || { print_err "apt upgrade завершился с ошибкой"; return 1; }
-    apt-get -y autoremove -qq || true
-    print_ok "Система обновлена"
+ufw_active() {
+    ufw status 2>/dev/null | grep -q "^Status: active"
+}
 
-    # - если AWG установлен, обновляем headers и пересобираем DKMS -
-    if command -v awg &>/dev/null; then
-        local kver_now; kver_now=$(uname -r)
-        if [[ ! -d "/lib/modules/${kver_now}/build" ]]; then
-            print_info "Доустанавливаю kernel headers для ${kver_now} (нужно для AWG)..."
-            apt-get install -y -qq "linux-headers-${kver_now}" 2>/dev/null \
-                || apt-get install -y -qq linux-headers-amd64 2>/dev/null || true
+# - проверка наличия правила для порта/протокола, работает и при неактивном UFW -
+# - 'ufw show added' выводит "ufw allow 22/tcp" даже когда UFW disabled, в отличие от 'ufw status' -
+_ufw_has_rule() {
+    local port="$1" proto="${2:-}"
+    [[ -z "$port" ]] && return 1
+    local pat
+    if [[ -n "$proto" ]]; then
+        pat="${port}/${proto}"
+    else
+        pat="${port}"
+    fi
+    ufw show added 2>/dev/null | grep -Eq "(^|[[:space:]])${pat}([[:space:]]|$)"
+}
+
+ufw_show_status() {
+    _ufw_guard || return 0
+    print_section "Статус UFW"
+    if ufw_active; then
+        print_ok "UFW: активен"
+    else
+        print_warn "UFW: неактивен"
+    fi
+    echo ""
+    echo -e "  ${BOLD}Правила:${NC}"
+    if ufw_active; then
+        ufw status numbered 2>/dev/null | grep -v "^Status:" | sed 's/^/  /' || true
+    else
+        # - при выключенном UFW status пуст, показываем отложенные правила -
+        ufw show added 2>/dev/null | grep -v "^Added user rules" | sed 's/^/  /' || true
+    fi
+    echo ""
+    return 0
+}
+
+ufw_toggle() {
+    _ufw_guard || return 0
+    print_section "Включить / выключить UFW"
+    if ufw_active; then
+        print_warn "UFW активен"
+        local confirm=""
+        ask_yn "Отключить UFW?" "n" confirm
+        [[ "$confirm" != "yes" ]] && return 0
+        ufw disable
+        print_ok "UFW отключён"
+    else
+        print_warn "UFW неактивен"
+        local ssh_port; ssh_port=$(ssh_get_port)
+        # - проверяем через 'ufw show added' (видит правила и при неактивном UFW) -
+        if ! _ufw_has_rule "$ssh_port" "tcp" && ! _ufw_has_rule "$ssh_port"; then
+            print_warn "SSH порт ${ssh_port} не найден в правилах!"
+            local add=""
+            ask_yn "Добавить ${ssh_port}/tcp?" "y" add
+            if [[ "$add" == "yes" ]]; then
+                ufw allow "${ssh_port}/tcp" comment "SSH" 2>/dev/null || true
+            fi
         fi
-        # - пересборка DKMS на случай обновления ядра -
-        dkms autoinstall 2>/dev/null || true
+        local confirm=""
+        ask_yn "Включить UFW?" "y" confirm
+        [[ "$confirm" != "yes" ]] && return 0
+        ufw --force enable
+        print_ok "UFW включён"
     fi
+    return 0
+}
 
-    if [[ -f /var/run/reboot-required ]]; then
-        print_warn "Требуется reboot для применения обновлений ядра"
-        if command -v awg &>/dev/null; then
-            print_info "После reboot: Prayer of Eli проверит модуль amneziawg"
+ufw_add_port() {
+    _ufw_guard || return 0
+    print_section "Добавить порт"
+    echo -e "  ${CYAN}Форматы: 80 / 80/tcp / 80/udp / 80:90/tcp${NC}"
+    local port_input="" port_spec=""
+    while true; do
+        ask_raw "$(printf '  \033[1mПорт:\033[0m ')" port_input
+        [[ -z "$port_input" ]] && continue
+
+        port_spec="$port_input"
+        if [[ "$port_spec" =~ ^[0-9]+$ ]]; then
+            echo -e "  ${GREEN}1)${NC} tcp  ${GREEN}2)${NC} udp  ${GREEN}3)${NC} tcp+udp"
+            local proto_ch=""
+            ask_raw "$(printf '  \033[1mПротокол?\033[0m ')" proto_ch
+            case "$proto_ch" in
+                1) port_spec="${port_input}/tcp" ;;
+                2) port_spec="${port_input}/udp" ;;
+                3) port_spec="${port_input}" ;;
+                *) port_spec="${port_input}/tcp" ;;
+            esac
         fi
-    fi
-    return 0
-}
 
-update_xui() {
-    print_section "Обновление 3X-UI"
-    if [[ ! -f "${XUI_BIN:-/usr/local/x-ui/x-ui}" ]]; then
-        print_err "3X-UI не установлен"; return 0
-    fi
-    local confirm=""; ask_yn "Обновить 3X-UI?" "y" confirm
-    [[ "$confirm" != "yes" ]] && return 0
-
-    # - бэкап БД -
-    [[ -f "${XUI_DB:-/usr/local/x-ui/db/x-ui.db}" ]] && {
-        mkdir -p "${XUI_BACKUP_DIR:-/etc/3xui/backups}"
-        cp -f "${XUI_DB}" "${XUI_BACKUP_DIR}/x-ui_pre_update_$(date +%Y%m%d).db" 2>/dev/null || true
-        print_ok "Бэкап БД создан"
-    }
-
-    # - прямое скачивание tar.gz -
-    # - upstream install.sh имеет prompts (port/SSL), которые зависнут -
-    # - сохраняем настройки/базу и обновляем только бинарь -
-    if ! _xui_fetch_release_info; then
-        print_err "Не удалось определить последний релиз 3X-UI"
-        return 1
-    fi
-    print_info "Новая версия: ${XUI_TAG}"
-
-    # - сохраняем БД в tmp на случай если tar.gz содержит свой db/ -
-    local db_backup=""
-    if [[ -f "${XUI_DB:-/usr/local/x-ui/db/x-ui.db}" ]]; then
-        db_backup=$(mktemp)
-        cp -f "${XUI_DB}" "$db_backup"
-    fi
-
-    if ! _xui_fetch_and_extract; then
-        print_err "Не удалось скачать/распаковать 3X-UI"
-        [[ -n "$db_backup" && -f "$db_backup" ]] && rm -f "$db_backup"
-        return 1
-    fi
-
-    # - восстанавливаем БД если архив переписал db/ -
-    if [[ -n "$db_backup" && -f "$db_backup" ]]; then
-        mkdir -p "${XUI_DIR:-/usr/local/x-ui}/db"
-        cp -f "$db_backup" "${XUI_DB:-/usr/local/x-ui/db/x-ui.db}"
-        rm -f "$db_backup"
-        print_ok "БД сохранена"
-    fi
-
-    if ! _xui_install_cli_and_unit; then
-        print_err "Не удалось установить CLI/unit"
-        return 1
-    fi
-
-    _xui_fix_nofile 2>/dev/null || true
-    systemctl restart "${XUI_SERVICE:-x-ui}" 2>/dev/null || true
-    sleep 3
-    if systemctl is-active --quiet "${XUI_SERVICE:-x-ui}" 2>/dev/null; then
-        local new_ver; new_ver=$("${XUI_BIN:-/usr/local/x-ui/x-ui}" -v 2>/dev/null | head -1 || echo "?")
-        print_ok "3X-UI обновлён: ${new_ver} (${XUI_TAG})"
-        book_write ".3xui.version" "${new_ver}"
-    else
-        print_err "3X-UI не запустился после обновления"
-    fi
-    return 0
-}
-
-update_ts() {
-    ts_update 2>/dev/null || print_warn "Ошибка при обновлении TeamSpeak"
-    return 0
-}
-
-update_otl() {
-    print_section "Обновление Outline"
-    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^shadowbox$"; then
-        print_err "Outline не запущен"; return 0
-    fi
-    local confirm=""; ask_yn "Обновить Outline (docker pull)?" "y" confirm
-    [[ "$confirm" != "yes" ]] && return 0
-    local img; img=$(docker inspect shadowbox 2>/dev/null | jq -r '.[0].Config.Image' 2>/dev/null || echo "")
-    [[ -n "$img" ]] && docker pull "$img" 2>/dev/null || true
-    docker restart shadowbox 2>/dev/null || true
-    sleep 5
-    local api_url; api_url=$(otl_get_api_url 2>/dev/null || echo "")
-    if [[ -n "$api_url" ]] && curl -fsk --connect-timeout 5 "${api_url}/access-keys" >/dev/null 2>&1; then
-        print_ok "Outline обновлён, API работает"
-    else
-        print_warn "API не отвечает, подожди минуту"
-    fi
-    return 0
-}
-
-update_awg() {
-    print_section "Обновление AmneziaWG"
-    if ! command -v awg &>/dev/null; then
-        print_err "AmneziaWG не установлен"; return 0
-    fi
-    local confirm=""; ask_yn "Обновить AmneziaWG (apt + DKMS)?" "y" confirm
-    [[ "$confirm" != "yes" ]] && return 0
-
-    # - останавливаем все интерфейсы -
-    local ifaces; ifaces=$(awg_get_iface_list 2>/dev/null)
-    for iface in $ifaces; do
-        systemctl stop "awg-quick@${iface}" 2>/dev/null || true
-        print_info "Остановлен: ${iface}"
-    done
-
-    # - ensure headers перед обновлением (ядро могло обновиться) -
-    local kver; kver=$(uname -r)
-    if [[ ! -d "/lib/modules/${kver}/build" ]]; then
-        print_info "Kernel headers отсутствуют для ${kver}, устанавливаю..."
-        apt-get install -y -qq "linux-headers-${kver}" 2>/dev/null \
-            || apt-get install -y -qq linux-headers-amd64 2>/dev/null \
-            || print_warn "Headers не удалось установить"
-    fi
-
-    apt-get update -qq || true
-    apt-get install -y --only-upgrade amneziawg 2>/dev/null || true
-
-    # - ensure module после обновления -
-    if ! _awg_ensure_module 2>/dev/null; then
-        print_warn "Модуль не загрузился, может понадобиться reboot"
-    fi
-
-    # - поднимаем интерфейсы -
-    for iface in $ifaces; do
-        systemctl start "awg-quick@${iface}" 2>/dev/null || true
-        sleep 1
-        if systemctl is-active --quiet "awg-quick@${iface}"; then
-            print_ok "Запущен: ${iface}"
+        # - валидация: одиночный порт или диапазон lo:hi, опциональный /tcp|/udp -
+        if ! [[ "$port_spec" =~ ^([0-9]+|[0-9]+:[0-9]+)(/tcp|/udp)?$ ]]; then
+            print_err "Неверный формат. Примеры: 80, 80/tcp, 80:90/udp"
+            continue
+        fi
+        # - извлечение порта/диапазона без протокола, проверка границ -
+        local pp="${port_spec%/*}"
+        if [[ "$pp" == *:* ]]; then
+            local lo="${pp%:*}" hi="${pp#*:}"
+            if (( lo < 1 || lo > 65535 || hi < 1 || hi > 65535 )); then
+                print_err "Порты диапазона должны быть в 1-65535"
+                continue
+            fi
+            if (( lo > hi )); then
+                print_err "В диапазоне lo:hi должно быть lo <= hi (получено ${lo}:${hi})"
+                continue
+            fi
         else
-            print_err "Не запустился: ${iface}"
+            if (( pp < 1 || pp > 65535 )); then
+                print_err "Порт должен быть в 1-65535"
+                continue
+            fi
         fi
+        break
     done
 
-    local new_ver; new_ver=$(awg --version 2>/dev/null | head -1 || echo "?")
-    book_write ".awg.version" "$new_ver"
-    print_ok "AmneziaWG: ${new_ver}"
+    local comment=""
+    echo -e "  ${CYAN}Комментарий - пометка для чего этот порт (например: nginx, игра). Можно пропустить.${NC}"
+    ask "Комментарий (опционально)" "" comment
+    if [[ -n "$comment" ]]; then
+        ufw allow "${port_spec}" comment "${comment}"
+    else
+        ufw allow "${port_spec}"
+    fi
+    print_ok "Добавлено: allow ${port_spec}"
     return 0
 }
 
-update_all() {
-    print_section "Обновление всего стека"
-    local confirm=""; ask_yn "Обновить все компоненты?" "y" confirm
+ufw_delete_rule() {
+    _ufw_guard || return 0
+    print_section "Удалить правило"
+    ufw status numbered 2>/dev/null | grep -v "^Status:" | sed 's/^/  /'
+    echo ""
+    local num=""
+    while true; do
+        ask_raw "$(printf '  \033[1mНомер правила:\033[0m ')" num
+        [[ "$num" =~ ^[0-9]+$ ]] && break
+    done
+    local confirm=""
+    ask_yn "Удалить #${num}?" "n" confirm
     [[ "$confirm" != "yes" ]] && return 0
-    update_apt || true
-    command -v awg &>/dev/null && { update_awg || true; }
-    [[ -f "${XUI_BIN:-/usr/local/x-ui/x-ui}" ]] && { update_xui || true; }
-    docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^shadowbox$" && { update_otl || true; }
-    [[ -f "${TS_BIN:-/opt/teamspeak/tsserver}" ]] && { ts_update || true; }
-    print_ok "Обновление завершено"
+    if echo "y" | ufw delete "$num" 2>/dev/null; then
+        print_ok "Удалено"
+    else
+        print_err "Не удалось"
+    fi
+    return 0
+}
+
+ufw_check_ports() {
+    _ufw_guard || return 0
+    print_section "Активные порты vs UFW"
+
+    local ufw_rules
+    ufw_rules=$(ufw status 2>/dev/null || true)
+
+    local missing_rules=()
+
+    while IFS= read -r line; do
+        local proto port proc addr
+        local rest
+
+        proto=$(echo "$line" | awk '{print $1}' | sed 's/[0-9]*$//')
+        addr=$(echo "$line" | awk '{print $5}')
+        port=$(echo "$addr" | grep -oP ':\K[0-9]+$')
+        proc=$(echo "$line" | grep -oP 'users:\(\("?\K[^",)]+')
+        [[ -z "$proc" ]] && proc="-"
+
+        [[ -z "$proto" || -z "$port" ]] && continue
+        # - пропускаем loopback -
+        [[ "$addr" =~ ^127\. || "$addr" =~ ^\[::1\] ]] && continue
+
+        if echo "$ufw_rules" | grep -qE "(^|[[:space:]])${port}/${proto}([[:space:]]|$)|(^|[[:space:]])${port}([[:space:]]|$)"; then
+            echo -e "  ${GREEN}[OK]${NC} ${port}/${proto}  ${proc}"
+        else
+            echo -e "  ${YELLOW}[!]${NC}  ${port}/${proto}  ${proc}  ${YELLOW}нет правила${NC}"
+            missing_rules+=("${port}:${proto}:${proc}")
+        fi
+    done < <(ss -tulpn 2>/dev/null | tail -n +2)
+
+    echo ""
+
+    if [[ ${#missing_rules[@]} -eq 0 ]]; then
+        print_ok "Все порты покрыты"
+        ufw_active || print_warn "UFW неактивен, правила не применяются"
+        return 0
+    fi
+
+    print_warn "Без правил: ${#missing_rules[@]}"
+
+    local confirm=""
+    ask_yn "Добавить все отсутствующие правила?" "n" confirm
+
+    if [[ "$confirm" == "yes" ]]; then
+        local item port proto proc rest
+        for item in "${missing_rules[@]}"; do
+            port="${item%%:*}"
+            rest="${item#*:}"
+            proto="${rest%%:*}"
+            proc="${rest#*:}"
+
+            ufw allow "${port}/${proto}" comment "${proc}" 2>/dev/null || true
+            print_ok "Добавлено: ${port}/${proto} (${proc})"
+        done
+    fi
+
+    ufw_active || print_warn "UFW неактивен, правила не применяются"
+    return 0
+}
+
+ufw_reset() {
+    _ufw_guard || return 0
+    print_section "Сброс всех правил"
+    print_warn "Все правила будут удалены, UFW отключён!"
+    local confirm=""
+    ask_yn "Подтвердить?" "n" confirm
+    [[ "$confirm" != "yes" ]] && return 0
+    echo "y" | ufw reset 2>/dev/null
+    print_ok "UFW сброшен"
     return 0
 }
