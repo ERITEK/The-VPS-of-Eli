@@ -45,20 +45,19 @@ mbl_install() {
 
     # - пароль сервера (для подключения клиентов) -
     local srv_pass=""
-    echo -ne "  ${BOLD}Пароль сервера (пустой = без пароля):${NC} "
-    read -r srv_pass
+    ask_raw "$(printf '  \033[1mПароль сервера (пустой = без пароля):\033[0m ')" srv_pass
     echo ""
 
     # - пароль SuperUser (администратор): двойной ввод с проверкой -
     local su_pass="" su_pass2=""
     while true; do
-        echo -ne "  ${BOLD}Пароль SuperUser (мин. 6 символов):${NC} "
-        read -r su_pass; echo ""
+        ask_raw "$(printf '  \033[1mПароль SuperUser (мин. 6 символов):\033[0m ')" su_pass
+        echo ""
         if [[ ${#su_pass} -lt 6 ]]; then
             print_err "Минимум 6 символов"; continue
         fi
-        echo -ne "  ${BOLD}Повторите пароль SuperUser:${NC} "
-        read -r su_pass2; echo ""
+        ask_raw "$(printf '  \033[1mПовторите пароль SuperUser:\033[0m ')" su_pass2
+        echo ""
         if [[ "$su_pass" != "$su_pass2" ]]; then
             print_err "Пароли не совпадают"; continue
         fi
@@ -98,6 +97,8 @@ mbl_install() {
         (( db_wait++ ))
     done
 
+    # - флаг успеха установки SuperUser пароля, попадает в book/echo условно -
+    local su_set="false"
     if [[ -z "$db_found" ]]; then
         print_warn "БД Mumble не появилась за 15 сек, SuperUser пароль не задан"
     else
@@ -106,7 +107,8 @@ mbl_install() {
         sleep 1
         if murmurd -ini "$MBL_CONF" -supw "$su_pass" 2>/dev/null; then
             print_ok "SuperUser пароль задан"
-			book_write ".mumble.superuser_pass" "$su_pass"
+            book_write ".mumble.superuser_pass" "$su_pass"
+            su_set="true"
         else
             print_warn "Не удалось задать SuperUser пароль через murmurd"
         fi
@@ -134,7 +136,7 @@ mbl_install() {
     book_write ".mumble.installed" "true" bool
     book_write ".mumble.server_ip" "$server_ip"
     book_write ".mumble.port" "$port" number
-    book_write ".mumble.superuser_set" "true" bool
+    book_write ".mumble.superuser_set" "$su_set" bool
     book_write ".mumble.installed_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     echo ""
@@ -143,7 +145,11 @@ mbl_install() {
     echo -e "${GREEN}${BOLD}====================================================${NC}"
     echo -e "  ${BOLD}Адрес:${NC}       ${server_ip}:${port}"
     echo -e "  ${BOLD}Пароль:${NC}      ${srv_pass:-без пароля}"
-    echo -e "  ${BOLD}SuperUser:${NC}   пароль задан (логин: SuperUser)"
+    if [[ "$su_set" == "true" ]]; then
+        echo -e "  ${BOLD}SuperUser:${NC}   пароль задан (логин: SuperUser)"
+    else
+        echo -e "  ${BOLD}SuperUser:${NC}   ${YELLOW}НЕ задан${NC} (логин: SuperUser, задай вручную: murmurd -ini ${MBL_CONF} -supw)"
+    fi
     echo ""
     return 0
 }
@@ -156,7 +162,7 @@ mbl_show_status() {
         print_err "Сервис: не запущен"
     fi
     local port=""
-    [[ -f "$MBL_CONF" ]] && port=$(grep -oP '^port=\K[0-9]+' "$MBL_CONF" || echo "64738")
+    [[ -f "$MBL_CONF" ]] && port=$(grep -oP '^port=\K[0-9]+' "$MBL_CONF" 2>/dev/null)
     print_info "Порт: ${port:-64738}"
     local server_ip; server_ip=$(book_read ".mumble.server_ip")
     [[ -n "$server_ip" ]] && print_info "Адрес: ${server_ip}:${port:-64738}"
@@ -167,16 +173,16 @@ mbl_show_creds() {
     print_section "Данные для подключения"
     local server_ip port srv_pass su_pass
     server_ip=$(book_read ".mumble.server_ip")
-	su_pass=$(book_read ".mumble.superuser_pass")
+    su_pass=$(book_read ".mumble.superuser_pass")
     [[ -f "$MBL_CONF" ]] && {
-        port=$(grep -oP '^port=\K[0-9]+' "$MBL_CONF" || echo "64738")
-        srv_pass=$(grep -oP '^serverpassword=\K.*' "$MBL_CONF" || echo "")
+        port=$(grep -oP '^port=\K[0-9]+' "$MBL_CONF" 2>/dev/null)
+        srv_pass=$(grep -oP '^serverpassword=\K.*' "$MBL_CONF" 2>/dev/null)
     }
     echo ""
     echo -e "  ${BOLD}Адрес:${NC}       ${server_ip:-?}:${port:-64738}"
     echo -e "  ${BOLD}Пароль:${NC}      ${srv_pass:-без пароля}"
     echo -e "  ${BOLD}SuperUser:${NC}   логин SuperUser"
-	echo -e "  ${BOLD}Пароль SU:${NC}   ${su_pass:-не сохранён}"
+    echo -e "  ${BOLD}Пароль SU:${NC}   ${su_pass:-не сохранён}"
     echo ""
     return 0
 }
@@ -250,7 +256,7 @@ mbl_delete() {
     systemctl disable "$MBL_SERVICE" 2>/dev/null || true
     apt-get purge -y -qq mumble-server 2>/dev/null || true
     local port=""
-    [[ -f "$MBL_CONF" ]] && port=$(grep -oP '^port=\K[0-9]+' "$MBL_CONF" || true)
+    [[ -f "$MBL_CONF" ]] && port=$(grep -oP '^port=\K[0-9]+' "$MBL_CONF" 2>/dev/null)
     if [[ -n "$port" ]] && command -v ufw &>/dev/null; then
         ufw delete allow "${port}/tcp" 2>/dev/null || true
         ufw delete allow "${port}/udp" 2>/dev/null || true
