@@ -69,12 +69,11 @@ _xui_fetch_release_info() {
     local arch
     arch=$(_xui_arch)
     local tag
-    tag=$(curl -fsSL --connect-timeout 10 "$XUI_API_URL" 2>/dev/null \
-        | grep '"tag_name":' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+    # - jq уже доступен (boot_install_packages его ставит) -
+    tag=$(curl -fsSL --connect-timeout 10 "$XUI_API_URL" 2>/dev/null | jq -r '.tag_name // empty' 2>/dev/null)
     if [[ -z "$tag" ]]; then
         # - fallback через IPv4 -
-        tag=$(curl -4 -fsSL --connect-timeout 10 "$XUI_API_URL" 2>/dev/null \
-            | grep '"tag_name":' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+        tag=$(curl -4 -fsSL --connect-timeout 10 "$XUI_API_URL" 2>/dev/null | jq -r '.tag_name // empty' 2>/dev/null)
     fi
     if [[ -z "$tag" ]]; then
         print_err "Не удалось получить версию 3X-UI с GitHub API"
@@ -225,8 +224,8 @@ xui_install() {
     panel_path="/$(rand_str 16)"
     echo -e "  ${CYAN}URL путь к панели. Случайный путь защищает от сканеров.${NC}"
     while true; do
-        echo -ne "  ${BOLD}URL путь панели${NC} [${panel_path}] (или введи вручную): "
-        read -r _input
+        local _input=""
+        ask_raw "$(printf '  \033[1mURL путь панели\033[0m [%s] (или введи вручную): ' "$panel_path")" _input
         _input="${_input:-$panel_path}"
         [[ "$_input" != /* ]] && _input="/${_input}"
         if [[ ${#_input} -lt 5 ]]; then
@@ -243,8 +242,8 @@ xui_install() {
     panel_pass=$(rand_str 16)
     echo -e "  ${CYAN}Логин и пароль для входа в панель.${NC}"
     while true; do
-        echo -ne "  ${BOLD}Логин${NC} [${panel_user}] (или введи вручную, мин. 5 симв.): "
-        read -r _input
+        local _input=""
+        ask_raw "$(printf '  \033[1mЛогин\033[0m [%s] (или введи вручную, мин. 5 симв.): ' "$panel_user")" _input
         _input="${_input:-$panel_user}"
         if [[ ${#_input} -lt 5 ]]; then
             print_err "Логин минимум 5 символов"; continue
@@ -253,8 +252,8 @@ xui_install() {
         break
     done
     while true; do
-        echo -ne "  ${BOLD}Пароль${NC} [${panel_pass}] (или введи вручную, мин. 8 симв.): "
-        read -r _input
+        local _input=""
+        ask_raw "$(printf '  \033[1mПароль\033[0m [%s] (или введи вручную, мин. 8 симв.): ' "$panel_pass")" _input
         _input="${_input:-$panel_pass}"
         if [[ ${#_input} -lt 8 ]]; then
             print_err "Пароль минимум 8 символов"; continue
@@ -321,10 +320,19 @@ xui_install() {
     fi
     print_ok "3X-UI установлен"
 
-    # - настройка через CLI: наши параметры применяются гарантированно -
-    "$XUI_BIN" setting -port "$panel_port" >/dev/null 2>&1 || true
-    "$XUI_BIN" setting -webBasePath "$panel_path" >/dev/null 2>&1 || true
-    "$XUI_BIN" setting -username "$panel_user" -password "$panel_pass" >/dev/null 2>&1 || true
+    # - настройка через CLI: наши параметры должны примениться гарантированно -
+    if ! "$XUI_BIN" setting -port "$panel_port" >/dev/null 2>&1; then
+        print_err "Не удалось применить порт панели через 'x-ui setting -port'"
+        return 1
+    fi
+    if ! "$XUI_BIN" setting -webBasePath "$panel_path" >/dev/null 2>&1; then
+        print_err "Не удалось применить webBasePath через 'x-ui setting -webBasePath'"
+        return 1
+    fi
+    if ! "$XUI_BIN" setting -username "$panel_user" -password "$panel_pass" >/dev/null 2>&1; then
+        print_err "Не удалось применить логин/пароль через 'x-ui setting'"
+        return 1
+    fi
     "$XUI_BIN" migrate >/dev/null 2>&1 || true
     systemctl restart "$XUI_SERVICE" 2>/dev/null || true
     sleep 3
@@ -486,7 +494,7 @@ xui_backup_db() {
     backup_file="${XUI_BACKUP_DIR}/x-ui_$(date +%Y%m%d_%H%M%S).db"
     cp -f "$XUI_DB" "$backup_file"; chmod 600 "$backup_file"
     print_ok "Бэкап: ${backup_file} ($(du -h "$backup_file" | awk '{print $1}'))"
-    find "$XUI_BACKUP_DIR" -name "x-ui_*.db" -mtime +30 -delete 2>/dev/null || true
+    find "$XUI_BACKUP_DIR" -type f -name "x-ui_*.db" -mtime +30 -delete 2>/dev/null || true
     return 0
 }
 
@@ -523,7 +531,9 @@ xui_delete() {
     rm -f /usr/bin/x-ui "$XUI_UNIT" 2>/dev/null || true
     if [[ -f "$XUI_ENV" ]] && command -v ufw &>/dev/null; then
         local p; p=$(grep "^PANEL_PORT=" "$XUI_ENV" | cut -d'"' -f2)
-        [[ -n "$p" ]] && ufw delete allow "${p}/tcp" 2>/dev/null || true
+        if [[ -n "$p" ]]; then
+            ufw delete allow "${p}/tcp" 2>/dev/null || true
+        fi
     fi
     rm -f "$XUI_ENV" 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
