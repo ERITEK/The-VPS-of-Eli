@@ -79,7 +79,8 @@ EOF
 
     # - ждём запуска контейнера -
     for i in $(seq 1 15); do
-        docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^shadowbox$" && break; sleep 2
+        docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^shadowbox$" && break
+        (( i < 15 )) && sleep 2
     done
 
     local mgmt_port keys_port
@@ -116,18 +117,22 @@ EOF
     # - UFW -
     if command -v ufw &>/dev/null; then
         ufw allow "${mgmt_port}/tcp" comment "Outline API" 2>/dev/null || true
-        [[ -n "$keys_port" ]] && {
+        if [[ -n "$keys_port" ]]; then
             ufw allow "${keys_port}/tcp" comment "Outline keys TCP" 2>/dev/null || true
             ufw allow "${keys_port}/udp" comment "Outline keys UDP" 2>/dev/null || true
-        }
+        fi
     fi
 
     # - book -
+    # - keys_port может быть пустым если container не вернул accessKeyPort -
+    # - унифицируем на 0 чтобы jq не упал на пустом значении -
+    local _kp="$keys_port"
+    [[ "$_kp" =~ ^[0-9]+$ ]] || _kp="0"
     book_write ".outline.installed" "true" bool
     book_write ".outline.server_ip" "$server_ip"
     book_write ".outline.api_port" "$api_port" number
     book_write ".outline.mgmt_port" "${mgmt_port}" number
-    book_write ".outline.keys_port" "${keys_port}" number
+    book_write ".outline.keys_port" "${_kp}" number
     book_write ".outline.api_url" "$api_url"
     book_write ".outline.installed_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -194,7 +199,7 @@ otl_add_key() {
     [[ -z "$api_url" ]] && { print_err "apiUrl не найден"; return 0; }
     local key_name=""
     echo -e "  ${CYAN}Имя ключа - для кого этот ключ (например: мама, коллега-Вася). Можно оставить пустым.${NC}"
-    echo -ne "  ${BOLD}Имя ключа:${NC} "; read -r key_name
+    ask_raw "$(printf '  \033[1mИмя ключа:\033[0m ')" key_name
     local result
     result=$(curl -fsk --connect-timeout 5 -X POST "${api_url}/access-keys" 2>/dev/null || echo "")
     if ! echo "$result" | grep -q '"id"'; then
@@ -243,11 +248,16 @@ otl_delete() {
     [[ "$confirm" != "yes" ]] && return 0
     docker stop shadowbox watchtower 2>/dev/null || true
     docker rm shadowbox watchtower 2>/dev/null || true
-    docker rmi "$(docker images -q --filter reference='*outline*' 2>/dev/null)" 2>/dev/null || true
+    docker images -q --filter reference='*outline*' 2>/dev/null | xargs -r docker rmi 2>/dev/null || true
     if [[ -f "$OTL_ENV" ]] && command -v ufw &>/dev/null; then
         source "$OTL_ENV"
-        [[ -n "${MGMT_PORT:-}" ]] && ufw delete allow "${MGMT_PORT}/tcp" 2>/dev/null || true
-        [[ -n "${KEYS_PORT:-}" ]] && { ufw delete allow "${KEYS_PORT}/tcp" 2>/dev/null || true; ufw delete allow "${KEYS_PORT}/udp" 2>/dev/null || true; }
+        if [[ -n "${MGMT_PORT:-}" ]]; then
+            ufw delete allow "${MGMT_PORT}/tcp" 2>/dev/null || true
+        fi
+        if [[ -n "${KEYS_PORT:-}" ]]; then
+            ufw delete allow "${KEYS_PORT}/tcp" 2>/dev/null || true
+            ufw delete allow "${KEYS_PORT}/udp" 2>/dev/null || true
+        fi
     fi
     rm -f "$OTL_KEY" "$OTL_ENV" "$OTL_HEALTHCHECK" 2>/dev/null || true
     rm -rf /opt/outline 2>/dev/null || true
