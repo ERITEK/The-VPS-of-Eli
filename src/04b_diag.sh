@@ -39,14 +39,36 @@ diag_run() {
     local _TS; _TS=$(date +%Y%m%d_%H%M%S)
     local RPT_TXT="/root/diag_${_TS}.txt"
     local RPT_HTML="/root/diag_${_TS}.html"
+
+    # - дублирование вывода в файл через named pipe -
+    # - process substitution через >(tee ...) не даёт надёжного PID: $! может -
+    # - указывать не на tee, wait зависает или возвращает 127. mkfifo решает: -
+    # - tee запускается как явный bg-child shell'а, PID гарантированно наш -
+    # - оригинальные stdout/stderr сохранены в fd 3 и 4 -
     exec 3>&1 4>&2
-    # - сохраняем PID фонового tee: без этого trap закроет pipe, -
-    # - но tee может дописывать буфер уже после выхода из функции, -
-    # - ломая вывод меню главного цикла -
-    exec > >(tee -a "$RPT_TXT"); local _TEE_PID=$!
-    exec 2>&1
-    # - страховка: восстановить stdout + дождаться завершения tee -
-    trap 'exec 1>&3 2>&4 3>&- 4>&-; [[ -n "$_TEE_PID" ]] && wait "$_TEE_PID" 2>/dev/null' RETURN
+    local _DG_TMPDIR _DG_FIFO _DG_TEE_PID=""
+    _DG_TMPDIR=$(mktemp -d -t diag.XXXXXXXX)
+    _DG_FIFO="${_DG_TMPDIR}/out"
+    mkfifo -m 600 "$_DG_FIFO"
+    # - tee наследует текущий stdout (экран), далее exec перенаправит stdout в fifo -
+    # - так tee продолжит писать на экран, а функция пишет в pipe -
+    tee -a "$RPT_TXT" < "$_DG_FIFO" &
+    _DG_TEE_PID=$!
+    exec > "$_DG_FIFO" 2>&1
+
+    # - cleanup: закрыть pipe (EOF для tee) -> дождаться tee -> убрать tmp -
+    # - идемпотентно: повторный вызов из разных trap не упадёт -
+    _dg_cleanup() {
+        [[ -z "${_DG_TEE_PID:-}" ]] && return 0
+        exec 1>&3 2>&4 3>&- 4>&- 2>/dev/null || true
+        wait "$_DG_TEE_PID" 2>/dev/null || true
+        [[ -n "${_DG_TMPDIR:-}" && -d "$_DG_TMPDIR" ]] && rm -rf "$_DG_TMPDIR"
+        _DG_TEE_PID=""
+    }
+    # - штатный возврат -
+    trap '_dg_cleanup' RETURN
+    # - Ctrl+C: аккуратно закрыть файл, восстановить терминал, выйти с 130 -
+    trap '_dg_cleanup; trap - INT; kill -INT $$' INT
 
     # --> ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ <--
     local D_CPU="?" D_CORES=1 D_RAM=0 D_RAMFREE=0 D_SWAP=0 D_SWAPUSED=0
@@ -346,7 +368,7 @@ diag_run() {
         while read -r use mp; do local pct="${use%\%}"
             [[ "$pct" =~ ^[0-9]+$ && $pct -gt 85 ]] && _dg_red "Диск ${mp}: ${use}|journalctl --vacuum-size=100M"
         done < <(df -h | grep -v tmpfs | awk 'NR>1{print $5, $6}')
-		return 0
+        return 0
     }
     _dg_services() {
         _sv() { local svc="$1" label="$2" st
@@ -394,7 +416,7 @@ diag_run() {
             done
         fi
     }
-	
+
     # --> ПРОКСИ (MTProto, SOCKS5, Hysteria 2) <--
     _dg_proxy() {
         # - MTProto мультиинстанс -
@@ -465,7 +487,7 @@ diag_run() {
                 _dg_red "Hysteria 2 #${inst_id} остановлен|systemctl start ${svc}"
             fi
         done
-		
+
         # - legacy fallback: старый конфиг /etc/hysteria/hysteria.env -
         if [[ $hy2_count -eq 0 && -f /etc/hysteria/hysteria.env ]]; then
             unset PORT VERSION
@@ -481,7 +503,7 @@ diag_run() {
             print_info "Hysteria 2: не установлен"
         fi
     }
-	
+
     # --> TELEGRAM МОНИТОРИНГ <--
     _dg_tgmon() {
         if [[ -f /etc/vps-eli-stack/telegrambot.env ]]; then
@@ -499,7 +521,7 @@ diag_run() {
     }
     _dg_maintenance() {
         local jl; jl=$(grep "SystemMaxUse" /etc/systemd/journald.conf.d/size-limit.conf 2>/dev/null | grep -oP '=\K.*' || echo "")
-        local js; js=$(journalctl --disk-usage 2>/dev/null | grep -oP '[\d.]+\s*[KMGT]?B' | tail -1 || echo "?")
+        local js; js=$(journalctl --disk-usage 2>/dev/null | grep -oP '[\d.]+\s*[KMGTPE]i?B?' | tail -1 || echo "?")
         [[ -n "$jl" ]] && { print_ok "Journald: ${js}/${jl}"; D_MAINT_TABLE+=("Journald|[OK] ${js} / ${jl}"); } \
             || { print_warn "Journald: без лимита"; _dg_yellow "Journald без лимита|Запусти Автообслуживание"; D_MAINT_TABLE+=("Journald|[!] Без лимита"); }
         local cr; cr=$(crontab -l 2>/dev/null | grep -v "^#" | grep -c "reboot" | tr -d '[:space:]' || echo "0")
@@ -827,5 +849,8 @@ CSS
     echo -e "${BOLD}====================================================${NC}"
     echo ""
     # - FD 3/4 закроются автоматически через trap RETURN -
+    # - cleanup до eli_pause: tee должен закрыться, иначе read зависнет за pipe -
+    _dg_cleanup
+    eli_pause
     return 0
 }
