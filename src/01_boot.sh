@@ -141,68 +141,69 @@ EODAEMON
     return 0
 }
 
+# --> BOOT: HELPER СОЗДАНИЯ SWAPFILE <--
+# - создать и активировать /swapfile заданного размера -
+# - fallocate работает не везде (ZFS/BTRFS/LXC), fallback на dd -
+_boot_create_swapfile() {
+    local size_mb="$1"
+    if [[ -f /swapfile ]]; then
+        local old_mb
+        old_mb=$(du -m /swapfile 2>/dev/null | awk '{print $1}')
+        if [[ "${old_mb:-0}" -ge "$size_mb" ]]; then
+            print_info "Swapfile уже есть нужного размера (${old_mb} MB)"
+            return 0
+        fi
+        print_info "Swapfile ${old_mb} MB меньше нужного, пересоздаём на ${size_mb} MB"
+        swapoff /swapfile 2>/dev/null || true
+        # - проверяем что swap действительно отключился -
+        if swapon --show 2>/dev/null | grep -q "/swapfile"; then
+            print_warn "Не удалось отключить /swapfile (RAM мало, swap активен)"
+            print_warn "Пропускаю пересоздание, текущий swap остаётся"
+            return 0
+        fi
+        rm -f /swapfile
+    fi
+    print_info "Создаём /swapfile ${size_mb} MB"
+    # - шаг 1: fallocate, если не сработал - fallback на dd -
+    if ! fallocate -l "${size_mb}M" /swapfile 2>/dev/null; then
+        print_info "fallocate не поддерживается на этой FS, fallback на dd"
+        if ! dd if=/dev/zero of=/swapfile bs=1M count="$size_mb" status=none 2>/dev/null; then
+            print_err "dd не смог создать /swapfile"
+            rm -f /swapfile
+            return 1
+        fi
+    fi
+    # - шаг 2: права строго 600, иначе mkswap даст warning и swapon может отказаться -
+    if ! chmod 600 /swapfile; then
+        print_err "chmod 600 /swapfile не удался"
+        rm -f /swapfile
+        return 1
+    fi
+    # - шаг 3: mkswap -
+    if ! mkswap /swapfile >/dev/null 2>&1; then
+        print_err "mkswap /swapfile не удался"
+        rm -f /swapfile
+        return 1
+    fi
+    # - шаг 4: swapon -
+    if ! swapon /swapfile 2>/dev/null; then
+        print_err "swapon /swapfile не удался"
+        rm -f /swapfile
+        return 1
+    fi
+    if ! grep -q "/swapfile" /etc/fstab; then
+        echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    fi
+    print_ok "Swapfile ${size_mb} MB создан и активирован"
+    return 0
+}
+
 # --> BOOT: НАСТРОЙКА SWAP <--
 # - минимум 448 MB swap, swappiness=20 -
 boot_setup_swap() {
     print_section "Настройка Swap"
 
     local swap_min_mb=448
-
-    # - создать и активировать /swapfile заданного размера -
-    # - fallocate работает не везде (ZFS/BTRFS/LXC), fallback на dd -
-    _boot_create_swapfile() {
-        local size_mb="$1"
-        if [[ -f /swapfile ]]; then
-            local old_mb
-            old_mb=$(du -m /swapfile 2>/dev/null | awk '{print $1}')
-            if [[ "${old_mb:-0}" -ge "$size_mb" ]]; then
-                print_info "Swapfile уже есть нужного размера (${old_mb} MB)"
-                return 0
-            fi
-            print_info "Swapfile ${old_mb} MB меньше нужного, пересоздаём на ${size_mb} MB"
-            swapoff /swapfile 2>/dev/null || true
-            # - проверяем что swap действительно отключился -
-            if swapon --show 2>/dev/null | grep -q "/swapfile"; then
-                print_warn "Не удалось отключить /swapfile (RAM мало, swap активен)"
-                print_warn "Пропускаю пересоздание, текущий swap остаётся"
-                return 0
-            fi
-            rm -f /swapfile
-        fi
-        print_info "Создаём /swapfile ${size_mb} MB"
-        # - шаг 1: fallocate, если не сработал - fallback на dd -
-        if ! fallocate -l "${size_mb}M" /swapfile 2>/dev/null; then
-            print_info "fallocate не поддерживается на этой FS, fallback на dd"
-            if ! dd if=/dev/zero of=/swapfile bs=1M count="$size_mb" status=none 2>/dev/null; then
-                print_err "dd не смог создать /swapfile"
-                rm -f /swapfile
-                return 1
-            fi
-        fi
-        # - шаг 2: права строго 600, иначе mkswap даст warning и swapon может отказаться -
-        if ! chmod 600 /swapfile; then
-            print_err "chmod 600 /swapfile не удался"
-            rm -f /swapfile
-            return 1
-        fi
-        # - шаг 3: mkswap -
-        if ! mkswap /swapfile >/dev/null 2>&1; then
-            print_err "mkswap /swapfile не удался"
-            rm -f /swapfile
-            return 1
-        fi
-        # - шаг 4: swapon -
-        if ! swapon /swapfile 2>/dev/null; then
-            print_err "swapon /swapfile не удался"
-            rm -f /swapfile
-            return 1
-        fi
-        if ! grep -q "/swapfile" /etc/fstab; then
-            echo '/swapfile none swap sw 0 0' >> /etc/fstab
-        fi
-        print_ok "Swapfile ${size_mb} MB создан и активирован"
-        return 0
-    }
 
     local active_swap_mb
     active_swap_mb=$(free -m | awk '/^Swap:/{print $2}')
@@ -320,8 +321,7 @@ boot_setup_ssh_port() {
     local new_port=""
     echo -e "  ${CYAN}Смена порта SSH защищает от массовых сканеров на порту 22.${NC}"
     echo -e "  ${CYAN}Рекомендуется: любой свободный порт в диапазоне 10000-60000.${NC}"
-    echo -ne "  ${BOLD}Новый порт SSH (Enter или 0 = оставить ${BOOT_SSH_PORT}):${NC} "
-    read -r new_port
+    ask_raw "$(printf '  \033[1mНовый порт SSH (Enter или 0 = оставить %s):\033[0m ' "$BOOT_SSH_PORT")" new_port
 
     if [[ -z "$new_port" || "$new_port" == "0" ]]; then
         print_info "Порт SSH остаётся: ${BOOT_SSH_PORT}"
@@ -333,30 +333,33 @@ boot_setup_ssh_port() {
         return 1
     fi
 
-    if ss -tnlp 2>/dev/null | grep -q ":${new_port} "; then
+    if ss -H -tln 2>/dev/null | grep -Eq "[:.]${new_port}[[:space:]]"; then
         print_err "Порт ${new_port} уже занят"
         return 1
     fi
 
     print_info "Новый порт SSH: ${new_port}"
 
-    local backup_file
-    backup_file="/etc/ssh/sshd_config.bak.$(date +%F_%H-%M-%S)"
-    cp /etc/ssh/sshd_config "$backup_file"
-    print_info "Бэкап: ${backup_file}"
-
-    sed -i "s/^#*\s*Port .*/Port ${new_port}/" /etc/ssh/sshd_config
-    grep -q "^Port " /etc/ssh/sshd_config || echo "Port ${new_port}" >> /etc/ssh/sshd_config
+    # - drop-in перекрывает /etc/ssh/sshd_config и /etc/ssh/sshd_config.d/50-cloud-init.conf -
+    ssh_apply_dropin "Port" "$new_port"
 
     if ! sshd -t 2>/dev/null; then
-        print_err "sshd_config содержит ошибки! Восстановление из бэкапа..."
-        cp "$backup_file" /etc/ssh/sshd_config
-        print_warn "Восстановлен: ${backup_file}"
+        print_err "sshd_config содержит ошибки! Откат drop-in..."
+        sed -i "/^[[:space:]]*Port[[:space:]]/Id" /etc/ssh/sshd_config.d/99-eli.conf 2>/dev/null
         return 1
     fi
     print_ok "sshd_config OK"
 
     ssh_restart
+    sleep 1
+
+    # - валидация: эффективное значение после restart должно совпадать -
+    local eff_port
+    eff_port=$(ssh_get_port)
+    if [[ "$eff_port" != "$new_port" ]]; then
+        print_err "SSH порт не применился: эффективный ${eff_port}, ожидался ${new_port}"
+        return 1
+    fi
     print_ok "SSH перезапущен на порту ${new_port}"
 
     BOOT_SSH_PORT="$new_port"
@@ -494,8 +497,7 @@ boot_init_book() {
     book_write ".system.server_ip" \
         "$(curl -4 -fsSL --connect-timeout 5 ifconfig.me 2>/dev/null || echo '')"
     book_write ".system.ssh_port" "$BOOT_SSH_PORT" number
-    book_write ".system.permit_root_login" \
-        "$(grep -oP '^PermitRootLogin\s+\K\S+' /etc/ssh/sshd_config 2>/dev/null || echo 'yes')"
+    book_write ".system.permit_root_login" "$(ssh_get_permitrootlogin)"
 
     if _book_ok; then
         print_ok "book_of_Eli: /etc/vps-eli-stack/book_of_Eli.json"
