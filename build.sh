@@ -38,7 +38,7 @@ echo ""
 # - начинаем с shebang -
 echo '#!/usr/bin/env bash' > "$OUT_FILE"
 echo '# =============================================================================' >> "$OUT_FILE"
-echo '# The VPS of Eli v3.236' >> "$OUT_FILE"
+echo '# The VPS of Eli v4.508' >> "$OUT_FILE"
 echo '# Мега-менеджер VPS стека: VPN, связь, обслуживание' >> "$OUT_FILE"
 echo '# scrp by ERITEK & Loo1, Claude (Anthropic)' >> "$OUT_FILE"
 echo "# Собран: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$OUT_FILE"
