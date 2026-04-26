@@ -22,7 +22,7 @@ _pr_find_file() {
         local found
         found=$(find "$dir" -maxdepth 3 -name "$pattern" \
             -not -name "*-shm" -not -name "*-wal" 2>/dev/null | head -1 || true)
-        [[ -n "$found" ]] && { echo "$found"; return; }
+        [[ -n "$found" ]] && { echo "$found"; return 0; }
     done
     echo ""
 }
@@ -49,13 +49,21 @@ prayer_run() {
     print_section "0. Проверка книги (book_of_Eli.json)"
     if [[ ! -f "$_BOOK" ]]; then
         _pr_warn "Книга не найдена, создаём"
-        book_init && _pr_fixed "Книга создана: $_BOOK" || _pr_failed "Не удалось создать книгу"
+        if book_init; then
+            _pr_fixed "Книга создана: $_BOOK"
+        else
+            _pr_failed "Не удалось создать книгу"
+        fi
     elif ! jq empty "$_BOOK" 2>/dev/null; then
         local bak
         bak="${_BOOK}.broken.$(date +%Y%m%d_%H%M%S)"
         mv "$_BOOK" "$bak"
         _pr_warn "JSON повреждён, бэкап: $bak"
-        book_init && _pr_fixed "Книга пересоздана"
+        if book_init; then
+            _pr_fixed "Книга пересоздана"
+        else
+            _pr_failed "Не удалось пересоздать книгу"
+        fi
     else
         _pr_found "Книга в порядке (обновлена: $(book_read '._meta.updated'))"
     fi
@@ -67,28 +75,42 @@ prayer_run() {
     if [[ "$real_kernel" != "$book_kernel" ]]; then
         _pr_updated "Ядро: ${book_kernel:-нет} -> $real_kernel"
         book_write ".system.kernel" "$real_kernel"
-    else _pr_found "Ядро: $real_kernel"; fi
+    else
+        _pr_found "Ядро: $real_kernel"
+    fi
 
     local real_ip; real_ip=$(curl -4 -fsSL --connect-timeout 5 ifconfig.me 2>/dev/null || echo "")
     local book_ip; book_ip=$(book_read ".system.server_ip")
-    if [[ -n "$real_ip" && "$real_ip" != "$book_ip" ]]; then
+    if [[ -z "$real_ip" ]]; then
+        _pr_warn "IP: не удалось определить (curl ifconfig.me недоступен)"
+    elif [[ "$real_ip" != "$book_ip" ]]; then
         _pr_updated "IP: ${book_ip:-нет} -> $real_ip"
         book_write ".system.server_ip" "$real_ip"
         book_write "._meta.server_ip" "$real_ip"
-    else _pr_found "IP: $real_ip"; fi
+    else
+        _pr_found "IP: $real_ip"
+    fi
 
-    local real_ssh; real_ssh=$(grep -oP '^Port\s+\K[0-9]+' /etc/ssh/sshd_config 2>/dev/null || echo "22")
+    local real_ssh; real_ssh=$(ssh_get_port)
     local book_ssh; book_ssh=$(book_read ".system.ssh_port")
     if [[ "$real_ssh" != "$book_ssh" ]]; then
         _pr_updated "SSH порт: ${book_ssh:-нет} -> $real_ssh"
         book_write ".system.ssh_port" "$real_ssh" number
-    else _pr_found "SSH порт: $real_ssh"; fi
+    else
+        _pr_found "SSH порт: $real_ssh"
+    fi
 
-    local real_rl; real_rl=$(grep -oP '^PermitRootLogin\s+\K\S+' /etc/ssh/sshd_config 2>/dev/null || echo "")
+    local real_rl; real_rl=$(sshd -T 2>/dev/null | awk '/^permitrootlogin /{print $2; exit}')
+    if [[ -z "$real_rl" ]]; then
+        real_rl=$(grep -oP '^\s*PermitRootLogin\s+\K\S+' /etc/ssh/sshd_config 2>/dev/null | head -1)
+    fi
     [[ -n "$real_rl" ]] && book_write ".system.permit_root_login" "$real_rl"
 
     if command -v ufw &>/dev/null; then
-        local ufw_st; ufw_st=$(ufw status 2>/dev/null | grep -q "^Status: active" && echo "true" || echo "false")
+        local ufw_st="false"
+        if ufw status 2>/dev/null | grep -q "^Status: active"; then
+            ufw_st="true"
+        fi
         book_write ".ufw.active" "$ufw_st" bool
     fi
 
@@ -108,7 +130,9 @@ prayer_run() {
         if [[ "$awg_ver" != "$bv" ]]; then
             _pr_updated "AWG: ${bv:-нет} -> $awg_ver"
             book_write ".awg.version" "$awg_ver"
-        else _pr_found "AWG: $awg_ver"; fi
+        else
+            _pr_found "AWG: $awg_ver"
+        fi
 
         # - проверка что модуль ядра загружен (может слететь после обновления ядра) -
         if lsmod 2>/dev/null | grep -q "^amneziawg"; then
@@ -134,19 +158,32 @@ prayer_run() {
             fi
         fi
 
+        # - nullglob: если файлов нет, for пропускается вместо итерации с литералом -
+        local _saved_nullglob; _saved_nullglob=$(shopt -p nullglob)
+        shopt -s nullglob
         for env_f in "${AWG_SETUP_DIR}"/iface_*.env; do
-            [[ -f "$env_f" ]] || continue
             # shellcheck disable=SC1090
             source "$env_f" 2>/dev/null || continue
-            local iface="${IFACE_NAME:-}"; [[ -z "$iface" ]] && continue
+            local iface="${IFACE_NAME:-}"
+            [[ -z "$iface" ]] && continue
             _pr_check "Интерфейс: $iface"
             local conf="${AWG_CONF_DIR}/${iface}.conf"
-            [[ -f "$conf" ]] && _pr_found "  Конфиг: $conf" || _pr_warn "  Конфиг не найден: $conf"
+            if [[ -f "$conf" ]]; then
+                _pr_found "  Конфиг: $conf"
+            else
+                _pr_warn "  Конфиг не найден: $conf"
+            fi
             local kf="${AWG_SETUP_DIR}/server_${iface}/server.key"
-            [[ -f "$kf" ]] && _pr_found "  Ключи: OK" || _pr_failed "  Ключ не найден: $kf"
+            if [[ -f "$kf" ]]; then
+                _pr_found "  Ключи: OK"
+            else
+                _pr_failed "  Ключ не найден: $kf"
+            fi
             if systemctl is-active --quiet "awg-quick@${iface}" 2>/dev/null; then
                 _pr_found "  Сервис: активен"
-            else _pr_warn "  Сервис: не активен"; fi
+            else
+                _pr_warn "  Сервис: не активен"
+            fi
 
             local iobj
             # - валидация: --argjson требует валидный JSON (число без пробелов/знаков) -
@@ -177,6 +214,8 @@ prayer_run() {
                     "i1":$i1,"i2":$i2,"i3":$i3,"i4":$i4,"i5":$i5}}' 2>/dev/null || echo "{}")
             book_write_obj ".awg.interfaces.${iface}" "$iobj"
         done
+        # - восстанавливаем исходное состояние nullglob -
+        eval "$_saved_nullglob"
     fi
 
     # --> 3. OUTLINE <--
@@ -187,14 +226,19 @@ prayer_run() {
         local bkp; bkp=$(book_read ".outline.manager_key_path")
         local rkp=""
         if [[ -n "$bkp" && -f "$bkp" ]]; then
-            rkp="$bkp"; _pr_found "manager_key: $rkp"
+            rkp="$bkp"
+            _pr_found "manager_key: $rkp"
         else
             rkp=$(_pr_find_file "manager_key.json" "/opt/outline/persisted-state" "/opt/outline" "/etc/outline")
-            [[ -n "$rkp" ]] && { _pr_fixed "manager_key найден: $rkp"; book_write ".outline.manager_key_path" "$rkp"; } \
-                || _pr_failed "manager_key.json не найден"
+            if [[ -n "$rkp" ]]; then
+                _pr_fixed "manager_key найден: $rkp"
+                book_write ".outline.manager_key_path" "$rkp"
+            else
+                _pr_failed "manager_key.json не найден"
+            fi
         fi
         if [[ -n "$rkp" && -f "$rkp" ]]; then
-            local au; au=$(grep -oP '"apiUrl":\s*"\K[^"]+' "$rkp" | head -1 || true)
+            local au; au=$(grep -oP '"apiUrl":\s*"\K[^"]+' "$rkp" 2>/dev/null | head -1)
             [[ -n "$au" ]] && book_write ".outline.api_url" "$au"
         fi
         local ol_env="/etc/outline/outline.env"
@@ -209,9 +253,14 @@ API_PORT="$(book_read '.outline.api_port')"
 MGMT_PORT="$(book_read '.outline.mgmt_port')"
 KEYS_PORT="$(book_read '.outline.keys_port')"
 EOF
-                chmod 600 "$ol_env"; _pr_fixed "outline.env восстановлен"
-            else _pr_failed "Нет данных для восстановления outline.env"; fi
-        else _pr_found "outline.env: $ol_env"; fi
+                chmod 600 "$ol_env"
+                _pr_fixed "outline.env восстановлен"
+            else
+                _pr_failed "Нет данных для восстановления outline.env"
+            fi
+        else
+            _pr_found "outline.env: $ol_env"
+        fi
     else
         _pr_check "Outline не установлен"
         book_write ".outline.installed" "false" bool
@@ -221,17 +270,27 @@ EOF
     print_section "4. 3X-UI"
     if [[ -f "/usr/local/x-ui/x-ui" ]]; then
         book_write ".3xui.installed" "true" bool
-        systemctl is-active --quiet x-ui 2>/dev/null && _pr_found "x-ui: активен" || _pr_warn "x-ui: не активен"
+        if systemctl is-active --quiet x-ui 2>/dev/null; then
+            _pr_found "x-ui: активен"
+        else
+            _pr_warn "x-ui: не активен"
+        fi
         local rv; rv=$(/usr/local/x-ui/x-ui -v 2>/dev/null | head -1 || echo "")
         [[ -n "$rv" ]] && book_write ".3xui.version" "$rv"
         local rd; rd=$(_pr_find_file "x-ui.db" "/usr/local/x-ui" "/etc/x-ui")
-        [[ -n "$rd" ]] && { _pr_found "x-ui.db: $rd"; book_write ".3xui.db_path" "$rd"; } || _pr_failed "x-ui.db не найдена"
+        if [[ -n "$rd" ]]; then
+            _pr_found "x-ui.db: $rd"
+            book_write ".3xui.db_path" "$rd"
+        else
+            _pr_failed "x-ui.db не найдена"
+        fi
         local xe="/etc/3xui/3xui.env"
         if [[ ! -f "$xe" ]]; then
             _pr_warn "3xui.env не найден, восстанавливаем из книги"
             local bp; bp=$(book_read ".3xui.panel_port")
             if [[ -n "$bp" && "$bp" != "0" ]]; then
-                mkdir -p /etc/3xui; chmod 700 /etc/3xui
+                mkdir -p /etc/3xui
+                chmod 700 /etc/3xui
                 cat > "$xe" << EOF
 SERVER_IP="$(book_read '.3xui.server_ip')"
 PANEL_PORT="$(book_read '.3xui.panel_port')"
@@ -240,8 +299,11 @@ PANEL_USER="$(book_read '.3xui.panel_user')"
 PANEL_PASS="$(book_read '.3xui.panel_pass')"
 VERSION="${rv}"
 EOF
-                chmod 600 "$xe"; _pr_fixed "3xui.env восстановлен"
-            else _pr_failed "Нет данных для восстановления 3xui.env"; fi
+                chmod 600 "$xe"
+                _pr_fixed "3xui.env восстановлен"
+            else
+                _pr_failed "Нет данных для восстановления 3xui.env"
+            fi
         else
             _pr_found "3xui.env: $xe"
             source "$xe" 2>/dev/null || true
@@ -251,7 +313,8 @@ EOF
             [[ -n "${PANEL_PASS:-}" ]] && book_write ".3xui.panel_pass" "${PANEL_PASS}"
         fi
     else
-        _pr_check "3X-UI не установлен"; book_write ".3xui.installed" "false" bool
+        _pr_check "3X-UI не установлен"
+        book_write ".3xui.installed" "false" bool
     fi
 
     # --> 5. TEAMSPEAK <--
@@ -259,15 +322,25 @@ EOF
     local tsb="/opt/teamspeak/tsserver"
     if [[ -f "$tsb" ]]; then
         book_write ".teamspeak.installed" "true" bool
-        systemctl is-active --quiet teamspeak 2>/dev/null && _pr_found "teamspeak: активен" || _pr_warn "teamspeak: не активен"
+        if systemctl is-active --quiet teamspeak 2>/dev/null; then
+            _pr_found "teamspeak: активен"
+        else
+            _pr_warn "teamspeak: не активен"
+        fi
         local tdb; tdb=$(_pr_find_file "*.sqlitedb" "/opt/teamspeak" "/var/lib/teamspeak")
-        [[ -n "$tdb" ]] && { _pr_found "БД: $tdb"; book_write ".teamspeak.db_path" "$tdb"; } || _pr_warn "БД не найдена"
+        if [[ -n "$tdb" ]]; then
+            _pr_found "БД: $tdb"
+            book_write ".teamspeak.db_path" "$tdb"
+        else
+            _pr_warn "БД не найдена"
+        fi
         local te="/etc/teamspeak/teamspeak.env"
         if [[ ! -f "$te" ]]; then
             _pr_warn "teamspeak.env не найден, восстанавливаем из книги"
             local tbi; tbi=$(book_read ".teamspeak.server_ip")
             if [[ -n "$tbi" ]]; then
-                mkdir -p /etc/teamspeak; chmod 700 /etc/teamspeak
+                mkdir -p /etc/teamspeak
+                chmod 700 /etc/teamspeak
                 cat > "$te" << EOF
 SERVER_IP="$(book_read '.teamspeak.server_ip')"
 TS_VOICE_PORT="$(book_read '.teamspeak.voice_port')"
@@ -277,8 +350,11 @@ TS_PRIV_KEY="$(book_read '.teamspeak.priv_key')"
 TS_VERSION="$(book_read '.teamspeak.version')"
 TS_DB_PATH="${tdb}"
 EOF
-                chmod 600 "$te"; _pr_fixed "teamspeak.env восстановлен"
-            else _pr_failed "Нет данных для восстановления"; fi
+                chmod 600 "$te"
+                _pr_fixed "teamspeak.env восстановлен"
+            else
+                _pr_failed "Нет данных для восстановления"
+            fi
         else
             _pr_found "teamspeak.env: $te"
             source "$te" 2>/dev/null || true
@@ -288,7 +364,8 @@ EOF
             [[ -n "${TS_PRIV_KEY:-}" ]] && book_write ".teamspeak.priv_key" "${TS_PRIV_KEY}"
         fi
     else
-        _pr_check "TeamSpeak не установлен"; book_write ".teamspeak.installed" "false" bool
+        _pr_check "TeamSpeak не установлен"
+        book_write ".teamspeak.installed" "false" bool
     fi
 
     # --> 6. UNBOUND <--
@@ -297,24 +374,53 @@ EOF
         if systemctl is-active --quiet unbound 2>/dev/null; then
             book_write ".unbound.installed" "true" bool
             _pr_found "Unbound: активен"
-            local tr; tr=$(dig +short +time=2 google.com @127.0.0.1 2>/dev/null | grep -oP '^\d+\.\d+\.\d+\.\d+$' | head -1 || true)
-            [[ -n "$tr" ]] && _pr_found "Резолвинг: OK ($tr)" || _pr_warn "Резолвинг не отвечает"
-        else _pr_warn "Unbound установлен но не запущен"; fi
-    else _pr_check "Unbound не установлен"; fi
+            local tr; tr=$(dig +short +time=2 google.com @127.0.0.1 2>/dev/null | grep -oP '^\d+\.\d+\.\d+\.\d+$' | head -1)
+            if [[ -n "$tr" ]]; then
+                _pr_found "Резолвинг: OK ($tr)"
+            else
+                _pr_warn "Резолвинг не отвечает"
+            fi
+        else
+            _pr_warn "Unbound установлен но не запущен"
+        fi
+    else
+        _pr_check "Unbound не установлен"
+    fi
 
     # --> 7. MUMBLE <--
     print_section "7. Mumble"
+    # - mumble-server и murmurd: оба варианта legacy/upstream проверяем зеркально -
+    local mbl_active="" mbl_installed=""
     if systemctl is-active --quiet mumble-server 2>/dev/null; then
+        mbl_active="mumble-server"
+    elif systemctl is-active --quiet murmurd 2>/dev/null; then
+        mbl_active="murmurd"
+    fi
+    if dpkg -l mumble-server 2>/dev/null | grep -q "^ii"; then
+        mbl_installed="mumble-server"
+    elif dpkg -l murmur 2>/dev/null | grep -q "^ii"; then
+        mbl_installed="murmur"
+    fi
+
+    if [[ -n "$mbl_active" ]]; then
         book_write ".mumble.installed" "true" bool
-        _pr_found "mumble-server: активен"
+        _pr_found "${mbl_active}: активен"
         local mbl_port=""
-        [[ -f /etc/mumble-server.ini ]] && mbl_port=$(grep -oP '^port=\K[0-9]+' /etc/mumble-server.ini || echo "64738")
+        if [[ -f /etc/mumble-server.ini ]]; then
+            mbl_port=$(grep -oP '^port=\K[0-9]+' /etc/mumble-server.ini 2>/dev/null)
+        fi
+        if [[ -z "$mbl_port" && -f /etc/murmur.ini ]]; then
+            mbl_port=$(grep -oP '^port=\K[0-9]+' /etc/murmur.ini 2>/dev/null)
+        fi
         [[ -n "$mbl_port" ]] && book_write ".mumble.port" "$mbl_port" number
         local mbl_ip; mbl_ip=$(book_read ".mumble.server_ip")
-        [[ -z "$mbl_ip" ]] && { mbl_ip=$(curl -4 -fsSL --connect-timeout 5 ifconfig.me 2>/dev/null || echo ""); book_write ".mumble.server_ip" "$mbl_ip"; }
+        if [[ -z "$mbl_ip" ]]; then
+            mbl_ip=$(curl -4 -fsSL --connect-timeout 5 ifconfig.me 2>/dev/null || echo "")
+            [[ -n "$mbl_ip" ]] && book_write ".mumble.server_ip" "$mbl_ip"
+        fi
         _pr_found "Адрес: ${mbl_ip:-?}:${mbl_port:-64738}"
-    elif dpkg -l mumble-server 2>/dev/null | grep -q "^ii"; then
-        _pr_warn "mumble-server установлен но не запущен"
+    elif [[ -n "$mbl_installed" ]]; then
+        _pr_warn "${mbl_installed} установлен но не запущен"
         book_write ".mumble.installed" "true" bool
     else
         _pr_check "Mumble не установлен"
@@ -326,9 +432,9 @@ EOF
 
     # --> ИТОГОВЫЙ ОТЧЁТ <--
     echo ""
-    echo -e "${BOLD}${CYAN}+==========================================================+${NC}"
-    echo -e "${BOLD}${CYAN}|                   ИТОГОВЫЙ ОТЧЁТ                        |${NC}"
-    echo -e "${BOLD}${CYAN}+==========================================================+${NC}"
+    echo -e "${BOLD}${CYAN}============================================================${NC}"
+    echo -e "${BOLD}${CYAN}                      ИТОГОВЫЙ ОТЧЁТ${NC}"
+    echo -e "${BOLD}${CYAN}============================================================${NC}"
     echo ""
 
     if [[ ${#_PR_FIXED[@]} -gt 0 ]]; then
@@ -354,5 +460,6 @@ EOF
     echo -e "  ${BOLD}Книга:${NC} $_BOOK"
     echo -e "  ${BOLD}Время:${NC} $(date '+%d.%m.%Y %H:%M:%S')"
     echo ""
+    eli_pause
     return 0
 }
