@@ -227,7 +227,9 @@ mtp_remove() {
 
     docker stop "$CONTAINER" 2>/dev/null || true
     docker rm "$CONTAINER" 2>/dev/null || true
-    [[ -n "$PORT" ]] && command -v ufw &>/dev/null && ufw delete allow "${PORT}/tcp" 2>/dev/null || true
+    if [[ -n "$PORT" ]] && command -v ufw &>/dev/null; then
+        ufw delete allow "${PORT}/tcp" 2>/dev/null || true
+    fi
 
     rm -f "$envf" "$(_mtp_config_path "$inst_id")"
     book_write ".mtproto.instances.${inst_id}" "null" bool
@@ -531,7 +533,9 @@ _hy2_select_instance() {
         i=$(( i + 1 ))
     done
     echo "" >&2
-    local sel=""; echo -ne "  ${BOLD}Номер инстанса:${NC} " >&2; read -r sel
+    local sel=""
+    # - функция вызывается через cmd-substitution, поэтому prompt и ввод идут через /dev/tty -
+    eli_read_line "  ${BOLD}Номер инстанса:${NC} " sel
     [[ ! "$sel" =~ ^[0-9]+$ ]] || [[ "$sel" -lt 1 ]] || [[ "$sel" -gt ${#dirs[@]} ]] && { echo ""; return; }
     echo "$(basename "${dirs[$(( sel - 1 ))]}" | sed 's/instance_//')"
 }
@@ -678,11 +682,28 @@ hy2_add_user() {
     while true; do
         ask "Имя пользователя" "" uname
         [[ -z "$uname" ]] && { print_err "Обязательно"; continue; }
+        if ! validate_name "$uname"; then
+            print_err "Имя: только буквы, цифры, дефис, подчёркивание (без ':' и пробелов)"
+            continue
+        fi
         grep -q "^${uname}:" "$uf" 2>/dev/null && { print_err "'${uname}' уже есть"; continue; }
         break
     done
-    ask "Пароль" "$upass" upass
-    [[ -z "$upass" ]] && { print_err "Обязательно"; return 1; }
+    while true; do
+        ask "Пароль" "$upass" upass
+        [[ -z "$upass" ]] && { print_err "Обязательно"; continue; }
+        # - users.list парсится через 'IFS=: read', двоеточие в пароле обрежет его -
+        if [[ "$upass" == *:* ]]; then
+            print_err "Пароль не должен содержать ':'"
+            continue
+        fi
+        # - пробелы и табы ломают парсинг строки 'uname:upass' -
+        if [[ "$upass" =~ [[:space:]] ]]; then
+            print_err "Пароль не должен содержать пробельных символов"
+            continue
+        fi
+        break
+    done
 
     echo "${uname}:${upass}" >> "$uf"
     local count; count=$(wc -l < "$uf")
@@ -773,7 +794,9 @@ hy2_remove() {
     systemctl stop "$svc" 2>/dev/null || true
     systemctl disable "$svc" 2>/dev/null || true
     rm -f "/etc/systemd/system/${svc}.service"; systemctl daemon-reload
-    [[ -n "$port" ]] && command -v ufw &>/dev/null && ufw delete allow "${port}/udp" 2>/dev/null || true
+    if [[ -n "$port" ]] && command -v ufw &>/dev/null; then
+        ufw delete allow "${port}/udp" 2>/dev/null || true
+    fi
     rm -rf "${idir:?}"
 
     _book_ok && jq --arg i "$inst_id" 'del(.hysteria2.instances[$i])' "$_BOOK" > "${_BOOK}.tmp" 2>/dev/null \
@@ -889,20 +912,27 @@ sig_install() {
     # - логика `docker compose up && ! docker-compose up` была инвертирована -
     # - true если compose v2 упал И v1 вернул 0 (бред ебаный?) -
     # - юзаем v2, не получилось -> юзаем v1, если оба мимо -> fail -
-    local sig_up_ok="no"
-    if docker compose up --detach 2>/dev/null; then
+    # - stderr пишем в tmp-лог и показываем юзеру при ошибке -
+    local sig_up_ok="no" sig_up_log
+    sig_up_log=$(mktemp -t signal-proxy-up.XXXXXX.log)
+    if docker compose up --detach >>"$sig_up_log" 2>&1; then
         sig_up_ok="yes"
-    elif docker-compose up --detach 2>/dev/null; then
+    elif docker-compose up --detach >>"$sig_up_log" 2>&1; then
         sig_up_ok="yes"
     fi
     if [[ "$sig_up_ok" != "yes" ]]; then
         print_err "Не удалось запустить Signal Proxy"
+        print_info "Последние строки лога:"
+        tail -n 20 "$sig_up_log" | sed 's/^/    /'
+        print_info "Полный лог: ${sig_up_log}"
         return 1
     fi
+    # - успех, чистим tmp-лог -
+    rm -f "$sig_up_log"
     sleep 3
 
     local running
-    running=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -c "signal\|nginx" || echo "0")
+    running=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -c "signal\|nginx-terminate\|nginx-relay" || echo "0")
     if [[ "$running" -ge 2 ]]; then
         print_ok "Signal Proxy запущен (${running} контейнеров)"
     else
