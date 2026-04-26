@@ -9,27 +9,30 @@ AWG_VER=""
 
 # --> AWG: ВЫБОР ВЕРСИИ ПРОТОКОЛА <--
 # - AWG 1.0 (H+S1/S2) vs AWG 1.5 (+ I1-I5) vs AWG 2.0 (+ ranged H, S3/S4, I1-I5) vs WG -
+# - Keenetic: 1.0 работает на KeeneticOS 4.2+, 1.5/2.0 требуют 5.1+ dev-канал -
 # - P/S хелпа AWG написана идиотом. я АтупеL пока читал -
 _awg_ask_version() {
     echo ""
     echo -e "  ${BOLD}Версия протокола:${NC}"
     echo -e "  ${GREEN}1)${NC} AWG 1.0 (classic) - H1-H4 + S1/S2 + Jc/Jmin/Jmax"
-    echo -e "     ${CYAN}Совместим с Keenetic 4.2+, OpenWrt, все старые клиенты.${NC}"
+    echo -e "     ${CYAN}Keenetic 4.2+ (стабильная), OpenWrt, все старые клиенты.${NC}"
     echo -e "  ${GREEN}2)${NC} AWG 1.5 - + I1-I5 (signature chain/CPS)"
-    echo -e "     ${CYAN}Keenetic 5.1+ Маскировка под реальный протокол (QUIC/DNS).${NC}"
+    echo -e "     ${CYAN}Keenetic 5.1+ dev-канал. Маскировка под DNS/STUN/SIP.${NC}"
     echo -e "  ${GREEN}3)${NC} AWG 2.0 - 1.5 + ranged H + S3/S4"
-    echo -e "     ${CYAN}Keenetic 5.1+, Amnezia 4.8.12.9+. Максимальная обфускация.${NC}"
+    echo -e "     ${CYAN}Keenetic 5.1+ dev-канал, Amnezia 4.8.12.9+. Максимальная обфускация.${NC}"
     echo -e "  ${GREEN}4)${NC} WireGuard vanilla - без обфускации"
-    echo -e "     ${CYAN}Совместим с любым WG клиентом.${NC}"
+    echo -e "     ${CYAN}Любой WG клиент. Легко детектится DPI.${NC}"
     while true; do
-        echo -ne "  ${BOLD}Выбор?${NC} "; read -r _awg_ver_ch
+        ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" _awg_ver_ch
         case "$_awg_ver_ch" in
             1) AWG_VER="1.0"; break ;;
             2) AWG_VER="1.5"
                print_info "AWG 1.5 требует клиент с поддержкой I1-I5"
+               print_info "Keenetic: только 5.1+ dev-канал (на 5.0.8 и ниже будет 'invalid H1 value')"
                break ;;
             3) AWG_VER="2.0"
                print_info "AWG 2.0 требует Amnezia 4.8.12.9+ или AmneziaWG 2.0.0+"
+               print_info "Keenetic: только 5.1+ dev-канал (на 5.0.8 и ниже будет 'invalid H1 value')"
                break ;;
             4) AWG_VER="wg"
                print_info "Обфускация отключена, все клиенты WireGuard совместимы"
@@ -40,56 +43,101 @@ _awg_ask_version() {
 }
 
 # --> AWG: ГЕНЕРАЦИЯ ОБФУСКАЦИИ <--
-# - общие параметры Jc/Jmin/Jmax/S1/S2 -
+# - общие параметры Jc/Jmin/Jmax/S1/S2 с учётом MTU -
+# - arg1: auto (yes/no), arg2: MTU (по умолчанию 1320) -
+# - AWG handshake overhead: init=148 байт, response=92 байт, IP+UDP headers=28 байт -
+# - Jmax <= MTU - 176 (148 + 28), S1 <= MTU - 148, S2 <= MTU - 92 -
+# - S1 != S2, S1 + 56 != S2, S2 + 56 != S1 (симметричное правило из kernel README) -
 _awg_gen_obf_common() {
     local auto="$1"
+    local mtu="${2:-1320}"
+    # - лимиты по MTU -
+    local jmax_limit=$(( mtu - 176 ))
+    local s1_limit=$(( mtu - 148 ))
+    local s2_limit=$(( mtu - 92 ))
+    # - верхние границы для auto 15..150, но не больше *_limit если MTU мизерный -
+    local s_hi=150
+    [[ "$s1_limit" -lt "$s_hi" ]] && s_hi="$s1_limit"
+    [[ "$s2_limit" -lt "$s_hi" ]] && s_hi="$s2_limit"
+
     if [[ "$auto" == "yes" ]]; then
-        OBF_JC=$(rand_range 3 10)
-        OBF_S1=$(rand_range 15 40)
-        # - S1 и S2 в диапазоне 15..40, S1+56 = 71..96 - пересечения никогда нет -
-        # - реально полезная проверка: S1 != S2 (одинаковые = хуже маскировка) -
-        local _att=0
-        while true; do
-            OBF_S2=$(rand_range 15 40)
-            [[ "$OBF_S2" -ne "$OBF_S1" ]] && break
-            (( _att++ )); [[ $_att -gt 10 ]] && break
+        OBF_JC=$(rand_range 4 12)
+        OBF_JMIN=$(rand_range 8 200)
+        OBF_JMAX=$(rand_range 200 "$jmax_limit")
+        # - Jmin должен быть строго меньше Jmax, сдвигаем если Jmin слишком близко -
+        [[ "$OBF_JMIN" -ge "$OBF_JMAX" ]] && OBF_JMIN=$(( OBF_JMAX / 2 ))
+
+        OBF_S1=$(rand_range 15 "$s_hi")
+        # - детерминированный выбор S2: строим список "свободных" значений из [15, s_hi] -
+        # - исключаем S1, S1+56, S1-56 (симметричная проверка из kernel README) -
+        local s1_plus=$(( OBF_S1 + 56 ))
+        local s1_minus=$(( OBF_S1 - 56 ))
+        local -a s2_valid=()
+        local v
+        for (( v=15; v<=s_hi; v++ )); do
+            [[ "$v" -eq "$OBF_S1" ]] && continue
+            [[ "$v" -eq "$s1_plus" ]] && continue
+            [[ "$v" -eq "$s1_minus" ]] && continue
+            s2_valid+=("$v")
         done
-        OBF_JMIN=$(rand_range 50 150)
-        OBF_JMAX=$(rand_range 500 1000)
+        # - список не может быть пустым: размер [15..s_hi] минимум 3 значения при MTU >= 1280 -
+        OBF_S2="${s2_valid[$(( RANDOM % ${#s2_valid[@]} ))]}"
     else
-        print_info "Правила: Jmin < Jmax, S1 != S2, H1-H4 разные"
-        echo -e "  ${CYAN}Jc - кол-во мусорных пакетов (больше = сложнее распознать VPN, но чуть больше трафика).${NC}"
-        echo -e "  ${CYAN}Jmin/Jmax - диапазон размера мусорных пакетов в байтах.${NC}"
-        echo -e "  ${CYAN}S1/S2 - сдвиг заголовков пакетов (диапазон 15-40, разные значения).${NC}"
-        ask "Jc (3-10)" "5" OBF_JC
-        # - Jmin < Jmax: иначе мусорные пакеты невалидны, AWG падает при старте -
+        print_info "Правила: Jmin < Jmax, S1 != S2, S1+56 != S2, S2+56 != S1"
+        echo -e "  ${CYAN}Jc - кол-во мусорных пакетов (рекомендуется 4-12, диапазон 1-128).${NC}"
+        echo -e "  ${CYAN}Jmin/Jmax - размер мусорных пакетов, Jmax <= ${jmax_limit} (MTU ${mtu} - 176).${NC}"
+        echo -e "  ${CYAN}S1 - padding init-пакета <= ${s1_limit}. S2 - padding response <= ${s2_limit}.${NC}"
+        # - Jc: 1-128 -
         while true; do
-            ask "Jmin (50-150)" "64" OBF_JMIN
-            ask "Jmax (500-1000)" "1000" OBF_JMAX
-            if [[ "$OBF_JMIN" =~ ^[0-9]+$ && "$OBF_JMAX" =~ ^[0-9]+$ ]] && (( OBF_JMIN < OBF_JMAX )); then
-                break
-            fi
-            print_err "Jmin должен быть меньше Jmax и оба числа. Повторите ввод"
+            ask "Jc (1-128)" "8" OBF_JC
+            [[ "$OBF_JC" =~ ^[0-9]+$ ]] && (( OBF_JC >= 1 && OBF_JC <= 128 )) && break
+            print_err "Jc должен быть целым от 1 до 128"
         done
-        # - S1 != S2: одинаковые значения ухудшают обфускацию -
-        ask "S1 (15-40)" "20" OBF_S1
+        # - Jmin < Jmax, Jmin >= 8, Jmax <= jmax_limit -
         while true; do
-            ask "S2 (15-40, != S1)" "20" OBF_S2
-            if [[ "$OBF_S2" =~ ^[0-9]+$ ]] && (( OBF_S2 != OBF_S1 )); then
+            ask "Jmin (8-${jmax_limit})" "64" OBF_JMIN
+            ask "Jmax (>Jmin, <=${jmax_limit})" "$(( jmax_limit > 1000 ? 1000 : jmax_limit ))" OBF_JMAX
+            if [[ "$OBF_JMIN" =~ ^[0-9]+$ && "$OBF_JMAX" =~ ^[0-9]+$ ]] \
+               && (( OBF_JMIN >= 8 && OBF_JMIN < OBF_JMAX && OBF_JMAX <= jmax_limit )); then
                 break
             fi
-            print_err "S2 должно быть числом и не равняться S1 (${OBF_S1}). Повторите ввод"
+            print_err "Нужно 8 <= Jmin < Jmax <= ${jmax_limit}. Повторите ввод"
+        done
+        # - S1 в диапазоне 0..s1_limit, рекомендуется 15-150 -
+        while true; do
+            ask "S1 (0-${s1_limit}, рекомендуется 15-150)" "20" OBF_S1
+            [[ "$OBF_S1" =~ ^[0-9]+$ ]] && (( OBF_S1 >= 0 && OBF_S1 <= s1_limit )) && break
+            print_err "S1 должно быть целым от 0 до ${s1_limit}"
+        done
+        # - S2 с симметричной проверкой -
+        while true; do
+            ask "S2 (0-${s2_limit}, S1±56 != S2)" "35" OBF_S2
+            if ! [[ "$OBF_S2" =~ ^[0-9]+$ ]] || (( OBF_S2 < 0 || OBF_S2 > s2_limit )); then
+                print_err "S2 должно быть целым от 0 до ${s2_limit}"
+                continue
+            fi
+            if (( OBF_S2 == OBF_S1 )); then
+                print_err "S2 не должно равняться S1 (${OBF_S1})"
+                continue
+            fi
+            if (( OBF_S2 == OBF_S1 + 56 )); then
+                print_err "S2 не должно равняться S1+56 (${OBF_S1}+56=$(( OBF_S1 + 56 )))"
+                continue
+            fi
+            if (( OBF_S2 + 56 == OBF_S1 )); then
+                print_err "S2+56 не должно равняться S1 (текущее S2+56=$(( OBF_S2 + 56 )), S1=${OBF_S1})"
+                continue
+            fi
+            break
         done
     fi
+    return 0
 }
 
 # --> AWG: ПРЕСЕТЫ CPS ДЛЯ I1 (реальные hex snapshots) <--
 # - I1 должен выглядеть как начало реального UDP-протокола для DPI-маскировки -
-# - взято из публичных примеров доки Amnezia и протокольных спецификаций -
-_awg_cps_preset_quic() {
-    # - QUIC Initial (RFC 9000) - маскирует под HTTP/3 -
-    echo "<b 0xc000000001><r 18><b 0x00><r 8><b 0x00040000040000000400><r 1100>"
-}
+# - QUIC preset удалён: структурно некорректен (RFC 9000 требует DCID/SCID/token_length как VarInt) -
+# - TLS ClientHello не делаем: TLS на UDP-порту аномален, хуже чем ничего -
 
 # - генератор hex DNS-запроса типа A для произвольного FQDN -
 # - формат: flags(0100) qd(0001) an(0000) ns(0000) ar(0000) QNAME qtype(0001) qclass(0001) -
@@ -119,25 +167,52 @@ AWG_DNS_DOMAINS=(
     "###Глобальные"
     "www.cloudflare.com|Global CDN, правдоподобен в любой стране"
     "www.google.com|Global поиск/Gmail, самый распространённый запрос"
-    "fonts.googleapis.com|Google Fonts, грузится с большинства сайтов"
-    "www.apple.com|Global Apple сервисы"
-    "www.microsoft.com|Global Windows/Office телеметрия"
-    "www.amazon.com|Global AWS и магазин"
-    "www.github.com|Global разработчики"
+    "www.google-analytics.com|Global Google Analytics, на половине сайтов"
+    "ssl.google-analytics.com|Global GA SSL endpoint"
+    "www.googletagmanager.com|Global Google Tag Manager"
+    "fonts.googleapis.com|Global Google Fonts API"
+    "fonts.gstatic.com|Global Google Fonts static"
+    "ajax.googleapis.com|Global Google Hosted Libraries"
+    "cdnjs.cloudflare.com|Global CDN JS библиотек"
+    "cdn.jsdelivr.net|Global jsDelivr CDN"
+    "unpkg.com|Global npm CDN"
+    "static.cloudflareinsights.com|Global Cloudflare аналитика"
+    "connect.facebook.net|Global Facebook SDK/пиксель"
+    "www.apple.com|Global Apple"
+    "configuration.apple.com|Global Apple config"
+    "gsp-ssl.ls.apple.com|Global Apple location"
+    "www.microsoft.com|Global Microsoft"
+    "ctldl.windowsupdate.com|Global Windows Update"
+    "v10.events.data.microsoft.com|Global Windows телеметрия"
+    "time.windows.com|Global Windows NTP"
+    "time.apple.com|Global Apple NTP"
+    "pool.ntp.org|Global NTP pool"
+    "www.amazon.com|Global Amazon"
+    "www.github.com|Global GitHub"
     "###Россия"
     "www.yandex.ru|Россия Яндекс"
-    "mc.yandex.ru|Россия Яндекс.Метрика (грузится с кучи сайтов)"
-    "www.vk.com|Россия VK соцсеть"
-    "www.mail.ru|Россия Mail.ru почта"
+    "mc.yandex.ru|Россия Яндекс.Метрика (на куче сайтов)"
+    "www.vk.com|Россия VK"
+    "www.mail.ru|Россия Mail.ru"
     "www.tinkoff.ru|Россия T-Банк"
+    "www.ozon.ru|Россия Ozon"
+    "www.wildberries.ru|Россия Wildberries"
+    "www.avito.ru|Россия Avito"
     "###СНГ / Средняя Азия"
     "www.kaspi.kz|Казахстан Kaspi банк"
-    "www.beeline.uz|Узбекистан Beeline оператор"
-    "www.onliner.by|Беларусь Onliner портал"
-    "list.am|Армения List.am объявления"
+    "www.beeline.uz|Узбекистан Beeline"
+    "www.onliner.by|Беларусь Onliner"
+    "list.am|Армения List.am"
     "###Турция"
     "www.trt.net.tr|Турция гос. медиа"
-    "www.hurriyet.com.tr|Турция Hurriyet новости"
+    "www.hurriyet.com.tr|Турция Hurriyet"
+    "www.trendyol.com|Турция Trendyol marketplace"
+    "www.sahibinden.com|Турция Sahibinden объявления"
+    "###Иран"
+    "www.digikala.com|Иран Digikala marketplace"
+    "www.divar.ir|Иран Divar объявления"
+    "www.aparat.com|Иран Aparat видеохостинг"
+    "www.snapp.ir|Иран Snapp такси"
     "###Европа"
     "www.bbc.co.uk|UK BBC"
     "www.spiegel.de|DE Spiegel"
@@ -151,11 +226,11 @@ AWG_DNS_DOMAINS=(
 
 # --> AWG: RAND_PORT ДЛЯ AWG-ИНТЕРФЕЙСА <--
 # - диапазон 1024-9999 (рекомендация Amnezia, провайдеры режут UDP на high-ports) -
-# - исключаем well-known зарезервированные порты -
+# - исключаем зарезервированные порты -
 _awg_port_blacklist() {
     local p="$1"
     case "$p" in
-        53|80|123|443|853|8080|8443|1194|1701|4500|5060|3478|3479|1812|1813|22|21|25|465|587|993|995|110|143|3306|5432|5900|5901|6881|6882|6883|6884|6885|6886|6887|6888|6889)
+        20|21|22|23|25|53|67|68|69|80|88|110|111|123|135|137|138|139|143|161|162|389|443|445|465|500|514|520|546|547|554|587|631|636|853|873|989|990|993|995|1080|1194|1433|1434|1521|1701|1723|1812|1813|1900|2049|2375|2376|3128|3306|3389|3478|3479|4500|5000|5001|5060|5061|51820|5353|5355|5432|5900|5901|6379|6881|6882|6883|6884|6885|6886|6887|6888|6889|8080|8081|8443|8888|9200|9300|10000|11211|27017|27018|27019)
             return 0 ;;
     esac
     return 1
@@ -169,13 +244,15 @@ rand_port_awg() {
         # - _rand_bits30 на /dev/urandom, корректно работает при span > 32767 -
         port=$(( low + $(_rand_bits30 "$span") ))
         if _awg_port_blacklist "$port"; then (( attempts++ )); continue; fi
-        if ! ss -ulnp 2>/dev/null | grep -q ":${port} " && \
-           ! ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+        # - ss без -p: процесс не нужен, -p может требовать прав в некоторых окружениях -
+        # - regex [:.] покрывает IPv4 (:port) и IPv6-в-mapped нотацию (.port) -
+        if ! ss -H -uln 2>/dev/null | grep -Eq "[:.]${port}[[:space:]]" && \
+           ! ss -H -tln 2>/dev/null | grep -Eq "[:.]${port}[[:space:]]"; then
             echo "$port"; return 0
         fi
         (( attempts++ ))
     done
-    echo "$port"; return 1
+    return 1
 }
 
 _awg_cps_preset_dns() {
@@ -195,35 +272,166 @@ _awg_cps_preset_dns() {
     echo "<r 2><b 0x${hex}>"
 }
 
+# --> AWG: ПУЛ ШАБЛОНОВ STUN <--
+# - STUN Binding Request (RFC 5389) с SOFTWARE attribute, имитирует реальные клиенты -
+# - NOFP: 32 байта, без FINGERPRINT. FP: 40 байт, с рандомным FINGERPRINT -
+# - FINGERPRINT в STUN это CRC32, AWG не умеет считать CRC на лету поэтому рандомный -
+# - глубокий DPI с проверкой CRC отбракует, статистический DPI пропустит -
+AWG_CPS_STUN_POOL_NOFP=(
+    "<b 0x0001000c2112a442><r 12><b 0x802200086c69626a696e676c>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200086963652d6c697465>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200084368726f6d69756d>"
+    "<b 0x0001000c2112a442><r 12><b 0x80220008636f7475726e2d34>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200085374756e53657276>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200084c6976654b697453>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200084a616e7573534655>"
+    "<b 0x0001000c2112a442><r 12><b 0x80220008417374657269736b>"
+    "<b 0x000100102112a442><r 12><b 0x80220009706a70726f6a656374000000>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200074a697473692d5800>"
+)
+
+AWG_CPS_STUN_POOL_FP=(
+    "<b 0x000100142112a442><r 12><b 0x802200086c69626a696e676c80280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200086963652d6c69746580280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200084368726f6d69756d80280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x80220008636f7475726e2d3480280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200085374756e5365727680280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200084c6976654b69745380280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200084a616e757353465580280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x80220008417374657269736b80280004><r 4>"
+    "<b 0x000100182112a442><r 12><b 0x80220009706a70726f6a65637400000080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200074a697473692d580080280004><r 4>"
+)
+
+# --> AWG: ПУЛ ШАБЛОНОВ SIP <--
+# - SIP INVITE (RFC 3261) с разными User-Agent: Asterisk, FreeSWITCH, Zoiper, Linphone, MicroSIP, 3CX, X-Lite -
+# - размер 285-310 байт, влезает в MTU 1280+ с запасом -
+# - переменные: user (<rc 8>), domain (<rc 12>), IP октеты (<rd 2>), branch (<rd 10>), tag (<rd 8>), Call-ID (<rc 16>) -
+AWG_CPS_SIP_POOL=(
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a63616c6c657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x40><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a20417374657269736b205042582031382e32302e300d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a202245787422203c7369703a65787440><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a20467265655357495443482d6d6f645f736f6669612f312e31302e31310d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x3b72706f72740d0a46726f6d3a203c7369703a7573657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a205a6f69706572207276322e31302e32302e340d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a7573657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x0d0a435365713a20323020494e564954450d0a557365722d4167656e743a204c696e70686f6e652f352e332e300d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b72706f72743b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a7573657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a204d6963726f5349502f332e32312e330d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a7573657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a2033435850686f6e652f31382e302e300d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a7573657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a206579654265616d2072656c656173652033303033660d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+)
+
 _awg_cps_preset_stun() {
-    # - STUN binding request (RFC 5389) - маскирует под STUN (WebRTC) -
-    echo "<b 0x000100002112a442><r 12>"
+    # - STUN Binding Request (RFC 5389) с SOFTWARE - маскировка под WebRTC/VoIP -
+    # - аргумент: fp=yes - использовать пул с рандомным FINGERPRINT (40 байт), иначе NOFP (32 байта) -
+    local fp="${1:-no}"
+    local -a pool
+    if [[ "$fp" == "yes" ]]; then
+        pool=("${AWG_CPS_STUN_POOL_FP[@]}")
+    else
+        pool=("${AWG_CPS_STUN_POOL_NOFP[@]}")
+    fi
+    echo "${pool[$(( RANDOM % ${#pool[@]} ))]}"
+}
+
+_awg_cps_preset_sip() {
+    # - SIP INVITE с User-Agent реального SIP-клиента - маскировка под VoIP сигналинг -
+    # - случайный шаблон из AWG_CPS_SIP_POOL -
+    echo "${AWG_CPS_SIP_POOL[$(( RANDOM % ${#AWG_CPS_SIP_POOL[@]} ))]}"
+}
+
+# --> AWG: ВАЛИДАЦИЯ CPS-СТРОК <--
+# - проверяет корректность CPS для I1..I5, вызывается при manual-вводе -
+# - разрешённые теги: <b 0xHEX>, <r N>, <rd N>, <rc N>, <t> -
+# - <c> явно запрещён: не реализован в amneziawg-go (issue #120) -
+# - возвращает 0 если OK, 1 если ошибка (сообщение в stderr) -
+_awg_cps_validate() {
+    local s="$1"
+    [[ -z "$s" ]] && return 0
+
+    # - баланс < и > -
+    local opens closes
+    opens=$(tr -cd '<' <<< "$s" | wc -c)
+    closes=$(tr -cd '>' <<< "$s" | wc -c)
+    if [[ "$opens" -ne "$closes" ]]; then
+        echo "CPS: несбалансированные скобки < > (<=${opens}, >=${closes})" >&2
+        return 1
+    fi
+
+    # - проход по тегам: все подстроки вида <...> -
+    local tag rest="$s"
+    while [[ "$rest" =~ \<([^\<\>]*)\> ]]; do
+        tag="${BASH_REMATCH[1]}"
+        rest="${rest#*>}"
+        case "$tag" in
+            t)
+                : ;;
+            c)
+                echo "CPS: тег <c> (packet counter) не реализован в amneziawg-go, нельзя использовать" >&2
+                return 1
+                ;;
+            "b 0x"*)
+                local hex="${tag#b 0x}"
+                if ! [[ "$hex" =~ ^[0-9a-fA-F]+$ ]]; then
+                    echo "CPS: <b 0x${hex}> содержит не-hex символы" >&2
+                    return 1
+                fi
+                if (( ${#hex} % 2 != 0 )); then
+                    echo "CPS: <b 0x${hex}> имеет нечётное кол-во hex-символов (${#hex})" >&2
+                    return 1
+                fi
+                ;;
+            "r "*|"rd "*|"rc "*)
+                local n="${tag##* }"
+                if ! [[ "$n" =~ ^[0-9]+$ ]] || (( n < 1 )); then
+                    echo "CPS: <${tag}> - N должно быть положительным целым" >&2
+                    return 1
+                fi
+                ;;
+            *)
+                echo "CPS: неизвестный тег <${tag}>. Разрешены: <b 0xHEX>, <r N>, <rd N>, <rc N>, <t>" >&2
+                return 1
+                ;;
+        esac
+    done
+
+    # - вне тегов не должно быть других < или > -
+    local stripped
+    stripped=$(echo "$s" | sed -E 's/<[^<>]*>//g')
+    if [[ "$stripped" == *'<'* || "$stripped" == *'>'* ]]; then
+        echo "CPS: лишние < или > вне тегов" >&2
+        return 1
+    fi
+    # - CPS должен состоять только из тегов, текст вне тегов невалиден -
+    if [[ -n "$stripped" ]]; then
+        echo "CPS: текст вне тегов не разрешён ('${stripped}'). Используйте <b 0xHEX> для ASCII" >&2
+        return 1
+    fi
+    return 0
 }
 
 # - описание пресетов для интерактивного выбора -
 # - показывает как работает, где реалистично, какие риски -
 _awg_preset_desc() {
     case "$1" in
-        quic)
-            echo "    Как работает: первый пакет имитирует QUIC Initial (HTTP/3 handshake)."
-            echo "    Реалистично: браузеры Chrome/Safari активно используют HTTP/3, много трафика."
-            echo "    Риски: DPI с глубокой проверкой QUIC увидит что пакет не продолжает QUIC"
-            echo "           сессию (нет ACK, нет валидных QUIC фреймов). Но для статистического"
-            echo "           DPI выглядит нормально."
-            ;;
         dns)
-            echo "    Как работает: первый пакет имитирует DNS query типа A к выбранному домену."
-            echo "    Реалистично: DNS-трафик есть всегда и везде, самый банальный протокол."
-            echo "    Риски: DNS обычно идёт на порт 53 или DoH/DoT. Запрос с AWG-порта на DNS-домен"
-            echo "           через нестандартный порт = слабый признак аномалии. Плюс домен"
-            echo "           отправляется всегда одинаковый - потенциальный фингерпринт."
+            echo "    Как работает: I1 имитирует DNS query типа A к выбранному домену."
+            echo "    Реалистично: DNS-трафик есть всегда, самый банальный протокол."
+            echo "    Риски: DNS обычно идёт на порт 53, запрос на AWG-порту = аномалия для"
+            echo "           современного DPI. Оставлен как fallback, базовые блокировки обходит,"
+            echo "           глубокий DPI (Иран, Китай, РФ 2024+) детектит."
             ;;
         stun)
-            echo "    Как работает: первый пакет имитирует STUN binding request (WebRTC)."
-            echo "    Реалистично: WebRTC активно используется (видеозвонки, голосовые, Telegram calls)."
-            echo "    Риски: STUN короткий (20 байт base), редко летит на случайные порты. Подделка"
-            echo "           пакета STUN от реального трафика WebRTC-сессии отличается отсутствием"
-            echo "           ответа от STUN-сервера."
+            echo "    Как работает: I1 имитирует STUN Binding Request с SOFTWARE attribute."
+            echo "    Реалистично: WebRTC активно используется (звонки, Telegram, Zoom), STUN"
+            echo "           регулярно летит на рандомные порты. Пул 10 шаблонов (libjingle, coturn,"
+            echo "           Chromium, Asterisk и т.д.) - каждый клиент получает случайный."
+            echo "    Риски: глубокий DPI с CRC32-валидацией FINGERPRINT отбракует (если включить FP),"
+            echo "           статистический DPI пропустит. Дефолт по проекту."
+            ;;
+        sip)
+            echo "    Как работает: I1 имитирует SIP INVITE с User-Agent реального клиента."
+            echo "    Реалистично: SIP-сигналинг в VoIP трафике, ~300 байт - типичный размер"
+            echo "           INVITE. Пул 7 шаблонов (Asterisk, FreeSWITCH, Zoiper, Linphone,"
+            echo "           MicroSIP, 3CX, X-Lite) с рандомными user/domain/Call-ID/branch/tag."
+            echo "    Риски: SIP обычно tcp/5060 или udp/5060. На высоких UDP-портах SIP редкий,"
+            echo "           но не невозможный (NAT traversal). На MTU<1420 пакет близко к границе."
             ;;
     esac
 }
@@ -241,44 +449,71 @@ _awg_cps_random() {
 }
 
 # --> AWG: ГЕНЕРАЦИЯ I1-I5 <--
-# - auto: для 1.5/2.0 показываем меню выбора пресета (дефолт DNS) + домена (дефолт cloudflare) -
-# - manual: полный ручной ввод с описаниями пресетов и выбор домена для DNS -
+# - auto: меню выбора пресета (DNS / STUN / SIP), дефолт STUN -
+# - STUN: дополнительный вопрос про FINGERPRINT (рандомный CRC32) -
+# - SIP: warning если MTU<1420 (но работает на любом MTU≥1280) -
+# - DNS: warning что уязвимо к современному DPI -
 # - I1 обязателен для 1.5/2.0, I2-I5 - случайные CPS для энтропии -
+# - MTU берётся из переменной окружения TUNNEL_MTU_CURRENT (устанавливается в install flow) -
 _awg_gen_i_packets() {
     local auto="$1"
+    local mtu="${TUNNEL_MTU_CURRENT:-0}"
     OBF_I1=""; OBF_I2=""; OBF_I3=""; OBF_I4=""; OBF_I5=""
 
     if [[ "$auto" == "yes" ]]; then
-        # - даже в auto пользователь выбирает пресет и домен один раз при установке -
         echo ""
         echo -e "  ${CYAN}I1 - первый пакет маскировки. Выбери под что маскировать handshake.${NC}"
         echo ""
-        echo -e "  ${GREEN}q)${NC} ${BOLD}QUIC${NC} (HTTP/3 handshake)"
-        echo -e "  ${GREEN}d)${NC} ${BOLD}DNS${NC} (DNS запрос типа A) ${YELLOW}[дефолт]${NC}"
-        echo -e "  ${GREEN}s)${NC} ${BOLD}STUN${NC} (WebRTC binding)"
+        echo -e "  ${GREEN}s)${NC} ${BOLD}STUN${NC} (WebRTC Binding Request) ${YELLOW}[дефолт]${NC}"
+        echo -e "  ${GREEN}p)${NC} ${BOLD}SIP${NC} (VoIP INVITE)"
+        echo -e "  ${GREEN}d)${NC} ${BOLD}DNS${NC} (DNS query, fallback - уязвим к современному DPI)"
         echo ""
         local _ch=""
         while true; do
-            echo -ne "  ${BOLD}Пресет?${NC} [d]: "; read -r _ch
-            case "${_ch:-d}" in
-                q|Q) AWG_I1_PRESET="quic"; break ;;
-                d|D) AWG_I1_PRESET="dns";  break ;;
+            ask_raw "$(printf '  \033[1mПресет?\033[0m [s]: ')" _ch
+            case "${_ch:-s}" in
                 s|S) AWG_I1_PRESET="stun"; break ;;
-                *) print_warn "q, d или s" ;;
+                p|P) AWG_I1_PRESET="sip";  break ;;
+                d|D) AWG_I1_PRESET="dns";  break ;;
+                *) print_warn "s, p или d" ;;
             esac
         done
 
         case "$AWG_I1_PRESET" in
-            quic) OBF_I1=$(_awg_cps_preset_quic); print_info "I1 пресет: quic" ;;
+            stun)
+                local _fp=""
+                echo ""
+                echo -e "  ${CYAN}STUN FINGERPRINT attribute (опциональный CRC32):${NC}"
+                echo -e "  ${CYAN}  без FP: 32 байта, проще, реже палится на кривых DPI${NC}"
+                echo -e "  ${CYAN}  с рандомным FP: 40 байт, реалистичнее (coturn/libjingle всегда пишут FP),${NC}"
+                echo -e "  ${CYAN}                  но DPI с проверкой CRC32 (Китай GFW) отбракует${NC}"
+                ask_yn "Включить FINGERPRINT (рекомендуется кроме Китая)" "y" _fp
+                if [[ "$_fp" == "yes" ]]; then
+                    OBF_I1=$(_awg_cps_preset_stun yes); print_info "I1 пресет: stun + FP"
+                else
+                    OBF_I1=$(_awg_cps_preset_stun no);  print_info "I1 пресет: stun без FP"
+                fi
+                ;;
+            sip)
+                if [[ "$mtu" -gt 0 && "$mtu" -lt 1420 ]]; then
+                    print_warn "MTU ${mtu} < 1420: SIP-пакет (~300 байт) близко к границе MTU"
+                    print_info "Работать будет, но при глубокой фрагментации handshake может ломаться"
+                    print_info "Рекомендуется MTU 1420 для чистого Ethernet. Отменить? (n = продолжить с SIP)"
+                    local _cont=""
+                    ask_yn "Всё равно использовать SIP?" "y" _cont
+                    [[ "$_cont" != "yes" ]] && { AWG_I1_PRESET="stun"; OBF_I1=$(_awg_cps_preset_stun no); print_info "Откат на STUN без FP"; }
+                fi
+                [[ -z "$OBF_I1" ]] && { OBF_I1=$(_awg_cps_preset_sip); print_info "I1 пресет: sip"; }
+                ;;
             dns)
+                print_warn "DNS preset уязвим к современному DPI (Иран, Китай, РФ 2024+)"
+                print_info "Работает против базовых блокировок (Казахстан, Беларусь, старые сети)"
                 _awg_choose_dns_domain
                 OBF_I1=$(_awg_cps_preset_dns "$AWG_DNS_SELECTED")
                 print_info "I1 пресет: dns (${AWG_DNS_SELECTED})"
                 ;;
-            stun) OBF_I1=$(_awg_cps_preset_stun); print_info "I1 пресет: stun" ;;
         esac
 
-        # - I2-I5 случайные CPS для энтропии -
         OBF_I2=$(_awg_cps_random 2)
         OBF_I3=$(_awg_cps_random 3)
         OBF_I4=$(_awg_cps_random 4)
@@ -290,32 +525,61 @@ _awg_gen_i_packets() {
         echo -e "  ${CYAN}Оставь пустым для пропуска пакета. I1 пустой = отключение CPS целиком.${NC}"
         echo ""
         echo -e "  ${BOLD}Готовые пресеты для I1:${NC}"
-        echo -e "  ${GREEN}q)${NC} ${BOLD}QUIC Initial${NC} (маскировка под HTTP/3)"
-        _awg_preset_desc quic
-        echo ""
-        echo -e "  ${GREEN}d)${NC} ${BOLD}DNS query${NC} (маскировка под DNS)"
-        _awg_preset_desc dns
-        echo ""
-        echo -e "  ${GREEN}s)${NC} ${BOLD}STUN${NC} (маскировка под WebRTC)"
+        echo -e "  ${GREEN}s)${NC} ${BOLD}STUN${NC} (WebRTC Binding Request)"
         _awg_preset_desc stun
+        echo ""
+        echo -e "  ${GREEN}p)${NC} ${BOLD}SIP${NC} (VoIP INVITE)"
+        _awg_preset_desc sip
+        echo ""
+        echo -e "  ${GREEN}d)${NC} ${BOLD}DNS${NC} (DNS query - fallback, уязвим к современному DPI)"
+        _awg_preset_desc dns
         echo ""
         echo -e "  ${GREEN}m)${NC} ${BOLD}Ввести вручную${NC}"
         echo ""
         local _ch=""
         while true; do
-            echo -ne "  ${BOLD}Выбор для I1?${NC} [q]: "; read -r _ch
-            case "${_ch:-q}" in
-                q|Q) OBF_I1=$(_awg_cps_preset_quic); break ;;
-                d|D) _awg_choose_dns_domain; OBF_I1=$(_awg_cps_preset_dns "$AWG_DNS_SELECTED"); break ;;
-                s|S) OBF_I1=$(_awg_cps_preset_stun); break ;;
-                m|M) ask "I1 (CPS)" "" OBF_I1; break ;;
-                *) print_warn "q, d, s или m" ;;
+            ask_raw "$(printf '  \033[1mВыбор для I1?\033[0m [s]: ')" _ch
+            case "${_ch:-s}" in
+                s|S)
+                    local _fp=""
+                    ask_yn "Включить FINGERPRINT в STUN (рекомендуется кроме Китая)" "y" _fp
+                    if [[ "$_fp" == "yes" ]]; then
+                        OBF_I1=$(_awg_cps_preset_stun yes)
+                    else
+                        OBF_I1=$(_awg_cps_preset_stun no)
+                    fi
+                    break ;;
+                p|P)
+                    if [[ "$mtu" -gt 0 && "$mtu" -lt 1420 ]]; then
+                        print_warn "MTU ${mtu} < 1420: SIP-пакет ~300 байт близко к границе"
+                    fi
+                    OBF_I1=$(_awg_cps_preset_sip); break ;;
+                d|D)
+                    print_warn "DNS preset уязвим к современному DPI"
+                    _awg_choose_dns_domain
+                    OBF_I1=$(_awg_cps_preset_dns "$AWG_DNS_SELECTED")
+                    break ;;
+                m|M)
+                    while true; do
+                        ask "I1 (CPS)" "" OBF_I1
+                        if _awg_cps_validate "$OBF_I1"; then break; fi
+                        print_err "Исправьте CPS-строку и повторите"
+                    done
+                    break ;;
+                *) print_warn "s, p, d или m" ;;
             esac
         done
-        ask "I2 (CPS, пусто = пропустить)" "$(_awg_cps_random 2)" OBF_I2
-        ask "I3 (CPS, пусто = пропустить)" "$(_awg_cps_random 3)" OBF_I3
-        ask "I4 (CPS, пусто = пропустить)" "$(_awg_cps_random 4)" OBF_I4
-        ask "I5 (CPS, пусто = пропустить)" "$(_awg_cps_random 5)" OBF_I5
+        # - I2-I5: manual с валидацией, пустое = пропустить -
+        local _iv=""
+        for _iv in 2 3 4 5; do
+            while true; do
+                ask "I${_iv} (CPS, пусто = пропустить)" "$(_awg_cps_random "$_iv")" "OBF_I${_iv}"
+                local -n _cur_i="OBF_I${_iv}"
+                if _awg_cps_validate "$_cur_i"; then unset -n _cur_i; break; fi
+                print_err "Исправьте I${_iv} и повторите"
+                unset -n _cur_i
+            done
+        done
     fi
 }
 
@@ -358,7 +622,7 @@ _awg_choose_dns_domain() {
 
     local sel=""
     while true; do
-        echo -ne "  ${BOLD}Номер (1-${rand_num})?${NC} [${default_num}]: "; read -r sel
+        ask_raw "$(printf '  \033[1mНомер (1-%s)?\033[0m [%s]: ' "$rand_num" "$default_num")" sel
         [[ -z "$sel" ]] && sel="$default_num"
         if ! [[ "$sel" =~ ^[0-9]+$ ]] || [[ "$sel" -lt 1 || "$sel" -gt "$rand_num" ]]; then
             print_warn "Введи число от 1 до ${rand_num}"
@@ -390,23 +654,33 @@ _awg_choose_dns_domain() {
 }
 
 # - AWG 1.0: H1-H4 одиночные значения, без I1-I5 -
+# - arg1: auto, arg2: MTU -
 _awg_gen_obf_v1() {
     local auto="$1"
-    _awg_gen_obf_common "$auto"
+    local mtu="${2:-1320}"
+    _awg_gen_obf_common "$auto" "$mtu"
     OBF_S3=""; OBF_S4=""
     OBF_I1=""; OBF_I2=""; OBF_I3=""; OBF_I4=""; OBF_I5=""
     if [[ "$auto" == "yes" ]]; then
+        # - rand_h теперь гарантирует >= 5 (значения 1..4 зарезервированы vanilla WG) -
         OBF_H1=$(rand_h); OBF_H2=$(rand_h); OBF_H3=$(rand_h); OBF_H4=$(rand_h)
         while [[ "$OBF_H2" == "$OBF_H1" ]]; do OBF_H2=$(rand_h); done
         while [[ "$OBF_H3" == "$OBF_H1" || "$OBF_H3" == "$OBF_H2" ]]; do OBF_H3=$(rand_h); done
         while [[ "$OBF_H4" == "$OBF_H1" || "$OBF_H4" == "$OBF_H2" || "$OBF_H4" == "$OBF_H3" ]]; do OBF_H4=$(rand_h); done
     else
-        echo -e "  ${CYAN}H1-H4 - магические числа в заголовках. Должны быть разными. Любые целые числа.${NC}"
-        # - цикл до корректного набора: все 4 числа и все 4 различны -
+        echo -e "  ${CYAN}H1-H4 - магические числа в заголовках, >= 5 (1..4 зарезервированы vanilla WG).${NC}"
+        echo -e "  ${CYAN}Должны быть все разными. Рекомендуемый диапазон 5..2147483647.${NC}"
         while true; do
-            ask "H1" "1" OBF_H1; ask "H2" "2" OBF_H2; ask "H3" "3" OBF_H3; ask "H4" "4" OBF_H4
+            ask "H1" "$(rand_h)" OBF_H1
+            ask "H2" "$(rand_h)" OBF_H2
+            ask "H3" "$(rand_h)" OBF_H3
+            ask "H4" "$(rand_h)" OBF_H4
             if ! [[ "$OBF_H1" =~ ^[0-9]+$ && "$OBF_H2" =~ ^[0-9]+$ && "$OBF_H3" =~ ^[0-9]+$ && "$OBF_H4" =~ ^[0-9]+$ ]]; then
                 print_err "H1-H4 должны быть целыми числами"
+                continue
+            fi
+            if (( OBF_H1 < 5 || OBF_H2 < 5 || OBF_H3 < 5 || OBF_H4 < 5 )); then
+                print_err "H1-H4 должны быть >= 5 (значения 1..4 зарезервированы vanilla WG)"
                 continue
             fi
             if [[ "$OBF_H1" == "$OBF_H2" || "$OBF_H1" == "$OBF_H3" || "$OBF_H1" == "$OBF_H4" \
@@ -420,10 +694,12 @@ _awg_gen_obf_v1() {
 }
 
 # - AWG 1.5: H1-H4 одиночные + I1-I5 -
+# - arg1: auto, arg2: MTU -
 _awg_gen_obf_v15() {
     local auto="$1"
-    _awg_gen_obf_v1 "$auto"
-    _awg_gen_i_packets "$auto"
+    local mtu="${2:-1320}"
+    _awg_gen_obf_v1 "$auto" "$mtu"
+    TUNNEL_MTU_CURRENT="$mtu" _awg_gen_i_packets "$auto"
 }
 
 # - проверка пересечения диапазонов "min-max": возвращает 0 если пересекаются -
@@ -443,62 +719,138 @@ _awg_ranges_overlap() {
 }
 
 # - AWG 2.0: S3/S4 + ranged H1-H4 + I1-I5 -
+# - arg1: auto, arg2: MTU -
+# - S3 (cookie packet padding): рекомендованный и технический диапазон 0-64 -
+# - S4 (transport packet padding): рекомендованный и технический диапазон 0-32 -
+# - S3 != S4, S3 + 56 != S4, S4 + 56 != S3 (симметрично S1/S2, по аналогии) -
+# - H1-H4 ranged: 4 равные зоны по ~500M в пространстве [5, 2^31-1] -
+# - в каждой зоне под-диапазон ширины 100-1000, зоны не пересекаются 'задумано' -
 _awg_gen_obf_v2() {
     local auto="$1"
-    _awg_gen_obf_common "$auto"
+    local mtu="${2:-1320}"
+    _awg_gen_obf_common "$auto" "$mtu"
+    local s3_limit=64 s4_limit=32
+
+    # - 4 равные зоны H1-H4, по ~500M значений, by design не пересекаются -
+    local _zones=("5 500000000" "500000001 1000000000" "1000000001 1500000000" "1500000001 2147483647")
+
+    # - локальный хелпер: случайный under-диапазон ширины 100-1000 в пределах [lo, hi] -
+    _awg_h_subrange() {
+        local lo="$1" hi="$2" span start
+        span=$(rand_range 100 1000)
+        start=$(rand_range "$lo" $(( hi - span )))
+        printf '%s-%s\n' "$start" $(( start + span ))
+    }
+
     if [[ "$auto" == "yes" ]]; then
-        OBF_S3=$(rand_range 15 40)
-        OBF_S4=$(rand_range 15 40)
-        # - 4 сегмента разных порядков, гарантированно не пересекаются -
-        # - контрольная проверка ниже: требование Amnezia 2.0, 'раз в год и палка стреляет' -
-        local _segs=("1000 90000" "100000 900000" "1000000 9000000" "10000000 90000000")
-        local _gen_att=0
-        while true; do
-            local _ord=(0 1 2 3) _i _j _tmp
-            for (( _i=3; _i>0; _i-- )); do
-                _j=$(( RANDOM % (_i + 1) ))
-                _tmp=${_ord[$_i]}; _ord[$_i]=${_ord[$_j]}; _ord[$_j]=$_tmp
-            done
-            local _n=1 _lo _hi _si
-            for _si in "${_ord[@]}"; do
-                read -r _lo _hi <<< "${_segs[$_si]}"
-                printf -v "OBF_H${_n}" '%s' "$(rand_h_range "$_lo" "$_hi")"
-                _n=$(( _n + 1 ))
-            done
-            # - контроль непересечения всех 6 пар -
-            local _ok="yes" _pair
-            for _pair in "H1:H2" "H1:H3" "H1:H4" "H2:H3" "H2:H4" "H3:H4"; do
-                local _a="${_pair%:*}" _b="${_pair#*:}"
-                local -n _av_ref="OBF_${_a}"
-                local -n _bv_ref="OBF_${_b}"
-                if _awg_ranges_overlap "$_av_ref" "$_bv_ref"; then
-                    _ok="no"; unset -n _av_ref _bv_ref; break
-                fi
-                unset -n _av_ref _bv_ref
-            done
-            [[ "$_ok" == "yes" ]] && break
-            (( _gen_att++ ))
-            if [[ "$_gen_att" -ge 10 ]]; then
-                print_warn "H1-H4 auto: не удалось исключить пересечение за 10 попыток, оставляю как есть"
-                break
+        # - S3: 0..64, исключая 0 для маскировки (0 = отсутствие паддинга, палится) -
+        OBF_S3=$(rand_range 1 "$s3_limit")
+        # - S4: 0..32 с исключениями S3, S3-56, S3+56 (симметричные правила по аналогии с S1/S2) -
+        local s3_plus=$(( OBF_S3 + 56 ))
+        local s3_minus=$(( OBF_S3 - 56 ))
+        local -a s4_valid=() v
+        for (( v=1; v<=s4_limit; v++ )); do
+            [[ "$v" -eq "$OBF_S3" ]] && continue
+            [[ "$v" -eq "$s3_plus" ]] && continue
+            [[ "$v" -eq "$s3_minus" ]] && continue
+            s4_valid+=("$v")
+        done
+        # - диапазон [1..32] минус максимум 3 значения = минимум 29 вариантов, пустым не будет -
+        OBF_S4="${s4_valid[$(( RANDOM % ${#s4_valid[@]} ))]}"
+
+        # - случайное назначение зон к H1..H4 через shuffle (Fisher-Yates) -
+        local _ord=(0 1 2 3) _i _j _tmp
+        for (( _i=3; _i>0; _i-- )); do
+            _j=$(( RANDOM % (_i + 1) ))
+            _tmp=${_ord[$_i]}; _ord[$_i]=${_ord[$_j]}; _ord[$_j]=$_tmp
+        done
+        local _n=1 _lo _hi _si
+        for _si in "${_ord[@]}"; do
+            read -r _lo _hi <<< "${_zones[$_si]}"
+            printf -v "OBF_H${_n}" '%s' "$(_awg_h_subrange "$_lo" "$_hi")"
+            _n=$(( _n + 1 ))
+        done
+        # - defensive: зоны by design не пересекаются, но если что-то пойдёт не так - ловим -
+        local _pair _a _b
+        for _pair in "H1:H2" "H1:H3" "H1:H4" "H2:H3" "H2:H4" "H3:H4"; do
+            _a="${_pair%:*}"; _b="${_pair#*:}"
+            local -n _av_ref="OBF_${_a}"
+            local -n _bv_ref="OBF_${_b}"
+            if _awg_ranges_overlap "$_av_ref" "$_bv_ref"; then
+                print_warn "H-зоны auto: неожиданное пересечение ${_a}(${_av_ref}) и ${_b}(${_bv_ref})"
             fi
+            unset -n _av_ref _bv_ref
         done
     else
-        echo -e "  ${CYAN}S3/S4 - дополнительные сдвиги заголовков для AWG 2.0 (15-40).${NC}"
-        ask "S3 (15-40)" "20" OBF_S3; ask "S4 (15-40)" "20" OBF_S4
-        echo -e "  ${CYAN}H1-H4 - диапазоны магических чисел в формате min-max.${NC}"
-        echo -e "  ${CYAN}Диапазоны не должны пересекаться между собой.${NC}"
-        local _att=0
+        echo -e "  ${CYAN}S3 (cookie padding) 0-${s3_limit}, S4 (transport padding) 0-${s4_limit}.${NC}"
+        echo -e "  ${CYAN}S3 != S4, S3+56 != S4, S4+56 != S3 (симметричное правило).${NC}"
         while true; do
-            ask "H1 (min-max)" "1000-50000" OBF_H1
-            ask "H2 (min-max)" "100000-500000" OBF_H2
-            ask "H3 (min-max)" "1000000-5000000" OBF_H3
-            ask "H4 (min-max)" "10000000-50000000" OBF_H4
-            # - проверяем все пары на пересечение -
+            ask "S3 (0-${s3_limit})" "20" OBF_S3
+            [[ "$OBF_S3" =~ ^[0-9]+$ ]] && (( OBF_S3 >= 0 && OBF_S3 <= s3_limit )) && break
+            print_err "S3 должно быть целым от 0 до ${s3_limit}"
+        done
+        while true; do
+            ask "S4 (0-${s4_limit})" "15" OBF_S4
+            if ! [[ "$OBF_S4" =~ ^[0-9]+$ ]] || (( OBF_S4 < 0 || OBF_S4 > s4_limit )); then
+                print_err "S4 должно быть целым от 0 до ${s4_limit}"
+                continue
+            fi
+            if (( OBF_S4 == OBF_S3 )); then
+                print_err "S4 не должно равняться S3 (${OBF_S3})"
+                continue
+            fi
+            if (( OBF_S4 == OBF_S3 + 56 )); then
+                print_err "S4 не должно равняться S3+56"
+                continue
+            fi
+            if (( OBF_S4 + 56 == OBF_S3 )); then
+                print_err "S4+56 не должно равняться S3"
+                continue
+            fi
+            break
+        done
+        echo -e "  ${CYAN}H1-H4 - диапазоны магических чисел в формате min-max, >= 5, ширина 100-1000.${NC}"
+        echo -e "  ${CYAN}Диапазоны не должны пересекаться между собой.${NC}"
+        # - дефолты из 4 равных зон, корректные start-end -
+        local _d1 _d2 _d3 _d4 _zlo _zhi
+        read -r _zlo _zhi <<< "${_zones[0]}"; _d1="$(_awg_h_subrange "$_zlo" "$_zhi")"
+        read -r _zlo _zhi <<< "${_zones[1]}"; _d2="$(_awg_h_subrange "$_zlo" "$_zhi")"
+        read -r _zlo _zhi <<< "${_zones[2]}"; _d3="$(_awg_h_subrange "$_zlo" "$_zhi")"
+        read -r _zlo _zhi <<< "${_zones[3]}"; _d4="$(_awg_h_subrange "$_zlo" "$_zhi")"
+        local _att=0 _max_att=3 _pair _a _b _give_up=0
+        while true; do
+            ask "H1 (min-max, зона 1: 5..500M)" "$_d1" OBF_H1
+            ask "H2 (min-max, зона 2: 500M..1G)" "$_d2" OBF_H2
+            ask "H3 (min-max, зона 3: 1G..1.5G)" "$_d3" OBF_H3
+            ask "H4 (min-max, зона 4: 1.5G..2.1G)" "$_d4" OBF_H4
+            # - проверка формата: все четыре "число-число", min >= 5, min <= max -
+            local _fmt_ok="yes" _h _lo _hi
+            for _h in OBF_H1 OBF_H2 OBF_H3 OBF_H4; do
+                local -n _hv="$_h"
+                if ! [[ "$_hv" =~ ^[0-9]+-[0-9]+$ ]]; then
+                    print_err "${_h} должно быть в формате min-max (например 5-1005)"
+                    _fmt_ok="no"; unset -n _hv; break
+                fi
+                _lo="${_hv%-*}"; _hi="${_hv#*-}"
+                if (( _lo < 5 )); then
+                    print_err "${_h}: min должен быть >= 5 (1..4 зарезервированы vanilla WG)"
+                    _fmt_ok="no"; unset -n _hv; break
+                fi
+                if (( _lo > _hi )); then
+                    print_err "${_h}: min (${_lo}) должен быть <= max (${_hi})"
+                    _fmt_ok="no"; unset -n _hv; break
+                fi
+                unset -n _hv
+            done
+            if [[ "$_fmt_ok" != "yes" ]]; then
+                (( _att++ ))
+                [[ $_att -ge $_max_att ]] && { _give_up=1; break; }
+                continue
+            fi
+            # - проверка на пересечение всех пар -
             local _overlap="no"
             for _pair in "H1:H2" "H1:H3" "H1:H4" "H2:H3" "H2:H4" "H3:H4"; do
-                local _a="${_pair%:*}" _b="${_pair#*:}"
-                # - nameref: ссылки на OBF_H1..H4 без eval -
+                _a="${_pair%:*}"; _b="${_pair#*:}"
                 local -n _av_ref="OBF_${_a}"
                 local -n _bv_ref="OBF_${_b}"
                 if _awg_ranges_overlap "$_av_ref" "$_bv_ref"; then
@@ -510,11 +862,29 @@ _awg_gen_obf_v2() {
                 unset -n _av_ref _bv_ref
             done
             [[ "$_overlap" == "no" ]] && break
-            (( _att++ )); [[ $_att -ge 3 ]] && { print_warn "Оставляю как есть"; break; }
+            (( _att++ ))
+            [[ $_att -ge $_max_att ]] && { _give_up=1; break; }
         done
+        # - после 3 неудач - автогенерация через ту же зональную механику что в auto-ветке -
+        # - невалидные H1-H4 в конфиг не уходят: либо валидный ввод, либо валидный auto-фоллбек -
+        if [[ $_give_up -eq 1 ]]; then
+            print_warn "Слишком много невалидных вводов, генерирую H1-H4 автоматически"
+            local _ord_f=(0 1 2 3) _i_f _j_f _tmp_f
+            for (( _i_f=3; _i_f>0; _i_f-- )); do
+                _j_f=$(( RANDOM % (_i_f + 1) ))
+                _tmp_f=${_ord_f[$_i_f]}; _ord_f[$_i_f]=${_ord_f[$_j_f]}; _ord_f[$_j_f]=$_tmp_f
+            done
+            local _n_f=1 _lo_f _hi_f _si_f
+            for _si_f in "${_ord_f[@]}"; do
+                read -r _lo_f _hi_f <<< "${_zones[$_si_f]}"
+                printf -v "OBF_H${_n_f}" '%s' "$(_awg_h_subrange "$_lo_f" "$_hi_f")"
+                _n_f=$(( _n_f + 1 ))
+            done
+            print_info "H1=${OBF_H1} H2=${OBF_H2} H3=${OBF_H3} H4=${OBF_H4}"
+        fi
     fi
-    # - I1-I5 для v2 -
-    _awg_gen_i_packets "$auto"
+    # - I1-I5 для v2, пробрасываем MTU в _awg_gen_i_packets через env -
+    TUNNEL_MTU_CURRENT="$mtu" _awg_gen_i_packets "$auto"
 }
 
 # - WireGuard vanilla: все параметры обнулены, совместимость со стандартным WG -
@@ -818,7 +1188,7 @@ awg_export_keenetic() {
     echo ""
     local sel=""
     while true; do
-        echo -ne "  ${BOLD}Номер клиента (1-${i})?${NC}: "; read -r sel
+        ask_raw "$(printf '  \033[1mНомер клиента (1-%s)?\033[0m: ' "$i")" sel
         [[ "$sel" =~ ^[0-9]+$ ]] && [[ "$sel" -ge 1 && "$sel" -le "$i" ]] && break
         print_warn "1-${i}"
     done
@@ -1072,8 +1442,7 @@ awg_select_iface() {
     fi
     local choice=""
     while true; do
-        echo -ne "  ${BOLD}Выберите интерфейс (1-${count})?${NC} "
-        read -r choice
+        ask_raw "$(printf '  \033[1mВыберите интерфейс (1-%s)?\033[0m ' "$count")" choice
         if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "$count" ]]; then
             AWG_ACTIVE_IFACE="${iface_array[$((choice-1))]}"
             break
@@ -1120,11 +1489,23 @@ awg_migrate_legacy() {
         rm -rf "$old_clients"
     fi
 
+    # - AWG_VERSION в legacy env обычно нет, но если был - сохраняем -
+    local mig_ver="${AWG_VERSION:-1.0}"
+    if [[ -z "${AWG_VERSION:-}" ]]; then
+        print_warn "AWG_VERSION в legacy не указан, ставим 1.0"
+        print_warn "Если сервер был на AWG 1.5/2.0 - проверь параметры I1-I5/S3/S4 в iface_awg0.env вручную"
+    fi
+    # - H1-H4 дефолты: значения 1..4 = vanilla WG, обфускация ломается, генерируем случайные -
+    local mig_h1="${H1:-$(rand_h)}"
+    local mig_h2="${H2:-$(rand_h)}"
+    local mig_h3="${H3:-$(rand_h)}"
+    local mig_h4="${H4:-$(rand_h)}"
+
     cat > "$target_env" << MIGEOF
 # AmneziaWG, параметры интерфейса awg0 (мигрировано)
 IFACE_NAME="awg0"
 IFACE_DESC="основной"
-AWG_VERSION="1.0"
+AWG_VERSION="${mig_ver}"
 SERVER_ENDPOINT_IP="${SERVER_ENDPOINT_IP:-}"
 SERVER_PORT="${SERVER_PORT:-1618}"
 SERVER_TUNNEL_IP="${SERVER_TUNNEL_IP:-10.8.0.1}"
@@ -1137,10 +1518,10 @@ JMIN="${JMIN:-50}"
 JMAX="${JMAX:-1000}"
 S1="${S1:-0}"
 S2="${S2:-0}"
-H1="${H1:-1}"
-H2="${H2:-2}"
-H3="${H3:-3}"
-H4="${H4:-4}"
+H1="${mig_h1}"
+H2="${mig_h2}"
+H3="${mig_h3}"
+H4="${mig_h4}"
 S_MIN="${S_MIN:-15}"
 S_MAX="${S_MAX:-40}"
 JMIN_MIN="${JMIN_MIN:-50}"
@@ -1524,7 +1905,7 @@ SYSEOF
         echo -e "  ${CYAN}UDP порт AmneziaWG. Дефолт 1618, можно любой свободный.${NC}"
         ask "UDP порт" "$srv_port" srv_port
         if ! validate_port "$srv_port"; then print_err "Порт 1-65535"; continue; fi
-        if ss -ulnp 2>/dev/null | grep -q ":${srv_port} "; then
+        if ss -H -uln 2>/dev/null | grep -Eq "[:.]${srv_port}[[:space:]]"; then
             print_warn "Порт ${srv_port} уже занят"; continue
         fi
         break
@@ -1580,7 +1961,7 @@ SYSEOF
         echo -e "  ${GREEN}2)${NC} Дефолт: 8.8.8.8, 1.1.1.1, 9.9.9.9"
         echo ""
         while true; do
-            echo -ne "  ${BOLD}Выбор?${NC} "; read -r dns_ch
+            ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" dns_ch
             case "$dns_ch" in
                 1) client_dns="${srv_tunnel_ip}"; break ;;
                 2) break ;;
@@ -1601,7 +1982,7 @@ SYSEOF
     echo ""
     local allowed="0.0.0.0/0"
     while true; do
-        echo -ne "  ${BOLD}Выбор?${NC} "; read -r rt_ch
+        ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" rt_ch
         case "$rt_ch" in
             1) allowed="0.0.0.0/0"; break ;;
             2) allowed="$tunnel_subnet"; break ;;
@@ -1618,7 +1999,7 @@ SYSEOF
     echo -e "  ${GREEN}2)${NC} 1320 - баланс (рекомендуется 'ЭТО БАЗА')"
     echo -e "  ${GREEN}3)${NC} 1420 - максимальная скорость (чистый Ethernet)"
     while true; do
-        echo -ne "  ${BOLD}Выбор?${NC} [2]: "; read -r mtu_ch
+        ask_raw "$(printf '  \033[1mВыбор?\033[0m [2]: ')" mtu_ch
         case "${mtu_ch:-2}" in
             1) tunnel_mtu="1280"; break ;;
             2) tunnel_mtu="1320"; break ;;
@@ -1639,11 +2020,11 @@ SYSEOF
         local obf_auto=""
         ask_yn "Сгенерировать параметры автоматически?" "y" obf_auto
         case "$AWG_VER" in
-            2.0) _awg_gen_obf_v2  "$obf_auto" ;;
-            1.5) _awg_gen_obf_v15 "$obf_auto" ;;
-            *)   _awg_gen_obf_v1  "$obf_auto" ;;
+            2.0) _awg_gen_obf_v2  "$obf_auto" "$tunnel_mtu" ;;
+            1.5) _awg_gen_obf_v15 "$obf_auto" "$tunnel_mtu" ;;
+            *)   _awg_gen_obf_v1  "$obf_auto" "$tunnel_mtu" ;;
         esac
-        print_ok "Параметры сгенерированы (AWG ${AWG_VER})"
+        print_ok "Параметры сгенерированы (AWG ${AWG_VER}, MTU ${tunnel_mtu})"
         print_info "Jc=${OBF_JC} Jmin=${OBF_JMIN} Jmax=${OBF_JMAX} S1=${OBF_S1} S2=${OBF_S2}"
         [[ -n "$OBF_S3" ]] && print_info "S3=${OBF_S3} S4=${OBF_S4}"
         print_info "H1=${OBF_H1} H2=${OBF_H2} H3=${OBF_H3} H4=${OBF_H4}"
@@ -1656,8 +2037,7 @@ SYSEOF
     echo -e "  ${CYAN}Для каждого будет создан отдельный конфиг-файл с QR-кодом.${NC}"
     local client_count=""
     while true; do
-        echo -ne "  ${BOLD}Сколько клиентов создать (1-50)?${NC} "
-        read -r client_count
+        ask_raw "$(printf '  \033[1mСколько клиентов создать (1-50)?\033[0m ')" client_count
         [[ "$client_count" =~ ^[0-9]+$ ]] && [[ "$client_count" -ge 1 ]] && [[ "$client_count" -le 50 ]] && break
         print_err "Число от 1 до 50"
     done
@@ -1670,7 +2050,7 @@ SYSEOF
             ask "Имя клиента #${ci}" "client${ci}" cname
             if ! validate_name "$cname"; then print_err "Буквы, цифры, дефис, подчёркивание"; continue; fi
             local dup=false
-            for ex in "${client_names[@]:-}"; do [[ "$ex" == "$cname" ]] && dup=true && break; done
+            for ex in "${client_names[@]}"; do [[ "$ex" == "$cname" ]] && dup=true && break; done
             if $dup; then print_err "Имя '${cname}' уже используется"; continue; fi
             client_names+=("$cname"); print_ok "Клиент #${ci}: ${cname}"; break
         done
@@ -1705,7 +2085,7 @@ ListenPort = ${srv_port}
 PrivateKey = ${srv_priv}
 $(_awg_obf_conf_lines)
 PostUp = iptables -A FORWARD -i ${iface} -j ACCEPT; iptables -A FORWARD -o ${iface} -j ACCEPT; iptables -t nat -A POSTROUTING -o ${main_iface} -j MASQUERADE; iptables -t mangle -A FORWARD -o ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu; iptables -t mangle -A FORWARD -i ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostDown = iptables -D FORWARD -i ${iface} -j ACCEPT; iptables -D FORWARD -o ${iface} -j ACCEPT; iptables -t nat -D POSTROUTING -o ${main_iface} -j MASQUERADE; iptables -t mangle -D FORWARD -o ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu; iptables -t mangle -D FORWARD -i ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = iptables -D FORWARD -i ${iface} -j ACCEPT || true; iptables -D FORWARD -o ${iface} -j ACCEPT || true; iptables -t nat -D POSTROUTING -o ${main_iface} -j MASQUERADE || true; iptables -t mangle -D FORWARD -o ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true; iptables -t mangle -D FORWARD -i ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 CONFEOF
     chmod 600 "$conf"
 
@@ -1781,6 +2161,11 @@ TUNNEL_MTU="${tunnel_mtu}"
 $(_awg_obf_env_lines)
 LEGEOF
     chmod 600 "${AWG_SETUP_DIR}/server.env"
+
+    # - выставляем глобально для последующего Keenetic export в текущем shell -
+    SERVER_ENDPOINT_IP="$endpoint_ip"
+    SERVER_PORT="$srv_port"
+    TUNNEL_MTU="$tunnel_mtu"
 
     # - IP forwarding -
     if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.d/99-awg-forward.conf 2>/dev/null; then
@@ -1995,7 +2380,7 @@ awg_create_iface() {
         echo -e "  ${CYAN}UDP порт для этого туннеля (1-65535). Должен быть свободен и не совпадать с другими.${NC}"
         ask "UDP порт" "$port" port
         if ! validate_port "$port"; then print_err "Порт 1-65535"; continue; fi
-        if ss -ulnp 2>/dev/null | grep -q ":${port} "; then print_warn "Занят"; continue; fi
+        if ss -H -uln 2>/dev/null | grep -Eq "[:.]${port}[[:space:]]"; then print_warn "Занят"; continue; fi
         break
     done
 
@@ -2053,7 +2438,7 @@ awg_create_iface() {
         echo -e "  ${GREEN}1)${NC} Unbound: ${srv_tunnel_ip}"
         echo -e "  ${GREEN}2)${NC} Дефолт: 8.8.8.8, 1.1.1.1, 9.9.9.9"
         while true; do
-            echo -ne "  ${BOLD}Выбор?${NC} "; read -r dns_ch
+            ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" dns_ch
             case "$dns_ch" in 1) dns="${srv_tunnel_ip}"; break ;; 2) break ;; *) print_warn "1 или 2" ;; esac
         done
     fi
@@ -2065,7 +2450,7 @@ awg_create_iface() {
     echo -e "  ${GREEN}2)${NC} ${tunnel_subnet} (только туннель)"
     echo -e "  ${GREEN}3)${NC} Вручную"
     while true; do
-        echo -ne "  ${BOLD}Выбор?${NC} "; read -r rt_ch
+        ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" rt_ch
         case "$rt_ch" in
             1) allowed_ips="0.0.0.0/0"; break ;; 2) allowed_ips="$tunnel_subnet"; break ;;
             3) ask "AllowedIPs" "0.0.0.0/0" allowed_ips; break ;; *) print_warn "1, 2 или 3" ;;
@@ -2080,7 +2465,7 @@ awg_create_iface() {
     echo -e "  ${GREEN}2)${NC} 1320 - баланс (рекомендуется)"
     echo -e "  ${GREEN}3)${NC} 1420 - максимальная скорость"
     while true; do
-        echo -ne "  ${BOLD}Выбор?${NC} [2]: "; read -r mtu_ch
+        ask_raw "$(printf '  \033[1mВыбор?\033[0m [2]: ')" mtu_ch
         case "${mtu_ch:-2}" in
             1) tunnel_mtu="1280"; break ;;
             2) tunnel_mtu="1320"; break ;;
@@ -2097,9 +2482,9 @@ awg_create_iface() {
         local gen_obf=""
         ask_yn "Сгенерировать параметры обфускации автоматически?" "y" gen_obf
         case "$AWG_VER" in
-            2.0) _awg_gen_obf_v2  "$gen_obf" ;;
-            1.5) _awg_gen_obf_v15 "$gen_obf" ;;
-            *)   _awg_gen_obf_v1  "$gen_obf" ;;
+            2.0) _awg_gen_obf_v2  "$gen_obf" "$tunnel_mtu" ;;
+            1.5) _awg_gen_obf_v15 "$gen_obf" "$tunnel_mtu" ;;
+            *)   _awg_gen_obf_v1  "$gen_obf" "$tunnel_mtu" ;;
         esac
     fi
 
@@ -2123,7 +2508,7 @@ ListenPort = ${port}
 PrivateKey = ${srv_priv}
 $(_awg_obf_conf_lines)
 PostUp = iptables -A FORWARD -i ${iface} -j ACCEPT; iptables -A FORWARD -o ${iface} -j ACCEPT; iptables -t nat -A POSTROUTING -o ${main_iface} -j MASQUERADE; iptables -t mangle -A FORWARD -o ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu; iptables -t mangle -A FORWARD -i ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostDown = iptables -D FORWARD -i ${iface} -j ACCEPT; iptables -D FORWARD -o ${iface} -j ACCEPT; iptables -t nat -D POSTROUTING -o ${main_iface} -j MASQUERADE; iptables -t mangle -D FORWARD -o ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu; iptables -t mangle -D FORWARD -i ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = iptables -D FORWARD -i ${iface} -j ACCEPT || true; iptables -D FORWARD -o ${iface} -j ACCEPT || true; iptables -t nat -D POSTROUTING -o ${main_iface} -j MASQUERADE || true; iptables -t mangle -D FORWARD -o ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true; iptables -t mangle -D FORWARD -i ${iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 CONFEOF
     chmod 600 "$conf"
     mkdir -p "$(awg_iface_clients "$iface")"; chmod 700 "$(awg_iface_clients "$iface")"
@@ -2143,6 +2528,11 @@ TUNNEL_MTU="${tunnel_mtu}"
 $(_awg_obf_env_lines)
 ENVEOF
     chmod 600 "$(awg_iface_env "$iface")"
+
+    # - выставляем глобально на случай если в текущем shell дальше потребуется -
+    SERVER_ENDPOINT_IP="$endpoint_ip"
+    SERVER_PORT="$port"
+    TUNNEL_MTU="$tunnel_mtu"
 
     # - IP forwarding + запуск -
     if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.d/99-awg-forward.conf 2>/dev/null; then
@@ -2234,7 +2624,7 @@ awg_change_dns() {
         iface_arr+=("$iface"); i=$(( i + 1 ))
     done
     echo ""
-    echo -ne "  ${BOLD}Выбор?${NC} "; read -r sel
+    ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" sel
     if ! [[ "$sel" =~ ^[0-9]+$ ]] || [[ "$sel" -lt 1 ]] || [[ "$sel" -gt ${#iface_arr[@]} ]]; then
         print_warn "Неверный выбор"; return 0
     fi
@@ -2252,7 +2642,7 @@ awg_change_dns() {
         echo -e "  ${GREEN}1)${NC} Unbound: ${SERVER_TUNNEL_IP}"
         echo -e "  ${GREEN}2)${NC} Дефолт: 8.8.8.8, 1.1.1.1, 9.9.9.9"
         while true; do
-            echo -ne "  ${BOLD}Выбор?${NC} "; read -r dns_ch
+            ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" dns_ch
             case "$dns_ch" in
                 1) new_dns="${SERVER_TUNNEL_IP}"; break ;;
                 2) new_dns="8.8.8.8, 1.1.1.1, 9.9.9.9"; break ;;
@@ -2375,7 +2765,7 @@ awg_add_client() {
         echo -e "  ${GREEN}2)${NC} ${TUNNEL_SUBNET}"
         echo -e "  ${GREEN}3)${NC} Вручную"
         while true; do
-            echo -ne "  ${BOLD}Выбор?${NC} "; read -r rc
+            ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" rc
             case "$rc" in
                 1) client_allowed="0.0.0.0/0"; break ;;
                 2) client_allowed="$TUNNEL_SUBNET"; break ;;
