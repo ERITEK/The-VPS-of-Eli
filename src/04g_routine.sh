@@ -34,7 +34,7 @@ Compress=yes
 EOF
     systemctl restart systemd-journald
     journalctl --vacuum-size=300M --vacuum-time=1month >/dev/null 2>&1 || true
-    local jsize; jsize=$(journalctl --disk-usage 2>/dev/null | grep -oP '[\d.]+ [KMGT]?B' | tail -1 || echo "?")
+    local jsize; jsize=$(journalctl --disk-usage 2>/dev/null | grep -oP '[\d.]+\s*[KMGTPE]i?B?' | tail -1 || echo "?")
     print_ok "Journald лимит: 300 MB (текущий: ${jsize})"
 
     # --> DOCKER CLEANUP <--
@@ -65,7 +65,7 @@ CLEANUP
     create 0640 root root
 }
 EOF
-        print_ok "Profil AmneziaWG добавлен"
+        print_ok "Профиль AmneziaWG добавлен"
     fi
     logrotate --debug /etc/logrotate.conf >/dev/null 2>&1 \
         && print_ok "Logrotate: конфиг OK" \
@@ -113,7 +113,7 @@ DISKMON
     _add_cron "0 1 * * 0 /usr/local/bin/docker-cleanup.sh" "Docker cleanup вс 1:00 UTC"
     _add_cron "0 9 * * * /usr/local/bin/disk-monitor.sh" "Мониторинг диска 9:00 UTC"
     _add_cron "0 3 * * 1 apt-get update -qq && apt-get upgrade --dry-run 2>/dev/null | grep -E '^[0-9]+ upgraded' | logger -t apt-check" "Проверка обновлений пн 3:00 UTC"
-    _add_cron "@reboot sleep 90 && /usr/local/bin/eli-healthcheck.sh" "Healthcheck через 90 сек после reboot"
+    _add_cron "@reboot sleep 90; /usr/local/bin/eli-healthcheck.sh" "Healthcheck через 90 сек после reboot"
 
     echo "$current_cron" | crontab -
     print_ok "Crontab обновлён"
@@ -309,5 +309,6 @@ HCEOF
     echo -e "  ${CYAN}*${NC} Healthcheck:     @reboot +90 сек"
     echo -e "  ${CYAN}*${NC} Journald:        лимит 300 MB"
     echo ""
+    eli_pause
     return 0
 }
