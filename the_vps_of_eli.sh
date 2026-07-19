@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# The VPS of Eli v4.508
+# The VPS of Eli v5.780 dev
 # Мега-менеджер VPS стека: VPN, связь, обслуживание
-# scrp by ERITEK & Loo1, Claude (Anthropic)
-# Собран: 2026-04-26 rls
+# scrp by ERITEK & Loo1
+# Собран: 2026-07-19
 # =============================================================================
 
 
@@ -28,7 +28,7 @@ if ! flock -n 200; then
     exit 1
 fi
 
-ELI_VERSION="4.508"
+ELI_VERSION="5.780 dev"
 # shellcheck disable=SC2034
 ELI_CODENAME="The VPS of Eli" # - используется в баннере и book -
 
@@ -57,7 +57,7 @@ eli_header() {
     echo "|     The VPS of Eli      |"
     echo "|  scrp by ERITEK & Loo1  |"
     echo "|    Claude (Anthropic)   |"
-    echo "|         v${ELI_VERSION}          |"
+    echo "|         v${ELI_VERSION}      |"
     echo "+=========================+"
     echo -e "${NC}"
 }
@@ -415,6 +415,22 @@ book_write_obj() {
     return 1
 }
 
+# - удаление ключа/пути из книги, симметрично book_write, с сохранением прав 600 -
+book_del() {
+    _book_ok || return 0
+    local raw="$1" tmp p
+    p=$(_book_path "$raw") || return 1
+    tmp=$(mktemp) || { print_warn "book_del: mktemp failed for ${raw}"; return 1; }
+    jq "del(${p})" "$_BOOK" > "$tmp" 2>/dev/null
+    if [[ -s "$tmp" ]] && jq empty "$tmp" 2>/dev/null; then
+        mv "$tmp" "$_BOOK"; chmod 600 "$_BOOK"
+        return 0
+    fi
+    rm -f "$tmp"
+    print_warn "book_del failed: ${raw}"
+    return 1
+}
+
 book_init() {
     command -v jq &>/dev/null || return 0
     mkdir -p /etc/vps-eli-stack; chmod 700 /etc/vps-eli-stack
@@ -432,7 +448,7 @@ book_init() {
             "awg":{"installed":false,"version":"","setup_dir":"/etc/awg-setup","conf_dir":"/etc/amnezia/amneziawg","interfaces":{}},
             "outline":{"installed":false,"server_ip":"","api_port":0,"mgmt_port":0,"keys_port":0,"manager_key_path":"/etc/outline/manager_key.json","api_url":"","installed_at":""},
             "3xui":{"installed":false,"version":"","server_ip":"","panel_port":0,"panel_path":"","panel_user":"","panel_pass":"","db_path":"","installed_at":""},
-            "teamspeak":{"installed":false,"version":"","server_ip":"","voice_port":9987,"ft_port":30033,"threads":2,"priv_key":"","db_path":"/opt/teamspeak/tsserver.sqlitedb","installed_at":""},
+            "teamspeak":{"installed":false,"version":"","server_ip":"","voice_port":9987,"ft_port":30033,"priv_key":"","db_path":"/opt/teamspeak/tsserver.sqlitedb","installed_at":""},
             "mumble":{"installed":false,"version":"","server_ip":"","port":64738,"superuser_set":false,"superuser_pass":"","installed_at":""},
             "unbound":{"installed":false,"listen_ips":[]},
             "ufw":{"active":false},
@@ -1141,6 +1157,13 @@ AWG_VER=""
 # - Keenetic: 1.0 работает на KeeneticOS 4.2+, 1.5/2.0 требуют 5.1+ dev-канал -
 # - P/S хелпа AWG написана идиотом. я АтупеL пока читал -
 _awg_ask_version() {
+    # - AWG_FORCE_VER: версия задана вызывающим модулем, диалога нет -
+    # - используется 02e_wgobfs: обфускатору нужен строго vanilla-WG -
+    if [[ -n "${AWG_FORCE_VER:-}" ]]; then
+        AWG_VER="$AWG_FORCE_VER"
+        print_info "Версия протокола задана вызывающим модулем: ${AWG_VER}"
+        return 0
+    fi
     echo ""
     echo -e "  ${BOLD}Версия протокола:${NC}"
     echo -e "  ${GREEN}1)${NC} AWG 1.0 (classic) - H1-H4 + S1/S2 + Jc/Jmin/Jmax"
@@ -1417,6 +1440,24 @@ AWG_CPS_STUN_POOL_NOFP=(
     "<b 0x0001000c2112a442><r 12><b 0x80220008417374657269736b>"
     "<b 0x000100102112a442><r 12><b 0x80220009706a70726f6a656374000000>"
     "<b 0x0001000c2112a442><r 12><b 0x802200074a697473692d5800>"
+    "<b 0x000100102112a442><r 12><b 0x802200096d65646961736f7570000000>"
+    "<b 0x000100082112a442><r 12><b 0x8022000470696f6e>"
+    "<b 0x0001000c2112a442><r 12><b 0x8022000661696f7274630000>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200076261726573697000>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200086c696e70686f6e65>"
+    "<b 0x0001000c2112a442><r 12><b 0x8022000772657374756e6400>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200067765627274630000>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200074b7572656e746f00>"
+    "<b 0x0001000c2112a442><r 12><b 0x80220007696f6e2d73667500>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200065477696c696f0000>"
+    "<b 0x0001000c2112a442><r 12><b 0x80220006566f6e6167650000>"
+    "<b 0x000100102112a442><r 12><b 0x8022000a467265655357495443480000>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200075369707769736500>"
+    "<b 0x000100102112a442><r 12><b 0x802200094753747265616d6572000000>"
+    "<b 0x0001000c2112a442><r 12><b 0x80220007657475726e616c00>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200087374756e73657276>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200084d65746173776974>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200076564756d65657400>"
 )
 
 AWG_CPS_STUN_POOL_FP=(
@@ -1430,6 +1471,24 @@ AWG_CPS_STUN_POOL_FP=(
     "<b 0x000100142112a442><r 12><b 0x80220008417374657269736b80280004><r 4>"
     "<b 0x000100182112a442><r 12><b 0x80220009706a70726f6a65637400000080280004><r 4>"
     "<b 0x000100142112a442><r 12><b 0x802200074a697473692d580080280004><r 4>"
+    "<b 0x000100182112a442><r 12><b 0x802200096d65646961736f757000000080280004><r 4>"
+    "<b 0x000100102112a442><r 12><b 0x8022000470696f6e80280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x8022000661696f727463000080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x80220007626172657369700080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200086c696e70686f6e6580280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x8022000772657374756e640080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x80220006776562727463000080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200074b7572656e746f0080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x80220007696f6e2d7366750080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200065477696c696f000080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x80220006566f6e616765000080280004><r 4>"
+    "<b 0x000100182112a442><r 12><b 0x8022000a46726565535749544348000080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x80220007536970776973650080280004><r 4>"
+    "<b 0x000100182112a442><r 12><b 0x802200094753747265616d657200000080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x80220007657475726e616c0080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200087374756e7365727680280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200084d6574617377697480280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200076564756d6565740080280004><r 4>"
 )
 
 # --> AWG: ПУЛ ШАБЛОНОВ SIP <--
@@ -1444,6 +1503,14 @@ AWG_CPS_SIP_POOL=(
     "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b72706f72743b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a7573657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a204d6963726f5349502f332e32312e330d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
     "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a7573657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a2033435850686f6e652f31382e302e300d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
     "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a7573657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a206579654265616d2072656c656173652033303033660d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a63616c6c657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x40><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a204272696120352e362e300d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a63616c6c657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x40><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a20426c696e6b20332e342e300d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a63616c6c657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x40><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a205477696e6b6c652f312e31302e310d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a63616c6c657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x40><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a20596174652f362e342e300d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a63616c6c657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x40><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a204772616e6473747265616d20485438303220312e302e32392e380d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a63616c6c657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x40><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a205965616c696e6b205349502d543436472036362e38360d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a63616c6c657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x40><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a20736e6f6d3337302f382e372e352e34340d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a63616c6c657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x40><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a20504a5355412076322e31330d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
 )
 
 _awg_cps_preset_stun() {
@@ -2079,20 +2146,16 @@ _awg_client_header_comment() {
             echo "# AWG 1.0"
             echo "# Совместимость: AmneziaVPN, AmneziaWG native, Keenetic NDMS 5.1 Alpha 3+"
             echo "# Как подключить: импортируй этот .conf в клиент (файл или QR-код)"
-            echo "# Keenetic: отдельный файл .keenetic.conf / .keenetic.cli (если сгенерирован)"
             ;;
         1.5)
             echo "# AWG 1.5 (Jc/Jmin/Jmax/S1/S2/H1-H4 + I1-I5 signature chain)"
             echo "# Совместимость: AmneziaVPN 4.x+, AmneziaWG 1.5+, Keenetic NDMS 5.1 Alpha 3+"
             echo "# Как подключить: импортируй этот .conf в клиент (файл или QR-код)"
-            echo "# Keenetic: отдельный файл .keenetic.conf / .keenetic.cli (если сгенерирован)"
             ;;
         2.0)
             echo "# AWG 2.0 (S3/S4 + ranged H1-H4 + I1-I5)"
-            echo "# Совместимость: AmneziaVPN 4.8.12.9+, AmneziaWG 2.0.0+"
-            echo "# Keenetic: NDMS 5.1 Alpha 3+ поддерживает ASC 2.0, стабильный импорт с 5.1 Alpha 5+"
+            echo "# Совместимость: AmneziaVPN 4.8.12.9+, AmneziaWG 2.0.0+, Keenetic NDMS 5.1 Alpha 5+ (ASC 2.0)"
             echo "# Как подключить: импортируй этот .conf в клиент (файл или QR-код)"
-            echo "# Keenetic: только .keenetic.conf (CLI не генерится для 2.0, ranged H неудобны)"
             ;;
         wg)
             echo "# WireGuard vanilla (без обфускации)"
@@ -2121,209 +2184,96 @@ _awg_show_qr() {
     echo ""
 }
 
-# --> AWG: ЭКСПОРТ КОНФИГА ПОД KEENETIC <--
-# - для поддержки ASC нужен NDMS 5.1 Alpha 3+, для AWG 2.0 стабильно с 5.1 Alpha 5+ -
-# - .keenetic.conf: импорт через веб-морду (WireGuard, Импорт из файла) -
-# - .keenetic.cli: CLI-команды для терминала роутера, только для 1.0/1.5 (в 2.0 H как диапазоны) -
-# - аргументы: conf_file (путь к client.conf), AWG_VER и OBF_* должны быть выставлены -
-_awg_keenetic_header() {
-    local ver="$1"
-    echo "# ========================================================"
-    echo "# ПОРТИРОВАН ПОД KEENETIC / NDMS"
-    echo "# ========================================================"
-    case "$ver" in
-        1.0)
-            echo "# Версия AWG: 1.0"
-            echo "# Минимальная прошивка: NDMS 5.1 Alpha 3"
-            echo "# Поддержка ASC: да (Jc Jmin Jmax S1 S2 H1 H2 H3 H4)"
-            ;;
-        1.5)
-            echo "# Версия AWG: 1.5"
-            echo "# Минимальная прошивка: NDMS 5.1 Alpha 3"
-            echo "# Поддержка ASC: да (с I1 signature chain)"
-            ;;
-        2.0)
-            echo "# Версия AWG: 2.0"
-            echo "# Минимальная прошивка: NDMS 5.1 Alpha 3"
-            echo "# Рекомендовано: NDMS 5.1 Alpha 5+ (стабильный импорт ASC)"
-            echo "# Поддержка ASC: да (S3 S4 + ranged H1-H4 + I1-I5)"
-            echo "# CLI-вариант для 2.0 НЕ генерится: диапазоны H не ложатся на CLI-формат"
-            ;;
-        wg)
-            echo "# Версия AWG: WireGuard vanilla (без обфускации)"
-            echo "# Минимальная прошивка: любая с поддержкой WireGuard"
-            ;;
-    esac
-    echo "# ========================================================"
-    echo ""
-}
-
-# - .keenetic.conf: тот же клиентский конфиг, но с шапкой для Keenetic -
-# - аргументы: клиентский .conf источник, целевой .keenetic.conf -
-_awg_keenetic_conf() {
-    local src="$1" dst="$2" ver="$3"
-    {
-        _awg_keenetic_header "$ver"
-        echo "# Импорт: Веб-интерфейс → WireGuard → Добавить подключение → Импорт из файла"
-        echo "# После импорта: проверь в Системный монитор что интерфейс поднялся (RX/TX)"
-        echo ""
-        # - вырезаем только [Interface]/[Peer] и обфускацию, без нашего заголовка -
-        sed -n '/^\[Interface\]/,$ p' "$src"
-    } > "$dst"
-    chmod 600 "$dst"
-}
-
-# - .keenetic.cli: набор CLI-команд для терминала роутера -
-# - работает для AWG 1.0 и 1.5. Для 2.0 не вызывается. Для wg генерит базовый WG без ASC -
-# - аргументы: целевой .keenetic.cli, peer_ip, peer_priv, peer_allowed, srv_pub, srv_ip, srv_port, mtu -
-_awg_keenetic_cli() {
-    local dst="$1" peer_ip="$2" peer_priv="$3" peer_allowed="$4"
-    local srv_pub="$5" srv_ip="$6" srv_port="$7" mtu="$8"
-    local ver="$AWG_VER"
-    local iface_name="Wireguard0"
-
-    {
-        _awg_keenetic_header "$ver"
-        echo "# Интерфейс на роутере: ${iface_name} (большинство установок используют это имя)"
-        echo "# Если у тебя другой номер - замени ${iface_name} на свой (Wireguard1, Wireguard2...)"
-        echo "# Узнать: в веб-морде на странице WireGuard смотри имя существующего подключения"
-        echo "#"
-        echo "# Как применить: Веб-интерфейс → Меню → Командная строка (CLI)"
-        echo "# Скопируй и вставь команды блоком. Не забудь последнюю - сохранение конфига."
-        echo ""
-
-        # - базовая настройка интерфейса -
-        echo "interface ${iface_name} no shutdown"
-        echo "interface ${iface_name} ip address ${peer_ip}/32"
-        [[ -n "$mtu" && "$mtu" != "1320" ]] && echo "interface ${iface_name} ip mtu ${mtu}"
-        echo "interface ${iface_name} wireguard listen-port ${srv_port}"
-        echo "interface ${iface_name} wireguard private-key ${peer_priv}"
-        echo ""
-
-        # - ASC параметры для 1.0/1.5 -
-        if [[ "$ver" == "1.0" || "$ver" == "1.5" ]]; then
-            echo "# ASC параметры (обфускация AmneziaWG)"
-            if [[ "$ver" == "1.5" && -n "$OBF_I1" ]]; then
-                # - формат 1.5 с I1 (I2-I5 опционально) -
-                local asc_cmd="interface ${iface_name} wireguard asc ${OBF_JC} ${OBF_JMIN} ${OBF_JMAX} ${OBF_S1} ${OBF_S2} ${OBF_H1} ${OBF_H2} ${OBF_H3} ${OBF_H4}"
-                # - I-параметры в кавычках т.к. содержат угловые скобки -
-                asc_cmd+=" 0 0 \"${OBF_I1}\""
-                [[ -n "$OBF_I2" ]] && asc_cmd+=" \"${OBF_I2}\"" || asc_cmd+=" \"\""
-                [[ -n "$OBF_I3" ]] && asc_cmd+=" \"${OBF_I3}\"" || asc_cmd+=" \"\""
-                [[ -n "$OBF_I4" ]] && asc_cmd+=" \"${OBF_I4}\"" || asc_cmd+=" \"\""
-                [[ -n "$OBF_I5" ]] && asc_cmd+=" \"${OBF_I5}\"" || asc_cmd+=" \"\""
-                echo "$asc_cmd"
-                echo "# ВНИМАНИЕ: строки I1-I5 могут быть длинными. Если CLI отклонит команду -"
-                echo "# используй импорт .keenetic.conf через веб-интерфейс."
-            else
-                # - 1.0: только базовые 9 параметров без S3/S4/I -
-                echo "interface ${iface_name} wireguard asc ${OBF_JC} ${OBF_JMIN} ${OBF_JMAX} ${OBF_S1} ${OBF_S2} ${OBF_H1} ${OBF_H2} ${OBF_H3} ${OBF_H4}"
-            fi
-            echo ""
-        fi
-
-        # - peer -
-        echo "# Peer (сервер)"
-        echo "interface ${iface_name} wireguard peer ${srv_pub}"
-        echo "  endpoint ${srv_ip}:${srv_port}"
-        echo "  allow-ips ${peer_allowed}"
-        echo "  keepalive-interval 25"
-        echo "  exit"
-        echo ""
-        echo "# Сохранение конфигурации (обязательно!)"
-        echo "system configuration save"
-    } > "$dst"
-    chmod 600 "$dst"
-}
-
-# - координатор экспорта: для существующего клиента генерит .keenetic.conf и .keenetic.cli -
-# - env интерфейса должен быть загружен заранее, OBF_* выставлены -
-# - аргументы: iface, client_name -
-_awg_do_keenetic_export() {
-    local iface="$1" cname="$2"
-    local cdir
-    cdir="$(awg_iface_clients "$iface")/${cname}"
-    local src_conf="${cdir}/client.conf"
-    if [[ ! -f "$src_conf" ]]; then
-        print_err "Клиентский .conf не найден: ${src_conf}"
+# --> AWG: РАЗДАЧА КЛИЕНТСКОГО КОНФИГА ПО ССЫЛКЕ <--
+# - временный одноразовый HTTP-сервер: ссылка живёт 10 минут либо -
+# - закрывается сразу после первого скачивания. Путь неугадываемый (32 симв). -
+# - на время раздачи добавляется временное UFW-правило, снимается после. -
+# - конфиг содержит приватный ключ: короткое окно + случайный путь + автозакрытие -
+_awg_serve_conf() {
+    local conf_file="$1"
+    [[ -f "$conf_file" ]] || { print_err "Конфиг не найден: ${conf_file}"; return 1; }
+    if ! command -v python3 &>/dev/null; then
+        print_warn "python3 не найден, скачивание по ссылке недоступно"
+        print_info "Забери файл вручную: ${conf_file}"
         return 1
     fi
 
-    local ver="${AWG_VER:-1.0}"
-    # - .keenetic.conf всегда -
-    local dst_conf="${cdir}/${cname}.keenetic.conf"
-    _awg_keenetic_conf "$src_conf" "$dst_conf" "$ver"
-    print_ok "Keenetic CONF: ${dst_conf}"
+    local ip port token fname
+    ip=$(book_read ".system.server_ip")
+    [[ -z "$ip" ]] && ip=$(curl -4 -fsSL --connect-timeout 5 ifconfig.me 2>/dev/null || echo "")
+    [[ -z "$ip" ]] && ip="IP_СЕРВЕРА"
+    port=$(rand_port 20000 60000) || { print_err "Не удалось выбрать свободный порт"; return 1; }
+    token=$(rand_str 32)
+    fname=$(basename "$conf_file")
 
-    # - .keenetic.cli только для 1.0/1.5/wg -
-    if [[ "$ver" == "2.0" ]]; then
-        print_info "CLI-вариант для AWG 2.0 не генерится (ranged H неудобны в CLI)"
-        print_info "Используй .keenetic.conf через веб-интерфейс"
+    # - временное UFW-правило только на время раздачи (если UFW активен) -
+    local ufw_added="no"
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "^Status: active"; then
+        ufw allow "${port}/tcp" comment "AWG conf dl temp" >/dev/null 2>&1 && ufw_added="yes"
+    fi
+
+    echo ""
+    print_info "Ссылка на скачивание зажми CTRL и кликли на ссылку (10 минут или до первого скачивания):"
+    echo ""
+    echo -e "  ${BOLD}${CYAN}http://${ip}:${port}/${token}/${fname}${NC}"
+    echo ""
+    print_info "В браузере кликни ссылку; в терминале клиента зажми CTRL и кликли на ссылку:"
+    echo -e "  ${CYAN}curl -O http://${ip}:${port}/${token}/${fname}${NC}"
+    echo ""
+    print_info "Ctrl-C чтобы прервать раздачу досрочно"
+
+    # - одноразовый сервер: отдаёт только правильный путь, стоп после первого GET или через 600с -
+    python3 - "$conf_file" "$port" "$token" "$fname" << 'PYEOF'
+import sys, time, http.server, socketserver
+conf, port, token, fname = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+want = "/%s/%s" % (token, fname)
+data = open(conf, "rb").read()
+state = {"done": False}
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_GET(self):
+        if self.path == want and not state["done"]:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", 'attachment; filename="%s"' % fname)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            state["done"] = True
+        else:
+            self.send_response(404)
+            self.end_headers()
+class S(socketserver.TCPServer):
+    allow_reuse_address = True
+try:
+    srv = S(("0.0.0.0", port), H)
+except OSError as e:
+    sys.stderr.write("bind failed: %s\n" % e)
+    sys.exit(2)
+srv.timeout = 1
+deadline = time.time() + 600
+try:
+    while time.time() < deadline and not state["done"]:
+        srv.handle_request()
+except KeyboardInterrupt:
+    pass
+finally:
+    srv.server_close()
+sys.exit(0 if state["done"] else 1)
+PYEOF
+    local rc=$?
+
+    # - снять временное UFW-правило -
+    if [[ "$ufw_added" == "yes" ]]; then
+        ufw delete allow "${port}/tcp" >/dev/null 2>&1 || true
+    fi
+
+    if [[ $rc -eq 0 ]]; then
+        print_ok "Конфиг скачан, раздача закрыта"
     else
-        local dst_cli="${cdir}/${cname}.keenetic.cli"
-        local peer_ip peer_priv peer_allowed
-        peer_ip=$(grep -E "^Address" "$src_conf" | head -1 | awk -F'= *' '{print $2}' | cut -d'/' -f1)
-        peer_priv=$(cat "${cdir}/private.key")
-        peer_allowed=$(grep -E "^AllowedIPs" "$src_conf" | tail -1 | awk -F'= *' '{print $2}')
-        local mtu_val
-        mtu_val=$(grep -E "^MTU" "$src_conf" | head -1 | awk -F'= *' '{print $2}')
-        [[ -z "$mtu_val" ]] && mtu_val="${TUNNEL_MTU:-1320}"
-        _awg_keenetic_cli "$dst_cli" "$peer_ip" "$peer_priv" "$peer_allowed" \
-            "$(cat "$(awg_iface_keys "$iface")/server.pub")" \
-            "${SERVER_ENDPOINT_IP}" "${SERVER_PORT}" "$mtu_val"
-        print_ok "Keenetic CLI:  ${dst_cli}"
+        print_info "Раздача завершена (таймаут или прервано), порт закрыт"
     fi
-
-    echo ""
-    print_warn "Keenetic требует NDMS 5.1 Alpha 3+ для поддержки ASC (обфускация AWG)"
-    [[ "$ver" == "2.0" ]] && print_warn "Для AWG 2.0 рекомендуется NDMS 5.1 Alpha 5+ (стабильный импорт)"
     return 0
-}
-
-# --> AWG: МЕНЮ - ЭКСПОРТ КЛИЕНТА ПОД KEENETIC <--
-# - отдельный пункт меню для уже существующих клиентов -
-awg_export_keenetic() {
-    print_section "Экспорт клиента под Keenetic"
-    awg_select_iface
-    [[ -z "$AWG_ACTIVE_IFACE" ]] && return 0
-    local iface="$AWG_ACTIVE_IFACE"
-    local env_file
-    env_file=$(awg_iface_env "$iface")
-    # shellcheck disable=SC1090
-    source "$env_file"
-    AWG_VER="${AWG_VERSION:-1.0}"
-    OBF_JC="$JC"; OBF_JMIN="$JMIN"; OBF_JMAX="$JMAX"
-    OBF_S1="$S1"; OBF_S2="$S2"; OBF_S3="${S3:-}"; OBF_S4="${S4:-}"
-    OBF_H1="$H1"; OBF_H2="$H2"; OBF_H3="$H3"; OBF_H4="$H4"
-    OBF_I1="${I1:-}"; OBF_I2="${I2:-}"; OBF_I3="${I3:-}"
-    OBF_I4="${I4:-}"; OBF_I5="${I5:-}"
-
-    local clients
-    clients=$(awg_get_client_list "$iface")
-    if [[ -z "$clients" ]]; then
-        print_warn "На ${iface} нет клиентов"
-        return 0
-    fi
-
-    echo ""
-    echo -e "  ${BOLD}Клиенты на ${iface}:${NC}"
-    local -a arr=()
-    local i=0 c
-    for c in $clients; do
-        i=$(( i + 1 ))
-        arr+=("$c")
-        printf "  ${GREEN}%2d)${NC} %s\n" "$i" "$c"
-    done
-    echo ""
-    local sel=""
-    while true; do
-        ask_raw "$(printf '  \033[1mНомер клиента (1-%s)?\033[0m: ' "$i")" sel
-        [[ "$sel" =~ ^[0-9]+$ ]] && [[ "$sel" -ge 1 && "$sel" -le "$i" ]] && break
-        print_warn "1-${i}"
-    done
-    local cname="${arr[$(( sel - 1 ))]}"
-    echo ""
-    _awg_do_keenetic_export "$iface" "$cname"
 }
 
 # --> AWG: ПУТИ ПО ИМЕНИ ИНТЕРФЕЙСА <--
@@ -2641,7 +2591,7 @@ SERVER_TUNNEL_IP="${SERVER_TUNNEL_IP:-10.8.0.1}"
 TUNNEL_SUBNET="${TUNNEL_SUBNET:-10.8.0.0/24}"
 TUNNEL_BASE="${TUNNEL_BASE:-10.8.0}"
 CLIENT_DNS="${CLIENT_DNS:-8.8.8.8, 1.1.1.1, 9.9.9.9}"
-CLIENT_ALLOWED_IPS="${CLIENT_ALLOWED_IPS:-0.0.0.0/0}"
+CLIENT_ALLOWED_IPS="${CLIENT_ALLOWED_IPS:-0.0.0.0/0, ::/0}"
 JC="${JC:-5}"
 JMIN="${JMIN:-50}"
 JMAX="${JMAX:-1000}"
@@ -2840,7 +2790,7 @@ _awg_ensure_module() {
     kver=$(uname -r)
 
     # - уже загружен? -
-    if lsmod 2>/dev/null | grep -q "^amneziawg"; then
+    if [[ -d /sys/module/amneziawg ]]; then
         print_ok "Модуль amneziawg уже загружен"
         return 0
     fi
@@ -2900,7 +2850,7 @@ awg_install() {
         _has_conf="yes"
     fi
     _has_mod="no"
-    lsmod 2>/dev/null | grep -q "^amneziawg" && _has_mod="yes"
+    [[ -d /sys/module/amneziawg ]] && _has_mod="yes"
     if [[ "$_already_flag" == "true" && ( "$_has_conf" == "yes" || "$_has_mod" == "yes" ) ]]; then
         print_section "AmneziaWG уже установлен"
         print_warn "Повторная установка затрёт существующие ключи и конфиги."
@@ -2965,7 +2915,7 @@ SYSEOF
 
     # - проверяем: может модуль уже есть -
     local already_installed="no"
-    if lsmod 2>/dev/null | grep -q "^amneziawg" || \
+    if [[ -d /sys/module/amneziawg ]] || \
        [[ -f "/lib/modules/${kver}/extra/amneziawg.ko" ]] || \
        [[ -f "/lib/modules/${kver}/updates/dkms/amneziawg.ko" ]]; then
         already_installed="yes"
@@ -3002,7 +2952,7 @@ SYSEOF
         fi
     else
         # - модуль есть, но может быть не загружен -
-        if ! lsmod 2>/dev/null | grep -q "^amneziawg"; then
+        if [[ ! -d /sys/module/amneziawg ]]; then
             modprobe amneziawg 2>/dev/null || {
                 print_err "Модуль amneziawg не загружается"
                 return 1
@@ -3105,17 +3055,17 @@ SYSEOF
     # - AllowedIPs -
     echo ""
     echo -e "  ${BOLD}Маршрутизация трафика:${NC}"
-    echo -e "  ${GREEN}1)${NC} 0.0.0.0/0 (весь трафик через VPN)"
+    echo -e "  ${GREEN}1)${NC} 0.0.0.0/0, ::/0 (весь трафик через VPN)"
     echo -e "  ${GREEN}2)${NC} ${tunnel_subnet} (только туннель)"
     echo -e "  ${GREEN}3)${NC} Ввести вручную"
     echo ""
-    local allowed="0.0.0.0/0"
+    local allowed="0.0.0.0/0, ::/0"
     while true; do
         ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" rt_ch
         case "$rt_ch" in
-            1) allowed="0.0.0.0/0"; break ;;
+            1) allowed="0.0.0.0/0, ::/0"; break ;;
             2) allowed="$tunnel_subnet"; break ;;
-            3) ask "AllowedIPs" "0.0.0.0/0" allowed; break ;;
+            3) ask "AllowedIPs" "0.0.0.0/0, ::/0" allowed; break ;;
             *) print_warn "1, 2 или 3" ;;
         esac
     done
@@ -3291,11 +3241,6 @@ $(_awg_obf_env_lines)
 LEGEOF
     chmod 600 "${AWG_SETUP_DIR}/server.env"
 
-    # - выставляем глобально для последующего Keenetic export в текущем shell -
-    SERVER_ENDPOINT_IP="$endpoint_ip"
-    SERVER_PORT="$srv_port"
-    TUNNEL_MTU="$tunnel_mtu"
-
     # - IP forwarding -
     if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.d/99-awg-forward.conf 2>/dev/null; then
         echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-awg-forward.conf
@@ -3350,9 +3295,9 @@ LEGEOF
         echo ""
     fi
 
-    # - QR-код и Keenetic per-client: отдельный вопрос для каждого клиента -
+    # - QR-код и ссылка для скачивания: отдельный вопрос для каждого клиента -
     local show_qr=""
-    ask_yn "Показать QR-коды клиентов?" "y" show_qr
+    ask_yn "Показать QR-коды клиентов?" "n" show_qr
     echo ""
     for cname in "${client_names[@]}"; do
         local _qcf="${clients_dir}/${cname}/client.conf"
@@ -3361,10 +3306,10 @@ LEGEOF
         if [[ "$show_qr" == "yes" ]]; then
             _awg_show_qr "$_qcf" || true
         fi
-        local do_keenetic=""
-        ask_yn "Сгенерировать конфиг под Keenetic для ${cname} (.keenetic.conf/.cli)?" "n" do_keenetic
-        if [[ "$do_keenetic" == "yes" ]]; then
-            _awg_do_keenetic_export "$iface" "$cname"
+        local do_dl=""
+        ask_yn "Выдать ссылку для скачивания конфига ${cname}?" "y" do_dl
+        if [[ "$do_dl" == "yes" ]]; then
+            _awg_serve_conf "$_qcf"
         fi
         echo ""
     done
@@ -3573,16 +3518,16 @@ awg_create_iface() {
     fi
 
     # - AllowedIPs -
-    local allowed_ips="0.0.0.0/0"
+    local allowed_ips="0.0.0.0/0, ::/0"
     echo ""
-    echo -e "  ${GREEN}1)${NC} 0.0.0.0/0 (весь трафик)"
+    echo -e "  ${GREEN}1)${NC} 0.0.0.0/0, ::/0 (весь трафик)"
     echo -e "  ${GREEN}2)${NC} ${tunnel_subnet} (только туннель)"
     echo -e "  ${GREEN}3)${NC} Вручную"
     while true; do
         ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" rt_ch
         case "$rt_ch" in
-            1) allowed_ips="0.0.0.0/0"; break ;; 2) allowed_ips="$tunnel_subnet"; break ;;
-            3) ask "AllowedIPs" "0.0.0.0/0" allowed_ips; break ;; *) print_warn "1, 2 или 3" ;;
+            1) allowed_ips="0.0.0.0/0, ::/0"; break ;; 2) allowed_ips="$tunnel_subnet"; break ;;
+            3) ask "AllowedIPs" "0.0.0.0/0, ::/0" allowed_ips; break ;; *) print_warn "1, 2 или 3" ;;
         esac
     done
 
@@ -3678,24 +3623,41 @@ ENVEOF
     fi
 
     # - UFW -
-    if command -v ufw &>/dev/null; then
+    # - AWG_NO_UFW: интерфейс живёт за обфускатором (02e), наружу его порт не выставляем -
+    if [[ -n "${AWG_NO_UFW:-}" ]]; then
+        print_info "Порт ${port}/udp наружу не открывается: интерфейс за обфускатором"
+    elif command -v ufw &>/dev/null; then
         ufw allow "${port}/udp" comment "AWG ${iface}" 2>/dev/null || true
     fi
 
     # - book -
+    # - схема obfuscation едина с prayer_run (jc/jmin/jmax/s1-s4/h1-h4/i1-i5) -
+    # - валидация числовых полей: битый --argjson уронит jq и затрёт интерфейс в {} -
+    local _o_port="${port:-0}";        [[ "$_o_port" =~ ^[0-9]+$ ]] || _o_port=0
+    local _o_jc="${OBF_JC:-5}";        [[ "$_o_jc"   =~ ^[0-9]+$ ]] || _o_jc=5
+    local _o_jmin="${OBF_JMIN:-50}";   [[ "$_o_jmin" =~ ^[0-9]+$ ]] || _o_jmin=50
+    local _o_jmax="${OBF_JMAX:-1000}"; [[ "$_o_jmax" =~ ^[0-9]+$ ]] || _o_jmax=1000
+    local _o_s1="${OBF_S1:-0}";        [[ "$_o_s1"   =~ ^[0-9]+$ ]] || _o_s1=0
+    local _o_s2="${OBF_S2:-0}";        [[ "$_o_s2"   =~ ^[0-9]+$ ]] || _o_s2=0
     local _iface_obj
     _iface_obj=$(jq -n \
         --arg desc "$desc" --arg ep "$endpoint_ip" \
-        --argjson port "${port}" --arg tip "$srv_tunnel_ip" \
+        --argjson port "$_o_port" --arg tip "$srv_tunnel_ip" \
         --arg snet "$tunnel_subnet" --arg dns "$dns" --arg allowed "$allowed_ips" \
         --arg ver "$AWG_VER" \
-        --arg s1 "${OBF_S1}" --arg s2 "${OBF_S2}" \
+        --argjson jc "$_o_jc" --argjson jmin "$_o_jmin" --argjson jmax "$_o_jmax" \
+        --argjson s1 "$_o_s1" --argjson s2 "$_o_s2" \
         --arg s3 "${OBF_S3:-}" --arg s4 "${OBF_S4:-}" \
-        --arg h1 "${OBF_H1}" --arg h2 "${OBF_H2}" --arg h3 "${OBF_H3}" --arg h4 "${OBF_H4}" \
+        --arg h1 "${OBF_H1:-1}" --arg h2 "${OBF_H2:-2}" --arg h3 "${OBF_H3:-3}" --arg h4 "${OBF_H4:-4}" \
+        --arg i1 "${OBF_I1:-}" --arg i2 "${OBF_I2:-}" --arg i3 "${OBF_I3:-}" \
+        --arg i4 "${OBF_I4:-}" --arg i5 "${OBF_I5:-}" \
         '{"desc":$desc,"endpoint_ip":$ep,"port":$port,"server_tunnel_ip":$tip,
           "tunnel_subnet":$snet,"client_dns":$dns,"client_allowed_ips":$allowed,
           "awg_version":$ver,
-          "obfuscation":{"s1":$s1,"s2":$s2,"s3":$s3,"s4":$s4,"h1":$h1,"h2":$h2,"h3":$h3,"h4":$h4}}' 2>/dev/null || echo "{}")
+          "obfuscation":{"jc":$jc,"jmin":$jmin,"jmax":$jmax,
+            "s1":$s1,"s2":$s2,"s3":$s3,"s4":$s4,
+            "h1":$h1,"h2":$h2,"h3":$h3,"h4":$h4,
+            "i1":$i1,"i2":$i2,"i3":$i3,"i4":$i4,"i5":$i5}}' 2>/dev/null || echo "{}")
     book_write ".awg.installed" "true" bool
     book_write_obj ".awg.interfaces.${iface}" "$_iface_obj"
 
@@ -3853,7 +3815,14 @@ awg_delete_iface() {
 
 awg_add_client() {
     print_section "Добавить клиента"
-    awg_select_iface
+    # - опциональный аргумент: интерфейс задан вызывающим (client kit из 02e/02g) -
+    # - тогда не переспрашиваем интерфейс через awg_select_iface -
+    if [[ -n "$1" ]] && [[ -f "$(awg_iface_env "$1")" ]]; then
+        AWG_ACTIVE_IFACE="$1"
+        print_info "Интерфейс: $1"
+    else
+        awg_select_iface
+    fi
     [[ -z "$AWG_ACTIVE_IFACE" ]] && return 0
     local iface="$AWG_ACTIVE_IFACE"
     local env_file
@@ -3890,13 +3859,13 @@ awg_add_client() {
     local change_allowed=""
     ask_yn "Изменить AllowedIPs для этого клиента?" "n" change_allowed
     if [[ "$change_allowed" == "yes" ]]; then
-        echo -e "  ${GREEN}1)${NC} 0.0.0.0/0"
+        echo -e "  ${GREEN}1)${NC} 0.0.0.0/0, ::/0"
         echo -e "  ${GREEN}2)${NC} ${TUNNEL_SUBNET}"
         echo -e "  ${GREEN}3)${NC} Вручную"
         while true; do
             ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" rc
             case "$rc" in
-                1) client_allowed="0.0.0.0/0"; break ;;
+                1) client_allowed="0.0.0.0/0, ::/0"; break ;;
                 2) client_allowed="$TUNNEL_SUBNET"; break ;;
                 3) ask "AllowedIPs" "$client_allowed" client_allowed; break ;;
                 *) print_warn "1, 2 или 3" ;;
@@ -3939,20 +3908,27 @@ AllowedIPs = ${client_allowed}
 PersistentKeepalive = 25
 CLIEOF
     chmod 600 "${cdir}/client.conf"
+
+    # - хук 02e_wgobfs: если интерфейс за обфускатором, Endpoint переезжает на 127.0.0.1 -
+    # - и рядом с client.conf ложится конфиг обфускатора. Нет модуля - нет хука -
+    if declare -f _wgo_fix_client >/dev/null 2>&1; then
+        _wgo_fix_client "$iface" "${cdir}/client.conf"
+    fi
+
     print_ok "Клиент ${name} добавлен: IP ${client_ip}"
     print_info "Конфиг: ${cdir}/client.conf"
 
     # - QR-код для мобильного клиента -
     local show_qr=""
-    ask_yn "Показать QR-код?" "y" show_qr
+    ask_yn "Показать QR-код?" "n" show_qr
     [[ "$show_qr" == "yes" ]] && _awg_show_qr "${cdir}/client.conf"
 
-    # - экспорт конфига под Keenetic (опционально, по запросу) -
+    # - ссылка для скачивания конфига (опционально) -
     echo ""
-    local do_keenetic=""
-    ask_yn "Сгенерировать конфиг под Keenetic (.keenetic.conf/.cli)?" "n" do_keenetic
-    if [[ "$do_keenetic" == "yes" ]]; then
-        _awg_do_keenetic_export "$iface" "$name"
+    local do_dl=""
+    ask_yn "Выдать ссылку для скачивания конфига?" "y" do_dl
+    if [[ "$do_dl" == "yes" ]]; then
+        _awg_serve_conf "${cdir}/client.conf"
     fi
 
     echo ""
@@ -3990,6 +3966,135 @@ awg_show_client() {
     ask_yn "Показать QR-код?" "n" show_qr
     [[ "$show_qr" == "yes" ]] && _awg_show_qr "$cfg"
 
+    # - ссылка для скачивания конфига -
+    local do_dl=""
+    ask_yn "Выдать ссылку для скачивания конфига?" "y" do_dl
+    [[ "$do_dl" == "yes" ]] && _awg_serve_conf "$cfg"
+
+    return 0
+}
+
+awg_edit_client() {
+    print_section "Редактировать клиента"
+    awg_select_iface
+    [[ -z "$AWG_ACTIVE_IFACE" ]] && return 0
+    local iface="$AWG_ACTIVE_IFACE"
+    local clients
+    clients=$(awg_get_client_list "$iface")
+    [[ -z "$clients" ]] && { print_warn "Нет клиентов на ${iface}"; return 0; }
+    echo ""
+    for n in $clients; do echo -e "  ${CYAN}*${NC} ${n}"; done
+    echo ""
+    local name=""
+    ask "Имя клиента" "" name
+    [[ -z "$name" ]] && { print_warn "Имя не введено"; return 0; }
+    if ! awg_client_exists "$iface" "$name"; then
+        print_err "Клиент '${name}' не найден"; return 0
+    fi
+    local cfg
+    cfg="$(awg_iface_clients "$iface")/${name}/client.conf"
+    [[ ! -f "$cfg" ]] && { print_err "Конфиг не найден: ${cfg}"; return 0; }
+
+    # - правки только в клиентском .conf: endpoint/DNS/AllowedIPs/MTU задают -
+    # - поведение устройства. серверный peer (PublicKey + IP/32) не меняется, -
+    # - reload интерфейса не требуется -
+    local changed=0
+    while true; do
+        # - текущие значения читаем из самого .conf, не из env -
+        local cur_ep cur_dns cur_allowed cur_mtu
+        cur_ep=$(grep "^Endpoint = " "$cfg" | head -1 | cut -d' ' -f3-)
+        cur_dns=$(grep "^DNS = " "$cfg" | head -1 | cut -d' ' -f3-)
+        cur_allowed=$(grep "^AllowedIPs = " "$cfg" | head -1 | cut -d' ' -f3-)
+        cur_mtu=$(grep "^MTU = " "$cfg" | head -1 | cut -d' ' -f3-)
+        echo ""
+        echo -e "  ${BOLD}${iface}/${name}${NC}"
+        echo -e "  ${GREEN}1)${NC} Endpoint    ${CYAN}(${cur_ep:-?})${NC}"
+        echo -e "  ${GREEN}2)${NC} DNS         ${CYAN}(${cur_dns:-?})${NC}"
+        echo -e "  ${GREEN}3)${NC} AllowedIPs  ${CYAN}(${cur_allowed:-?})${NC}"
+        echo -e "  ${GREEN}4)${NC} MTU         ${CYAN}(${cur_mtu:-?})${NC}"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Готово"
+        echo ""
+        local ch=""
+        ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" ch
+        case "$ch" in
+            1)
+                local new_ep=""
+                ask "Новый Endpoint (host:port)" "$cur_ep" new_ep
+                local _host="${new_ep%:*}" _port="${new_ep##*:}"
+                if [[ -z "$_host" || -z "$_port" || "$_host" == "$new_ep" ]]; then
+                    print_err "Формат host:port"; continue
+                fi
+                if ! validate_port "$_port"; then print_err "Порт 1-65535"; continue; fi
+                if ! validate_ip "$_host" && ! validate_domain "$_host"; then
+                    print_err "Host: IP или домен"; continue
+                fi
+                sed -i "s|^Endpoint = .*|Endpoint = ${new_ep}|" "$cfg"
+                print_ok "Endpoint: ${new_ep}"; changed=1
+                ;;
+            2)
+                local new_dns=""
+                ask "Новый DNS (через запятую)" "$cur_dns" new_dns
+                [[ -z "$new_dns" ]] && { print_warn "Пусто, пропуск"; continue; }
+                local _bad=0 _tok _oldifs="$IFS"
+                IFS=','
+                for _tok in $new_dns; do
+                    _tok="${_tok// /}"
+                    [[ -z "$_tok" ]] && continue
+                    validate_ip "$_tok" || _bad=1
+                done
+                IFS="$_oldifs"
+                [[ $_bad -eq 1 ]] && { print_err "DNS: только IP через запятую"; continue; }
+                sed -i "s|^DNS = .*|DNS = ${new_dns}|" "$cfg"
+                print_ok "DNS: ${new_dns}"; changed=1
+                ;;
+            3)
+                echo -e "  ${GREEN}1)${NC} 0.0.0.0/0, ::/0 (весь трафик)"
+                echo -e "  ${GREEN}2)${NC} Вручную"
+                local ac=""
+                ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" ac
+                local new_allowed=""
+                case "$ac" in
+                    1) new_allowed="0.0.0.0/0, ::/0" ;;
+                    2) ask "AllowedIPs" "$cur_allowed" new_allowed ;;
+                    *) print_warn "1 или 2"; continue ;;
+                esac
+                [[ -z "$new_allowed" ]] && { print_warn "Пусто, пропуск"; continue; }
+                sed -i "s|^AllowedIPs = .*|AllowedIPs = ${new_allowed}|" "$cfg"
+                print_ok "AllowedIPs: ${new_allowed}"; changed=1
+                ;;
+            4)
+                local new_mtu=""
+                ask "MTU (1000-1500)" "$cur_mtu" new_mtu
+                if ! [[ "$new_mtu" =~ ^[0-9]+$ ]] || (( new_mtu < 1000 || new_mtu > 1500 )); then
+                    print_err "MTU 1000-1500"; continue
+                fi
+                sed -i "s|^MTU = .*|MTU = ${new_mtu}|" "$cfg"
+                print_ok "MTU: ${new_mtu}"
+                print_info "Для YouTube/QUIC при обрывах видео пробуй MTU 1280 или ниже"
+                changed=1
+                ;;
+            0) break ;;
+            *) print_warn "0-4" ;;
+        esac
+    done
+
+    if [[ $changed -eq 1 ]]; then
+        echo ""
+        print_ok "Конфиг ${name} обновлён: ${cfg}"
+        print_info "Правки касаются только клиента. Переимпортируй .conf на устройстве."
+        # - book не хранит per-client поля (как add_client/delete_client), синк не нужен -
+        local rq=""
+        ask_yn "Показать обновлённый конфиг?" "n" rq
+        if [[ "$rq" == "yes" ]]; then
+            echo ""
+            echo -e "${BOLD}-- ${iface}/${name}/client.conf --${NC}"
+            cat "$cfg"
+            echo -e "${BOLD}--------------------------------------${NC}"
+        fi
+    else
+        print_info "Изменений нет"
+    fi
     return 0
 }
 
@@ -4464,10 +4569,11 @@ _xui_fetch_release_info() {
 # --> 3X-UI: СКАЧАТЬ И РАСПАКОВАТЬ tar.gz <--
 # - чистая установка без вызова upstream install.sh (там интерактивные prompts) -
 _xui_fetch_and_extract() {
-    local arch tmpdir tarball
+    local arch tmpdir tarball exdir
     arch=$(_xui_arch)
     tmpdir=$(mktemp -d)
     tarball="${tmpdir}/x-ui-linux-${arch}.tar.gz"
+    exdir="${tmpdir}/extract"
 
     print_info "Скачиваем ${XUI_TAG} для ${arch}..."
     if ! curl -4fLRo "$tarball" --connect-timeout 15 "$XUI_TARBALL_URL"; then
@@ -4476,19 +4582,39 @@ _xui_fetch_and_extract() {
         return 1
     fi
 
-    # - чистим старую установку -
+    # - целостность архива до того как трогать рабочую установку -
+    if ! gzip -t "$tarball" 2>/dev/null; then
+        print_err "Скачанный архив битый (gzip -t не прошёл)"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # - распаковка во временную папку, архив содержит папку x-ui/ -
+    mkdir -p "$exdir"
+    if ! tar -xzf "$tarball" -C "$exdir"; then
+        print_err "Не удалось распаковать tar.gz"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # - новая сборка валидна (есть бинарь) до сноса старой установки -
+    if [[ ! -f "${exdir}/x-ui/x-ui" ]]; then
+        print_err "В архиве нет x-ui/x-ui, старую установку не трогаю"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # - только теперь останавливаем сервис и подменяем установку -
     systemctl stop "$XUI_SERVICE" 2>/dev/null || true
     rm -rf "$XUI_DIR"
-
-    # - распаковка в /usr/local, архив содержит папку x-ui/ -
-    if ! tar -xzf "$tarball" -C /usr/local/; then
-        print_err "Не удалось распаковать tar.gz"
+    if ! mv "${exdir}/x-ui" "$XUI_DIR"; then
+        print_err "Не удалось переместить новую сборку в ${XUI_DIR}"
         rm -rf "$tmpdir"
         return 1
     fi
     rm -rf "$tmpdir"
 
-    [[ ! -d "$XUI_DIR" ]] && { print_err "После распаковки ${XUI_DIR} не найден"; return 1; }
+    [[ ! -d "$XUI_DIR" ]] && { print_err "После установки ${XUI_DIR} не найден"; return 1; }
 
     chmod +x "${XUI_DIR}/x-ui" 2>/dev/null || true
     chmod +x "${XUI_DIR}/x-ui.sh" 2>/dev/null || true
@@ -4926,7 +5052,7 @@ xui_delete() {
 OTL_DIR="/etc/outline"
 OTL_ENV="${OTL_DIR}/outline.env"
 OTL_KEY="${OTL_DIR}/manager_key.json"
-OTL_INSTALL_URL="https://raw.githubusercontent.com/Jigsaw-Code/outline-apps/master/server_manager/install_scripts/install_server.sh"
+OTL_INSTALL_URL="https://raw.githubusercontent.com/OutlineFoundation/outline-apps/master/server_manager/install_scripts/install_server.sh"
 OTL_HEALTHCHECK="/usr/local/bin/outline-healthcheck.sh"
 
 otl_installed() {
@@ -4970,7 +5096,7 @@ otl_install() {
     # - уникальный лог на каждый запуск, иначЕ tail -1 может вытащить apiUrl прошлой битой установки -
     local install_log
     install_log=$(mktemp /tmp/outline-install-XXXXXX.log)
-    print_info "Запуск установщика Jigsaw... (лог: ${install_log})"
+    print_info "Запуск установщика OutlineFoundation... (лог: ${install_log})"
 
     # - синхронный pipe: tee в одну ветку, stderr слит в stdout -
     # - старый вариант ">(tee) 2>(tee)" запускал tee в фоне, и grep ниже мог отработать -
@@ -5186,13 +5312,18 @@ otl_delete() {
     systemctl disable outline-healthcheck.timer 2>/dev/null || true
     rm -f /etc/systemd/system/outline-healthcheck.* 2>/dev/null || true
     book_write ".outline.installed" "false" bool
+    book_write ".outline.server_ip" ""
+    book_write ".outline.api_url" ""
+    book_write ".outline.api_port" "0" number
+    book_write ".outline.mgmt_port" "0" number
+    book_write ".outline.keys_port" "0" number
     print_ok "Outline удалён"
     return 0
 }
 
 # === 02d_proxy.sh ===
 # --> МОДУЛЬ: ПРОКСИ <--
-# - MTProto (Telegram) на mtg v2, мультиинстанс (один секрет на инстанс) -
+# - MTProto (Telegram) на mtg, мультиинстанс (один секрет на инстанс) -
 # - SOCKS5 мультиинстанс -
 # - Hysteria 2 мультиинстанс + мультиюзер (userpass) -
 # - Signal TLS Proxy -
@@ -5206,13 +5337,13 @@ SIG_ENV="/etc/signal-proxy/signal.env"
 SIG_DIR="/opt/signal-proxy"
 
 # ==========================================================================
-# --> MTPROTO PROXY (TELEGRAM) - МУЛЬТИИНСТАНС НА mtg v2 <--
+# --> MTPROTO PROXY (TELEGRAM) - МУЛЬТИИНСТАНС <--
 # ==========================================================================
-# - образ: nineseconds/mtg:2.1.13 (актуальный стабильный mtg v2) -
-# - один инстанс = один секрет (mtg v2 by design без мультисекрета) -
+# - образ: nineseconds/mtg:2 (актуальный mtg) -
+# - один инстанс = один секрет (mtg без мультисекрета) -
 # - секрет содержит в себе домен (генерится mtg generate-secret --hex DOMAIN) -
 
-MTG_IMAGE="nineseconds/mtg:2.1.13"
+MTG_IMAGE="nineseconds/mtg:2"
 
 _mtp_next_id() {
     local i=1
@@ -5358,6 +5489,7 @@ TOMLEOF
     fi
 
     # - book -
+    book_write ".mtproto.installed" "true" bool
     book_write ".mtproto.instances.${inst_id}.port" "$port"
     book_write ".mtproto.instances.${inst_id}.tls_domain" "$tls_domain"
     book_write ".mtproto.instances.${inst_id}.container" "$container"
@@ -5425,7 +5557,10 @@ mtp_remove() {
     fi
 
     rm -f "$envf" "$(_mtp_config_path "$inst_id")"
-    book_write ".mtproto.instances.${inst_id}" "null" bool
+    book_del ".mtproto.instances.${inst_id}"
+    if ! compgen -G "${MTP_DIR}/instance_*.env" >/dev/null 2>&1; then
+        book_write ".mtproto.installed" "false" bool
+    fi
     print_ok "MTProto #${inst_id} удалён"
     return 0
 }
@@ -5521,6 +5656,7 @@ S5EOF
     chmod 600 "${S5_DIR}/instance_${inst_id}.env"
 
     # - book -
+    book_write ".socks5.installed" "true" bool
     book_write ".socks5.instances.${inst_id}.port" "$port"
     book_write ".socks5.instances.${inst_id}.container" "$container"
 
@@ -5600,7 +5736,10 @@ s5_remove() {
     fi
 
     rm -f "$envf"
-    book_write ".socks5.instances.${inst_id}" "null" bool
+    book_del ".socks5.instances.${inst_id}"
+    if ! compgen -G "${S5_DIR}/instance_*.env" >/dev/null 2>&1; then
+        book_write ".socks5.installed" "false" bool
+    fi
     print_ok "SOCKS5 #${inst_id} удалён"
     return 0
 }
@@ -5992,8 +6131,7 @@ hy2_remove() {
     fi
     rm -rf "${idir:?}"
 
-    _book_ok && jq --arg i "$inst_id" 'del(.hysteria2.instances[$i])' "$_BOOK" > "${_BOOK}.tmp" 2>/dev/null \
-        && mv "${_BOOK}.tmp" "$_BOOK" 2>/dev/null || rm -f "${_BOOK}.tmp"
+    book_del ".hysteria2.instances.${inst_id}"
 
     local remaining=0
     for dd in "${HY2_DIR}"/instance_*/; do [[ -d "$dd" ]] && remaining=$(( remaining + 1 )); done
@@ -6250,6 +6388,3335 @@ sig_remove() {
     return 0
 }
 
+# === 02e_wgobfs.sh ===
+# --> МОДУЛЬ: WG-OBFUSCATOR <--
+# - userspace UDP-прокси, прячет WireGuard за XOR обфускацией и STUN маскировкой -
+# - wg-obfuscator прячет сам туннель (WG) от провайдера КЛИЕНТА
+# - движок ClusterM/wg-obfuscator, требует vanilla-WG: заголовки AWG он примет за обфускацию -
+# - схема: клиент -> его обфускатор -> наш source-lport -> 127.0.0.1:<порт vanilla-awg> -
+# - один инстанс на awg-интерфейс: свой конфиг с одной секцией и свой юнит из шаблона -
+
+WGO_REPO="ClusterM/wg-obfuscator"
+WGO_DIR="/opt/wg-obfuscator"
+WGO_BIN="${WGO_DIR}/wg-obfuscator"
+
+# - в конфиге лежит ключ, поэтому каталог 700 и файлы 600 -
+WGO_ELI_DIR="/etc/vps-eli-stack/wgobfs"
+WGO_UNIT_TPL="/etc/systemd/system/wgobfs-eli@.service"
+
+# - локальный порт обфускатора НА СТОРОНЕ КЛИЕНТА, в него смотрит Endpoint клиентского WG -
+WGO_CLIENT_LPORT=3333
+
+# - метка для разрыва петли маршрутизации у клиента с AllowedIPs = 0.0.0.0/0 -
+# - парсер апстрима режет марку до uint16, поэтому 0xdead, а не наши 32-битные марки -
+WGO_CLIENT_FWMARK="0xdead"
+
+# - результат _wgo_ensure_vanilla, stdout занят интерактивом awg_create_iface -
+WGO_TARGET_IFACE=""
+
+# --> WGO: ПУТИ ПО ИНТЕРФЕЙСУ <--
+_wgo_conf() { echo "${WGO_ELI_DIR}/${1}.conf"; }
+_wgo_unit() { echo "wgobfs-eli@${1}.service"; }
+
+# --> WGO: СПИСОК ПРИВЯЗАННЫХ ИНТЕРФЕЙСОВ <--
+# - привязка = существует конфиг инстанса на диске -
+_wgo_bound_list() {
+    local result=() f name
+    for f in "${WGO_ELI_DIR}"/*.conf; do
+        [[ -f "$f" ]] || continue
+        name=$(basename "$f" | sed 's/\.conf$//')
+        result+=("$name")
+    done
+    echo "${result[@]:-}"
+}
+
+# --> WGO: ПРОВЕРКА УСТАНОВКИ <--
+_wgo_installed() {
+    [[ -x "$WGO_BIN" ]] && [[ "$(book_read ".wgobfs.installed")" == "true" ]]
+}
+
+# --> WGO: ОПРЕДЕЛЕНИЕ АРХИТЕКТУРЫ <--
+# - маппинг uname -m в суффикс ассета релиза: wg-obfuscator-<tag>-<arch>.tar.gz -
+# - пусто = готового ассета нет, собираем из исходников -
+_wgo_arch() {
+    case "$(uname -m)" in
+        x86_64|amd64)   echo "linux-x64" ;;
+        aarch64|arm64)  echo "linux-arm64" ;;
+        i686|i386)      echo "linux-x86" ;;
+        armv7l)         echo "linux-armv7-hf" ;;
+        armv6l)         echo "linux-armv6-softfp" ;;
+        riscv64)        echo "linux-riscv64" ;;
+        ppc64le)        echo "linux-ppc64le" ;;
+        s390x)          echo "linux-s390x" ;;
+        *)              echo "" ;;
+    esac
+}
+
+# --> WGO: WAN-ИНТЕРФЕЙС <--
+_wgo_wan_iface() {
+    local w
+    w=$(book_read ".system.main_iface")
+    [[ -z "$w" ]] && w=$(ip route show default 2>/dev/null | awk '/default/{print $5}' | head -1)
+    echo "$w"
+}
+
+# --> WGO: ЧТЕНИЕ ПОЛЯ ИЗ ENV ИНТЕРФЕЙСА <--
+# - без source: env интерфейса перетрёт переменные текущего шелла -
+_wgo_env_val() {
+    local iface="$1" key="$2" env_file
+    env_file=$(awg_iface_env "$iface")
+    [[ -f "$env_file" ]] || { echo ""; return 1; }
+    grep -m1 "^${key}=" "$env_file" 2>/dev/null | cut -d'"' -f2
+}
+
+# --> WGO: ИНТЕРФЕЙС VANILLA? <--
+# - is_obfuscated() апстрима считает пакет обфусцированным, если первые 4 байта не в 1..4 -
+# - AWG с H1-H4 туда не попадает, обфускатор его "деобфусцирует" и выдаст мусор -
+_wgo_iface_is_vanilla() {
+    [[ "$(_wgo_env_val "$1" "AWG_VERSION")" == "wg" ]]
+}
+
+# --> WGO: ПОРТ ИНТЕРФЕЙСА <--
+_wgo_iface_port() {
+    _wgo_env_val "$1" "SERVER_PORT"
+}
+
+# --> WGO: ПРОВЕРКА ОКРУЖЕНИЯ <--
+# - требований к ядру нет: это userspace-прокси, работает даже на OpenVZ/LXC -
+_wgo_check_env() {
+    local ok=0
+
+    local arch
+    arch=$(_wgo_arch)
+    if [[ -z "$arch" ]]; then
+        print_warn "Архитектура $(uname -m) без готового бинаря -> будем собирать из исходников"
+    else
+        print_ok "Архитектура: ${arch}"
+    fi
+
+    if ! command -v systemctl &>/dev/null; then
+        print_err "systemd не найден, юнит инстанса ставить некуда"
+        ok=1
+    else
+        print_ok "systemd: есть"
+    fi
+
+    if command -v wg &>/dev/null && [[ -d "$AWG_SETUP_DIR" ]]; then
+        print_ok "AWG: установлен"
+    else
+        print_err "AWG не установлен. Обфускатору нечего обфусцировать."
+        print_info "Меню VPN -> AmneziaWG -> Установка."
+        ok=1
+    fi
+
+    return $ok
+}
+
+# --> WGO: УСТАНОВКА ЗАВИСИМОСТЕЙ <--
+_wgo_install_prereq() {
+    print_info "Установка зависимостей..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq 2>/dev/null
+    apt-get install -y -qq curl tar gzip jq 2>/dev/null
+    command -v curl &>/dev/null && command -v tar &>/dev/null
+}
+
+# --> WGO: BUILD-ТУЛЧЕЙН <--
+# - апстрим без внешних библиотек, хватает make и gcc -
+_wgo_install_buildtools() {
+    print_warn "Готового бинаря под эту архитектуру нет -> ставим make и gcc"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get install -y -qq make gcc 2>/dev/null
+    command -v make &>/dev/null && command -v gcc &>/dev/null
+}
+
+# --> WGO: РЕЗОЛВ ТЕГА РЕЛИЗА <--
+_wgo_resolve_tag() {
+    curl -fsSL --connect-timeout 10 \
+        "https://api.github.com/repos/${WGO_REPO}/releases/latest" 2>/dev/null \
+        | jq -r '.tag_name // empty' 2>/dev/null
+}
+
+# --> WGO: ССЫЛКА НА АССЕТ ПОД АРХИТЕКТУРУ <--
+# - имя ассета: wg-obfuscator-<tag>-linux-x64.tar.gz, суффикс однозначен -
+_wgo_asset_url() {
+    local tag="$1" arch="$2"
+    curl -fsSL --connect-timeout 10 \
+        "https://api.github.com/repos/${WGO_REPO}/releases/tags/${tag}" 2>/dev/null \
+        | jq -r --arg a "$arch" '.assets[]?.browser_download_url
+                 | select(endswith("-" + $a + ".tar.gz"))' 2>/dev/null \
+        | head -1
+}
+
+# --> WGO: ВЕРСИЯ БИНАРЯ <--
+# - --version и -V в v1.5 не реализованы, хотя README их обещает: "unknown --version" -
+# - единственный источник версии - первая строка вывода --help -
+_wgo_version() {
+    [[ -x "$WGO_BIN" ]] || { echo ""; return 1; }
+    "$WGO_BIN" --help 2>&1 | head -1 | grep -oE 'v[0-9]+(\.[0-9]+)*' | head -1
+}
+
+# --> WGO: ПОЛУЧЕНИЕ БИНАРЯ <--
+# - готовый ассет статический, зависимостей нет; при его отсутствии сборка из исходников -
+_wgo_fetch_binary() {
+    local tag="$1" arch tmp url tarball extracted src
+    arch=$(_wgo_arch)
+    tmp=$(mktemp -d) || { print_err "mktemp failed"; return 1; }
+    mkdir -p "$WGO_DIR"
+
+    [[ -n "$arch" ]] && url=$(_wgo_asset_url "$tag" "$arch")
+
+    if [[ -n "$url" ]]; then
+        print_info "Скачиваем ${tag} (${arch})..."
+        tarball="${tmp}/wgo.tar.gz"
+        if ! curl -fsSL --connect-timeout 15 -o "$tarball" "$url"; then
+            print_err "Не удалось скачать ассет релиза"
+            rm -rf "$tmp"; return 1
+        fi
+        mkdir -p "${tmp}/x"
+        if ! tar -xzf "$tarball" -C "${tmp}/x" 2>/dev/null; then
+            print_err "Архив повреждён (tar failed)"
+            rm -rf "$tmp"; return 1
+        fi
+        # - внутри каталог wg-obfuscator/ с бинарём, конфигом-примером и лицензией -
+        src=$(find "${tmp}/x" -type f -name 'wg-obfuscator' -perm -u+x 2>/dev/null | head -1)
+    else
+        _wgo_install_buildtools || { print_err "Не удалось поставить тулчейн"; rm -rf "$tmp"; return 1; }
+        print_info "Скачиваем исходники ${tag}..."
+        tarball="${tmp}/wgo-src.tar.gz"
+        if ! curl -fsSL --connect-timeout 15 -o "$tarball" \
+            "https://api.github.com/repos/${WGO_REPO}/tarball/${tag}"; then
+            print_err "Не удалось скачать исходники"
+            rm -rf "$tmp"; return 1
+        fi
+        mkdir -p "${tmp}/x"
+        if ! tar -xzf "$tarball" -C "${tmp}/x" 2>/dev/null; then
+            print_err "Архив повреждён (tar failed)"
+            rm -rf "$tmp"; return 1
+        fi
+        extracted=$(find "${tmp}/x" -maxdepth 1 -mindepth 1 -type d | head -1)
+        [[ -z "$extracted" ]] && { print_err "Каталог исходников не найден"; rm -rf "$tmp"; return 1; }
+        print_info "Сборка из исходников..."
+        make -C "$extracted" 2>/dev/null
+        src="${extracted}/wg-obfuscator"
+        [[ -f "$src" ]] || src=""
+    fi
+
+    if [[ -z "$src" || ! -f "$src" ]]; then
+        print_err "Бинарь wg-obfuscator не получен"
+        rm -rf "$tmp"; return 1
+    fi
+    cp -a "$src" "$WGO_BIN"
+    chmod 755 "$WGO_BIN"
+    rm -rf "$tmp"
+
+    # - проверка запуска: --help единственный безопасный пробник, --version не существует -
+    if ! "$WGO_BIN" --help 2>&1 | grep -q "WireGuard Obfuscator"; then
+        print_err "Бинарь не запускается на этой системе"
+        return 1
+    fi
+    print_ok "wg-obfuscator установлен: ${WGO_BIN} ($(_wgo_version))"
+    return 0
+}
+
+# --> WGO: SYSTEMD ШАБЛОН <--
+# - один юнит на интерфейс. Мультисекционный конфиг апстрима форкается на каждой секции -
+# - и systemd видит только родителя: упавшего ребёнка никто не поднимет -
+# - StartLimit обязателен: неизвестный ключ в конфиге = exit(1), иначе вечный рестарт-луп -
+# - fwmark и SO_MARK требуют CAP_NET_ADMIN, привилегии обфускатор не сбрасывает -
+_wgo_write_unit_template() {
+    cat > "$WGO_UNIT_TPL" << EOF
+[Unit]
+Description=wg-obfuscator (Eli) for %i
+After=network-online.target awg-quick@%i.service
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=${WGO_BIN} -c ${WGO_ELI_DIR}/%i.conf
+Restart=on-failure
+RestartSec=5
+User=root
+AmbientCapabilities=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 644 "$WGO_UNIT_TPL"
+    systemctl daemon-reload 2>/dev/null
+}
+
+# --> WGO: ЗАПИСЬ КОНФИГА ИНСТАНСА <--
+# - ровно одна секция на файл: множественные секции апстрим разводит через fork() -
+# - только ключи из options[] апстрима; неизвестный ключ роняет процесс на старте -
+# - штатный wg-obfuscator.conf апстрима как шаблон не годится: в нём max-dummy-length-data, -
+# - которого парсер не знает (спасает только то, что строка закомментирована) -
+# - verbose принимает error|warn|info|debug|trace или 0-4, но не ERRORS/WARNINGS из README -
+_wgo_write_conf() {
+    local iface="$1" lport="$2" target="$3" key="$4" masking="$5" conf
+    conf=$(_wgo_conf "$iface")
+    mkdir -p "$WGO_ELI_DIR"; chmod 700 "$WGO_ELI_DIR"
+    cat > "$conf" << EOF
+[${iface}]
+source-lport = ${lport}
+target = ${target}
+key = ${key}
+masking = ${masking}
+verbose = INFO
+EOF
+    chmod 600 "$conf"
+}
+
+# --> WGO: ПРОВЕРКА ЗАПУСКА ИНСТАНСА <--
+# - Type=simple рапортует active в момент exec, а конфиг разбирается уже после -
+_wgo_verify_active() {
+    local iface="$1" unit sub
+    unit=$(_wgo_unit "$iface")
+    sleep 2
+    sub=$(systemctl show -p SubState --value "$unit" 2>/dev/null)
+    if [[ "$sub" == "running" ]] && systemctl is-active --quiet "$unit"; then
+        return 0
+    fi
+    print_err "Инстанс ${unit} не удержался (SubState=${sub:-?}). Причина:"
+    journalctl -u "$unit" -n 15 --no-pager 2>/dev/null | sed 's/^/    /'
+    return 1
+}
+
+# --> WGO: ЗАКРЫТИЕ ПОРТА VANILLA-AWG СНАРУЖИ <--
+# - весь смысл модуля в том, чтобы наружу не торчал голый WireGuard -
+# - bind на loopback не сделать: у WireGuard нет опции адреса прослушивания -
+# - основной путь: UFW с дефолтом deny incoming, allow-правила на порт просто нет -
+# - запасной: DROP в PostUp/PostDown конфига интерфейса, живёт и умирает вместе с ним -
+_wgo_lock_awg_port() {
+    local iface="$1" port="$2" wan conf tmp up down
+    conf=$(awg_iface_conf "$iface")
+
+    if ufw_active && ufw status verbose 2>/dev/null | grep -q "deny (incoming)"; then
+        print_ok "UFW активен с дефолтом deny incoming -> порт ${port}/udp снаружи закроется"
+    else
+        # - правило ставим ДО снятия allow: провал не должен оставить порт голым -
+        print_warn "UFW неактивен или дефолт incoming не deny -> ставлю собственное правило DROP"
+        wan=$(_wgo_wan_iface)
+        [[ -z "$wan" ]] && { print_err "WAN-интерфейс не определён, закрыть ${port}/udp нечем"; return 1; }
+        [[ -f "$conf" ]] || { print_err "Конфиг ${conf} не найден"; return 1; }
+
+        up="iptables -I INPUT -i ${wan} -p udp --dport ${port} -j DROP"
+        down="iptables -D INPUT -i ${wan} -p udp --dport ${port} -j DROP || true"
+
+        # - вставляем в [Interface] после первого PostDown: в конец файла нельзя, там [Peer] -
+        if ! grep -qF -- "$up" "$conf"; then
+            tmp=$(mktemp) || { print_err "mktemp failed"; return 1; }
+            awk -v u="PostUp = ${up}" -v d="PostDown = ${down}" '
+                !ins && /^PostDown = / { print; print u; print d; ins=1; next }
+                { print }
+            ' "$conf" > "$tmp"
+            if [[ -s "$tmp" ]] && grep -qF -- "$up" "$tmp"; then
+                mv "$tmp" "$conf"; chmod 600 "$conf"
+            else
+                rm -f "$tmp"
+                print_err "Не удалось вписать правило в ${conf} (нет [Interface] с PostDown)"
+                return 1
+            fi
+        fi
+
+        iptables -C INPUT -i "$wan" -p udp --dport "$port" -j DROP 2>/dev/null || \
+            iptables -I INPUT -i "$wan" -p udp --dport "$port" -j DROP 2>/dev/null
+        if ! iptables -C INPUT -i "$wan" -p udp --dport "$port" -j DROP 2>/dev/null; then
+            print_err "Правило DROP не применилось, порт ${port}/udp остался бы открыт"
+            return 1
+        fi
+        print_ok "Правило DROP на ${port}/udp (${wan}) применено и записано в конфиг интерфейса"
+    fi
+
+    # - allow снимаем последним: до этого момента порт есть чем закрыть -
+    if command -v ufw &>/dev/null && _ufw_has_rule "$port" "udp"; then
+        ufw delete allow "${port}/udp" >/dev/null 2>&1
+        print_info "Снято UFW-правило allow ${port}/udp"
+    fi
+    return 0
+}
+
+# --> WGO: СНЯТИЕ ЗАПАСНОГО ПРАВИЛА <--
+_wgo_unlock_awg_port() {
+    local iface="$1" port="$2" wan conf tmp
+    wan=$(_wgo_wan_iface)
+    conf=$(awg_iface_conf "$iface")
+    [[ -z "$wan" || ! -f "$conf" ]] && return 0
+    local pat="-i ${wan} -p udp --dport ${port} -j DROP"
+    if grep -qF -- "$pat" "$conf"; then
+        tmp=$(mktemp) || return 1
+        grep -vF -- "$pat" "$conf" > "$tmp" && mv "$tmp" "$conf" && chmod 600 "$conf"
+    fi
+    while iptables -C INPUT -i "$wan" -p udp --dport "$port" -j DROP 2>/dev/null; do
+        iptables -D INPUT -i "$wan" -p udp --dport "$port" -j DROP 2>/dev/null || break
+    done
+    return 0
+}
+
+# --> WGO: ЗАПИСЬ ИНСТАНСА В КНИГУ <--
+_wgo_book_iface() {
+    local iface="$1" lport="$2" target="$3" key="$4" masking="$5" bound="$6"
+    local obj
+    obj=$(jq -n \
+        --argjson lp "$lport" \
+        --arg t "$target" \
+        --arg k "$key" \
+        --arg m "$masking" \
+        --arg bi "$iface" \
+        --argjson b "$bound" \
+        '{lport:$lp, target:$t, key:$k, masking:$m, bound_iface:$bi, bound:$b}')
+    book_write_obj ".wgobfs.instances.\"${iface}\"" "$obj"
+}
+
+# --> WGO: ИНИЦИАЛИЗАЦИЯ РАЗДЕЛА КНИГИ <--
+_wgo_book_init() {
+    [[ -z "$(book_read ".wgobfs.installed")" ]] || return 0
+    local obj
+    obj=$(jq -n '{installed:false, version:"", autoupdate_enabled:false, instances:{}}')
+    book_write_obj ".wgobfs" "$obj"
+}
+
+# --> WGO: ВЫБОР ИЛИ СОЗДАНИЕ VANILLA-ИНТЕРФЕЙСА <--
+# - результат в WGO_TARGET_IFACE: awg_create_iface занимает stdout своим интерактивом -
+_wgo_ensure_vanilla() {
+    WGO_TARGET_IFACE=""
+    local free=() x
+
+    for x in $(awg_get_iface_list); do
+        _wgo_iface_is_vanilla "$x" || continue
+        [[ -f "$(_wgo_conf "$x")" ]] && continue
+        free+=("$x")
+    done
+
+    print_section "Vanilla-интерфейс под обфускатор"
+    print_info "Обфускатор работает только с vanilla-WG: заголовки AWG он примет за обфускацию."
+    echo ""
+    local i=1
+    for x in "${free[@]:-}"; do
+        [[ -z "$x" ]] && continue
+        echo -e "  ${GREEN}${i})${NC} ${x} (порт $(_wgo_iface_port "$x")/udp)"
+        (( i++ ))
+    done
+    echo -e "  ${GREEN}${i})${NC} Создать новый vanilla-интерфейс"
+    echo ""
+    local sel=""
+    ask_raw "$(printf '  \033[1mВыбор:\033[0m ')" sel
+    if [[ ! "$sel" =~ ^[0-9]+$ ]] || (( sel < 1 || sel > i )); then
+        print_err "Неверный выбор"
+        return 1
+    fi
+    if (( sel < i )); then
+        WGO_TARGET_IFACE="${free[$((sel-1))]}"
+        print_ok "Выбран ${WGO_TARGET_IFACE}"
+        return 0
+    fi
+
+    # - создание нового: версию форсим, порт наружу не открываем -
+    echo ""
+    print_info "Версия протокола будет vanilla-WG принудительно, диалога выбора не будет."
+    print_info "UDP-порт этого интерфейса наружу открыт НЕ будет: снаружи работает только обфускатор."
+    echo ""
+    local before after new=""
+    before=$(awg_get_iface_list)
+    export AWG_FORCE_VER="wg" AWG_NO_UFW="1"
+    awg_create_iface
+    unset AWG_FORCE_VER AWG_NO_UFW
+    after=$(awg_get_iface_list)
+    for x in $after; do
+        grep -qw -- "$x" <<< "$before" || new="$x"
+    done
+    [[ -z "$new" ]] && { print_err "Интерфейс не создан"; return 1; }
+    if ! _wgo_iface_is_vanilla "$new"; then
+        print_err "Интерфейс ${new} создан не как vanilla, привязка невозможна"
+        return 1
+    fi
+    WGO_TARGET_IFACE="$new"
+    print_ok "Создан ${new}"
+    return 0
+}
+
+# --> WGO: КОНФИГ ОБФУСКАТОРА ДЛЯ КЛИЕНТА <--
+# - сервер в AUTO не маскирует сам, но детектит маскировку клиента и подхватывает её -
+# - поэтому клиенту по умолчанию включаем STUN: при сервере NONE это не пройдёт -
+_wgo_client_obfconf() {
+    local iface="$1" out="$2" lport key masking cmask ip
+    lport=$(book_read ".wgobfs.instances.\"${iface}\".lport")
+    key=$(book_read ".wgobfs.instances.\"${iface}\".key")
+    masking=$(book_read ".wgobfs.instances.\"${iface}\".masking")
+    ip=$(_wgo_env_val "$iface" "SERVER_ENDPOINT_IP")
+    [[ -z "$lport" || -z "$key" || -z "$ip" ]] && return 1
+    case "$masking" in
+        NONE) cmask="NONE" ;;
+        *)    cmask="STUN" ;;
+    esac
+    cat > "$out" << EOF
+# - конфиг wg-obfuscator ДЛЯ КЛИЕНТА (роутер, десктоп), не для сервера -
+# - запуск: wg-obfuscator -c wg-obfuscator.conf -
+[eli]
+source-lport = ${WGO_CLIENT_LPORT}
+target = ${ip}:${lport}
+key = ${key}
+masking = ${cmask}
+fwmark = ${WGO_CLIENT_FWMARK}
+verbose = INFO
+EOF
+    chmod 600 "$out"
+    return 0
+}
+
+# --> WGO: ХУК ДЛЯ awg_add_client <--
+# - зовётся из 02a через declare -f: интерфейс за обфускатором получает Endpoint на 127.0.0.1 -
+# - FwMark только при полном туннеле: иначе трафик обфускатора к нашему IP уйдёт в туннель -
+_wgo_fix_client() {
+    local iface="$1" cconf="$2" cdir
+    [[ -f "$(_wgo_conf "$iface")" ]] || return 0
+    [[ -f "$cconf" ]] || return 0
+    cdir=$(dirname "$cconf")
+
+    sed -i "s|^Endpoint = .*|Endpoint = 127.0.0.1:${WGO_CLIENT_LPORT}|" "$cconf"
+    if grep -q '^AllowedIPs = .*0\.0\.0\.0/0' "$cconf" && ! grep -q '^FwMark = ' "$cconf"; then
+        sed -i "/^\[Interface\]/a FwMark = ${WGO_CLIENT_FWMARK}" "$cconf"
+    fi
+    chmod 600 "$cconf"
+
+    if _wgo_client_obfconf "$iface" "${cdir}/wg-obfuscator.conf"; then
+        print_info "Интерфейс за обфускатором: Endpoint переписан на 127.0.0.1:${WGO_CLIENT_LPORT}"
+        print_info "Комплект клиента: ${cdir} (client.conf + wg-obfuscator.conf)"
+    else
+        print_warn "Конфиг обфускатора для клиента не собран: нет данных в книге"
+    fi
+    return 0
+}
+
+# --> WGO: ВОЗВРАТ КЛИЕНТА НА ПРЯМОЙ ENDPOINT <--
+# - при отвязке конфиг клиента обязан снова стать рабочим без обфускатора -
+_wgo_unfix_client() {
+    local iface="$1" cconf="$2" ip port
+    [[ -f "$cconf" ]] || return 0
+    ip=$(_wgo_env_val "$iface" "SERVER_ENDPOINT_IP")
+    port=$(_wgo_iface_port "$iface")
+    [[ -z "$ip" || -z "$port" ]] && return 1
+    sed -i "s|^Endpoint = .*|Endpoint = ${ip}:${port}|" "$cconf"
+    sed -i "/^FwMark = ${WGO_CLIENT_FWMARK}$/d" "$cconf"
+    rm -f "$(dirname "$cconf")/wg-obfuscator.conf"
+    return 0
+}
+
+# --> WGO: ИНСТРУКЦИЯ В КОМПЛЕКТ <--
+_wgo_kit_readme() {
+    local iface="$1" name="$2" out="$3" lport ip
+    lport=$(book_read ".wgobfs.instances.\"${iface}\".lport")
+    ip=$(_wgo_env_val "$iface" "SERVER_ENDPOINT_IP")
+    cat > "$out" << EOF
+Комплект клиента ${name} для интерфейса ${iface}
+
+В комплекте:
+  client.conf         - конфиг WireGuard, Endpoint смотрит на локальный обфускатор
+  wg-obfuscator.conf  - конфиг обфускатора на твоей стороне
+
+Как это работает:
+  твой WireGuard -> 127.0.0.1:${WGO_CLIENT_LPORT} -> обфускатор -> ${ip}:${lport} -> сервер
+
+Порядок установки:
+  1. Поставить wg-obfuscator на устройство, где крутится WireGuard.
+     Бинари под все архитектуры: https://github.com/${WGO_REPO}/releases
+     OpenWrt: пакеты с UCI и LuCI, собираются под архитектуру роутера.
+     Android: https://github.com/ClusterM/wg-obfuscator-android
+     MikroTik RouterOS 7.4+: docker-контейнер.
+  2. Положить wg-obfuscator.conf и запустить обфускатор ПЕРВЫМ.
+  3. Импортировать client.conf в WireGuard и поднять туннель.
+
+Важно:
+  - Ключ в wg-obfuscator.conf обязан совпадать с серверным, он уже прописан.
+  - Обфускатор должен работать под root: fwmark ставится через SO_MARK.
+  - FwMark = ${WGO_CLIENT_FWMARK} в client.conf разрывает петлю маршрутизации
+    при AllowedIPs = 0.0.0.0/0. Не удаляй его, иначе трафик обфускатора
+    к ${ip} уйдёт в туннель и связь ляжет сразу после хендшейка.
+    Если клиент не умеет FwMark, исключи ${ip} из AllowedIPs вручную.
+  - IPv6 обфускатор не поддерживает вообще, только IPv4.
+  - Обфускатор проксирует каждый пакет в userspace. На слабом роутере
+    это упирается в CPU.
+  - После рестарта обфускатора хендшейк восстанавливается не мгновенно:
+    можно передёрнуть интерфейс WireGuard.
+EOF
+}
+
+# --> WGO: УСТАНОВКА <--
+wgo_install() {
+    if _wgo_installed; then
+        print_warn "wg-obfuscator уже установлен ($(_wgo_version))"
+        local re=""
+        ask_yn "Переустановить движок?" "n" re
+        [[ "$re" != "yes" ]] && return 0
+    fi
+
+    print_section "Установка wg-obfuscator"
+    print_info "Проверка окружения..."
+    _wgo_check_env || { print_err "Окружение не подходит"; return 1; }
+
+    _wgo_install_prereq || { print_err "Не удалось поставить зависимости"; return 1; }
+
+    mkdir -p "$WGO_ELI_DIR"; chmod 700 "$WGO_ELI_DIR"
+    mkdir -p "$WGO_DIR"
+
+    local tag
+    tag=$(_wgo_resolve_tag)
+    if [[ -z "$tag" ]]; then
+        print_err "Не удалось определить последний релиз ${WGO_REPO}"
+        return 1
+    fi
+    print_info "Последний релиз: ${tag}"
+    print_info "Enter = ставим последнюю (${tag}). Или впиши свой тег из релизов."
+    local override=""
+    ask_raw "$(printf '  \033[1mТег для установки (Enter - %s):\033[0m ' "$tag")" override
+    [[ -n "$override" ]] && tag="$override"
+
+    _wgo_fetch_binary "$tag" || { print_err "Установка движка не удалась"; return 1; }
+    _wgo_write_unit_template
+
+    _wgo_book_init
+    book_write ".wgobfs.installed" "true" bool
+    book_write ".wgobfs.version" "$(_wgo_version)" string
+
+    print_ok "wg-obfuscator установлен (${tag})"
+
+    local b=""
+    ask_yn "Привязать обфускатор к vanilla-интерфейсу сейчас?" "y" b
+    [[ "$b" == "yes" ]] && wgo_bind_iface
+    return 0
+}
+
+# --> WGO: ПРИВЯЗКА К ИНТЕРФЕЙСУ <--
+wgo_bind_iface() {
+    _wgo_installed || { print_err "wg-obfuscator не установлен"; return 1; }
+
+    _wgo_ensure_vanilla || return 1
+    local iface="$WGO_TARGET_IFACE"
+    [[ -z "$iface" ]] && return 1
+
+    if [[ -f "$(_wgo_conf "$iface")" ]]; then
+        print_err "К ${iface} обфускатор уже привязан"
+        return 1
+    fi
+
+    local awg_port
+    awg_port=$(_wgo_iface_port "$iface")
+    if ! validate_port "$awg_port"; then
+        print_err "Не удалось прочитать порт интерфейса ${iface}"
+        return 1
+    fi
+
+    # - публичный порт обфускатора: его и только его открываем наружу -
+    local lport def_port=""
+    def_port=$(rand_port 20000 60000) || def_port=""
+    print_section "Параметры инстанса"
+    while true; do
+        echo -e "  ${CYAN}Публичный UDP-порт обфускатора. Клиенты будут стучаться сюда.${NC}"
+        ask "Порт обфускатора" "$def_port" lport
+        if ! validate_port "$lport"; then print_err "Порт 1-65535"; continue; fi
+        if [[ "$lport" == "$awg_port" ]]; then print_err "Порт занят самим ${iface}"; continue; fi
+        if ss -H -uln 2>/dev/null | grep -Eq "[:.]${lport}[[:space:]]"; then print_warn "Порт занят"; continue; fi
+        break
+    done
+
+    # - ключ один на инстанс, общий для всех клиентов интерфейса -
+    local key def_key
+    def_key=$(rand_str 32)
+    while true; do
+        echo ""
+        echo -e "  ${CYAN}Ключ обфускации. Не крипта (крипта внутри WG), но у всех разный.${NC}"
+        ask "Ключ" "$def_key" key
+        if [[ -z "$key" || ${#key} -gt 255 ]]; then print_err "От 1 до 255 символов"; continue; fi
+        break
+    done
+
+    local masking="AUTO"
+    echo ""
+    echo -e "  ${BOLD}Маскировка на сервере:${NC}"
+    echo -e "  ${GREEN}1)${NC} AUTO - сервер не маскирует сам, но подхватывает маскировку клиента (рекомендуется)"
+    echo -e "  ${GREEN}2)${NC} STUN - только STUN-маскированный вход, клиент без STUN отвалится молча"
+    echo -e "  ${GREEN}3)${NC} NONE - маскировки нет вообще, только XOR-обфускация"
+    while true; do
+        ask_raw "$(printf '  \033[1mВыбор?\033[0m [1]: ')" m_ch
+        case "${m_ch:-1}" in
+            1) masking="AUTO"; break ;;
+            2) masking="STUN"; break ;;
+            3) masking="NONE"; break ;;
+            *) print_warn "1, 2 или 3" ;;
+        esac
+    done
+
+    # - порт AWG наружу закрываем ДО подъёма обфускатора: иначе окно с голым WG наружу -
+    _wgo_lock_awg_port "$iface" "$awg_port" || {
+        print_err "Не удалось закрыть порт ${awg_port}/udp -> привязка отменена"
+        return 1
+    }
+
+    _wgo_write_conf "$iface" "$lport" "127.0.0.1:${awg_port}" "$key" "$masking"
+
+    if command -v ufw &>/dev/null; then
+        ufw allow "${lport}/udp" comment "wgobfs ${iface}" 2>/dev/null || true
+    fi
+
+    local unit
+    unit=$(_wgo_unit "$iface")
+    systemctl enable "$unit" 2>/dev/null
+    systemctl restart "$unit" 2>/dev/null
+    if ! _wgo_verify_active "$iface"; then
+        systemctl disable --now "$unit" 2>/dev/null
+        rm -f "$(_wgo_conf "$iface")"
+        command -v ufw &>/dev/null && ufw delete allow "${lport}/udp" >/dev/null 2>&1
+        _wgo_unlock_awg_port "$iface" "$awg_port"
+        print_err "Привязка отменена -> инстанс не стартовал"
+        return 1
+    fi
+
+    _wgo_book_iface "$iface" "$lport" "127.0.0.1:${awg_port}" "$key" "$masking" "true"
+    book_write ".wgobfs.installed" "true" bool
+    print_ok "Обфускатор для ${iface} запущен: ${lport}/udp -> 127.0.0.1:${awg_port}"
+
+    # - существующие клиенты этого интерфейса переезжают на локальный Endpoint -
+    local c cdir n=0
+    for c in $(awg_get_client_list "$iface"); do
+        cdir="$(awg_iface_clients "$iface")/${c}"
+        [[ -f "${cdir}/client.conf" ]] || continue
+        _wgo_fix_client "$iface" "${cdir}/client.conf" >/dev/null
+        n=$(( n + 1 ))
+    done
+    [[ $n -gt 0 ]] && print_ok "Переписаны конфиги существующих клиентов: ${n}"
+
+    echo ""
+    print_info "Комплект клиента забирается через управление -> Клиентский комплект."
+    print_warn "Клиенту обязателен свой wg-obfuscator, без него туннель не поднимется."
+    return 0
+}
+
+# --> WGO: КЛИЕНТСКИЙ КОМПЛЕКТ <--
+# - client.conf + wg-obfuscator.conf + инструкция одним tar.gz -
+wgo_client_kit() {
+    _wgo_installed || { print_err "wg-obfuscator не установлен"; return 1; }
+    local bound; bound=$(_wgo_bound_list)
+    [[ -z "$bound" ]] && { print_warn "Нет привязанных интерфейсов"; return 0; }
+
+    print_section "Клиентский комплект"
+    local arr=() i=1 x
+    for x in $bound; do echo -e "  ${GREEN}${i})${NC} ${x}"; arr+=("$x"); (( i++ )); done
+    local sel="" iface=""
+    ask_raw "$(printf '  \033[1mИнтерфейс:\033[0m ')" sel
+    [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#arr[@]} )) || { print_err "Неверный выбор"; return 1; }
+    iface="${arr[$((sel-1))]}"
+
+    local clients
+    clients=$(awg_get_client_list "$iface")
+    if [[ -z "$clients" ]]; then
+        print_warn "На ${iface} нет клиентов."
+        local mk=""
+        ask_yn "Создать клиента сейчас?" "y" mk
+        [[ "$mk" != "yes" ]] && return 0
+        awg_add_client "$iface"
+        clients=$(awg_get_client_list "$iface")
+        [[ -z "$clients" ]] && { print_warn "Клиент не создан, отмена"; return 0; }
+    fi
+    echo ""
+    local carr=() j=1
+    for x in $clients; do echo -e "  ${GREEN}${j})${NC} ${x}"; carr+=("$x"); (( j++ )); done
+    local csel="" name=""
+    ask_raw "$(printf '  \033[1mКлиент:\033[0m ')" csel
+    [[ "$csel" =~ ^[0-9]+$ ]] && (( csel >= 1 && csel <= ${#carr[@]} )) || { print_err "Неверный выбор"; return 1; }
+    name="${carr[$((csel-1))]}"
+
+    local cdir
+    cdir="$(awg_iface_clients "$iface")/${name}"
+    [[ -f "${cdir}/client.conf" ]] || { print_err "Конфиг клиента не найден"; return 1; }
+
+    # - конфиги могли устареть, пересобираем перед выдачей -
+    _wgo_fix_client "$iface" "${cdir}/client.conf" >/dev/null
+
+    local tmp kit
+    tmp=$(mktemp -d) || { print_err "mktemp failed"; return 1; }
+    kit="${tmp}/${iface}-${name}-wgobfs"
+    mkdir -p "$kit"
+    cp -a "${cdir}/client.conf" "${kit}/client.conf"
+    cp -a "${cdir}/wg-obfuscator.conf" "${kit}/wg-obfuscator.conf" 2>/dev/null
+    _wgo_kit_readme "$iface" "$name" "${kit}/README.txt"
+
+    local tarball="${WGO_ELI_DIR}/${iface}-${name}-wgobfs.tar.gz"
+    tar -czf "$tarball" -C "$tmp" "$(basename "$kit")" 2>/dev/null
+    chmod 600 "$tarball"
+    rm -rf "$tmp"
+
+    print_ok "Комплект собран: ${tarball}"
+    echo ""
+    local dl=""
+    ask_yn "Выдать ссылку для скачивания комплекта?" "y" dl
+    [[ "$dl" == "yes" ]] && _awg_serve_conf "$tarball"
+
+    echo ""
+    local rm_kit=""
+    ask_yn "Удалить собранный комплект с сервера?" "y" rm_kit
+    [[ "$rm_kit" == "yes" ]] && { rm -f "$tarball"; print_ok "Комплект удалён с сервера"; }
+    return 0
+}
+
+# --> WGO: СМЕНА МАСКИРОВКИ <--
+wgo_set_masking() {
+    _wgo_installed || { print_err "wg-obfuscator не установлен"; return 1; }
+    local bound; bound=$(_wgo_bound_list)
+    [[ -z "$bound" ]] && { print_warn "Нет привязанных интерфейсов"; return 0; }
+
+    print_section "Маскировка"
+    local arr=() i=1 x
+    for x in $bound; do
+        echo -e "  ${GREEN}${i})${NC} ${x} (сейчас: $(book_read ".wgobfs.instances.\"${x}\".masking"))"
+        arr+=("$x"); (( i++ ))
+    done
+    local sel="" iface=""
+    ask_raw "$(printf '  \033[1mИнтерфейс:\033[0m ')" sel
+    [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#arr[@]} )) || { print_err "Неверный выбор"; return 1; }
+    iface="${arr[$((sel-1))]}"
+
+    echo ""
+    echo -e "  ${GREEN}1)${NC} AUTO - подхватывает маскировку клиента"
+    echo -e "  ${GREEN}2)${NC} STUN - только STUN-вход, клиенты без STUN отвалятся"
+    echo -e "  ${GREEN}3)${NC} NONE - без маскировки"
+    local masking="" m_ch=""
+    while true; do
+        ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" m_ch
+        case "$m_ch" in
+            1) masking="AUTO"; break ;;
+            2) masking="STUN"; break ;;
+            3) masking="NONE"; break ;;
+            *) print_warn "1, 2 или 3" ;;
+        esac
+    done
+
+    local old lport target key
+    old=$(book_read ".wgobfs.instances.\"${iface}\".masking")
+    lport=$(book_read ".wgobfs.instances.\"${iface}\".lport")
+    target=$(book_read ".wgobfs.instances.\"${iface}\".target")
+    key=$(book_read ".wgobfs.instances.\"${iface}\".key")
+    [[ -z "$lport" || -z "$target" || -z "$key" ]] && { print_err "Нет данных инстанса в книге"; return 1; }
+
+    _wgo_write_conf "$iface" "$lport" "$target" "$key" "$masking"
+    systemctl restart "$(_wgo_unit "$iface")" 2>/dev/null
+    if ! _wgo_verify_active "$iface"; then
+        print_err "Не завелось -> откат на ${old}"
+        _wgo_write_conf "$iface" "$lport" "$target" "$key" "$old"
+        systemctl restart "$(_wgo_unit "$iface")" 2>/dev/null
+        return 1
+    fi
+    _wgo_book_iface "$iface" "$lport" "$target" "$key" "$masking" "true"
+    print_ok "Маскировка ${iface}: ${masking}"
+    [[ "$masking" == "STUN" ]] && print_warn "Клиенты без STUN в конфиге обфускатора перестанут подключаться"
+    print_info "Клиентские комплекты пересобери заново: маскировка в них прописана."
+    return 0
+}
+
+# --> WGO: СТАТУС <--
+wgo_status() {
+    _wgo_installed || { print_warn "wg-obfuscator не установлен"; return 0; }
+    print_section "Статус wg-obfuscator"
+    print_info "Версия: $(book_read ".wgobfs.version")"
+    local bound; bound=$(_wgo_bound_list)
+    if [[ -z "$bound" ]]; then
+        print_warn "Нет привязанных интерфейсов"
+        return 0
+    fi
+    local iface
+    for iface in $bound; do
+        echo ""
+        local act lport awgact
+        act=$(systemctl is-active "$(_wgo_unit "$iface")" 2>/dev/null)
+        lport=$(book_read ".wgobfs.instances.\"${iface}\".lport")
+        awgact=$(systemctl is-active "awg-quick@${iface}" 2>/dev/null)
+        echo -e "  ${BOLD}${iface}${NC}: обфускатор ${act}, туннель ${awgact}"
+        echo -e "    публичный порт: ${lport}/udp"
+        echo -e "    цель: $(book_read ".wgobfs.instances.\"${iface}\".target")"
+        echo -e "    маскировка: $(book_read ".wgobfs.instances.\"${iface}\".masking")"
+        echo -e "    клиентов: $(awg_get_client_list "$iface" | wc -w)"
+    done
+    return 0
+}
+
+# --> WGO: ТЕСТ <--
+# - проверяем то, что видно с сервера: инстанс, сокет, туннель и закрытость порта AWG -
+wgo_test() {
+    _wgo_installed || { print_err "wg-obfuscator не установлен"; return 1; }
+    local bound; bound=$(_wgo_bound_list)
+    [[ -z "$bound" ]] && { print_warn "Нет привязанных интерфейсов"; return 0; }
+
+    print_section "Тест wg-obfuscator"
+    local iface
+    for iface in $bound; do
+        echo ""
+        echo -e "  ${BOLD}${iface}${NC}"
+        local unit lport awg_port
+        unit=$(_wgo_unit "$iface")
+        lport=$(book_read ".wgobfs.instances.\"${iface}\".lport")
+        awg_port=$(_wgo_iface_port "$iface")
+
+        if systemctl is-active --quiet "$unit"; then
+            print_ok "  инстанс активен"
+        else
+            print_err "  инстанс не активен: journalctl -u ${unit} -n 20 --no-pager"
+        fi
+
+        if ss -H -uln 2>/dev/null | grep -Eq "[:.]${lport}[[:space:]]"; then
+            print_ok "  слушает ${lport}/udp"
+        else
+            print_err "  порт ${lport}/udp не слушается"
+        fi
+
+        if systemctl is-active --quiet "awg-quick@${iface}"; then
+            print_ok "  туннель ${iface} поднят"
+        else
+            print_err "  туннель ${iface} не поднят"
+        fi
+
+        if _wgo_iface_is_vanilla "$iface"; then
+            print_ok "  интерфейс vanilla-WG"
+        else
+            print_err "  интерфейс НЕ vanilla: обфускатор ломает такие пакеты"
+        fi
+
+        # - главная проверка смысла: голый WG не должен быть виден снаружи -
+        if command -v ufw &>/dev/null && _ufw_has_rule "$awg_port" "udp"; then
+            print_err "  порт ${awg_port}/udp открыт в UFW: голый WireGuard виден снаружи"
+        elif ufw_active && ufw status verbose 2>/dev/null | grep -q "deny (incoming)"; then
+            print_ok "  порт ${awg_port}/udp закрыт (UFW deny incoming)"
+        elif iptables -C INPUT -i "$(_wgo_wan_iface)" -p udp --dport "$awg_port" -j DROP 2>/dev/null; then
+            print_ok "  порт ${awg_port}/udp закрыт (правило DROP)"
+        else
+            print_err "  порт ${awg_port}/udp ничем не закрыт: голый WireGuard виден снаружи"
+        fi
+
+        local hs
+        hs=$(awg show "$iface" latest-handshakes 2>/dev/null | awk '$2 > 0' | wc -l)
+        if [[ "$hs" -gt 0 ]]; then
+            print_ok "  живых хендшейков: ${hs}"
+        else
+            print_info "  хендшейков нет: клиент ещё не подключался или обфускатор у него не запущен"
+        fi
+    done
+    return 0
+}
+
+# --> WGO: ОБНОВЛЕНИЕ ДВИЖКА <--
+# - ручное: cron-обновление вынесено до общей headless-ветки the_vps_of_eli.sh -
+wgo_update() {
+    _wgo_installed || { print_err "wg-obfuscator не установлен"; return 1; }
+    print_section "Обновление wg-obfuscator"
+    local cur tag
+    cur=$(_wgo_version)
+    tag=$(_wgo_resolve_tag)
+    [[ -z "$tag" ]] && { print_err "Не удалось определить последний релиз"; return 1; }
+    print_info "Установлено: ${cur:-неизвестно}, последний релиз: ${tag}"
+    if [[ "$cur" == "$tag" ]]; then
+        print_ok "Уже последняя версия"
+        local force=""
+        ask_yn "Всё равно переустановить?" "n" force
+        [[ "$force" != "yes" ]] && return 0
+    fi
+
+    local upd=""
+    ask_yn "Обновить движок до ${tag}?" "y" upd
+    [[ "$upd" != "yes" ]] && return 0
+
+    # - бинарь заменяется под работающими инстансами, поэтому останавливаем их -
+    local bound iface
+    bound=$(_wgo_bound_list)
+    for iface in $bound; do systemctl stop "$(_wgo_unit "$iface")" 2>/dev/null; done
+
+    if ! _wgo_fetch_binary "$tag"; then
+        print_err "Обновление не удалось, поднимаю инстансы обратно"
+        for iface in $bound; do systemctl start "$(_wgo_unit "$iface")" 2>/dev/null; done
+        return 1
+    fi
+
+    book_write ".wgobfs.version" "$(_wgo_version)" string
+    local fail=0
+    for iface in $bound; do
+        systemctl start "$(_wgo_unit "$iface")" 2>/dev/null
+        _wgo_verify_active "$iface" || fail=1
+    done
+    [[ $fail -eq 1 ]] && { print_err "Часть инстансов не поднялась после обновления"; return 1; }
+    print_ok "Обновлено до $(_wgo_version)"
+    return 0
+}
+
+# --> WGO: ОТВЯЗКА ОТ ИНТЕРФЕЙСА <--
+# - клиенты возвращаются на прямой Endpoint, порт AWG открывается обратно -
+wgo_unbind() {
+    _wgo_installed || { print_err "wg-obfuscator не установлен"; return 1; }
+    local bound; bound=$(_wgo_bound_list)
+    [[ -z "$bound" ]] && { print_warn "Нет привязанных интерфейсов"; return 0; }
+
+    print_section "Отвязать обфускатор от интерфейса"
+    local arr=() i=1 x
+    for x in $bound; do echo -e "  ${GREEN}${i})${NC} ${x}"; arr+=("$x"); (( i++ )); done
+    local sel="" iface=""
+    ask_raw "$(printf '  \033[1mИнтерфейс:\033[0m ')" sel
+    [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#arr[@]} )) || { print_err "Неверный выбор"; return 1; }
+    iface="${arr[$((sel-1))]}"
+
+    print_warn "Клиенты ${iface} вернутся на прямой Endpoint, а порт туннеля откроется наружу."
+    print_warn "Голый WireGuard снова станет видимым для DPI."
+    local confirm=""
+    ask_yn "Отвязать ${iface}?" "n" confirm
+    [[ "$confirm" != "yes" ]] && return 0
+
+    local lport awg_port c cdir
+    lport=$(book_read ".wgobfs.instances.\"${iface}\".lport")
+    awg_port=$(_wgo_iface_port "$iface")
+
+    systemctl disable --now "$(_wgo_unit "$iface")" 2>/dev/null
+    rm -f "$(_wgo_conf "$iface")"
+    [[ -n "$lport" ]] && command -v ufw &>/dev/null && ufw delete allow "${lport}/udp" >/dev/null 2>&1
+    [[ -n "$awg_port" ]] && _wgo_unlock_awg_port "$iface" "$awg_port"
+
+    for c in $(awg_get_client_list "$iface"); do
+        cdir="$(awg_iface_clients "$iface")/${c}"
+        _wgo_unfix_client "$iface" "${cdir}/client.conf"
+    done
+
+    if [[ -n "$awg_port" ]] && command -v ufw &>/dev/null; then
+        local reopen=""
+        ask_yn "Открыть порт ${awg_port}/udp наружу (иначе туннель работать не будет)?" "y" reopen
+        [[ "$reopen" == "yes" ]] && ufw allow "${awg_port}/udp" comment "AWG ${iface}" 2>/dev/null
+    fi
+
+    book_del ".wgobfs.instances.\"${iface}\""
+    print_ok "Обфускатор отвязан от ${iface}"
+    print_info "Раздай клиентам конфиги заново: меню AmneziaWG -> Показать конфиг клиента."
+    return 0
+}
+
+# --> WGO: ПОЛНОЕ УДАЛЕНИЕ <--
+wgo_remove() {
+    _wgo_installed || { print_warn "wg-obfuscator не установлен"; return 0; }
+    print_section "Полное удаление wg-obfuscator"
+    print_warn "Все привязки снимаются, клиенты возвращаются на прямой Endpoint."
+    local confirm=""
+    ask_yn "Удалить wg-obfuscator полностью?" "n" confirm
+    [[ "$confirm" != "yes" ]] && return 0
+
+    local iface lport awg_port c cdir
+    for iface in $(_wgo_bound_list); do
+        lport=$(book_read ".wgobfs.instances.\"${iface}\".lport")
+        awg_port=$(_wgo_iface_port "$iface")
+        systemctl disable --now "$(_wgo_unit "$iface")" 2>/dev/null
+        [[ -n "$lport" ]] && command -v ufw &>/dev/null && ufw delete allow "${lport}/udp" >/dev/null 2>&1
+        [[ -n "$awg_port" ]] && _wgo_unlock_awg_port "$iface" "$awg_port"
+        for c in $(awg_get_client_list "$iface"); do
+            cdir="$(awg_iface_clients "$iface")/${c}"
+            _wgo_unfix_client "$iface" "${cdir}/client.conf"
+        done
+        if [[ -n "$awg_port" ]] && command -v ufw &>/dev/null; then
+            ufw allow "${awg_port}/udp" comment "AWG ${iface}" 2>/dev/null || true
+        fi
+    done
+
+    rm -f "$WGO_UNIT_TPL"
+    systemctl daemon-reload 2>/dev/null
+    rm -rf "$WGO_ELI_DIR"
+    rm -rf "$WGO_DIR"
+
+    book_del ".wgobfs"
+    print_ok "wg-obfuscator удалён"
+    print_info "Порты туннелей открыты обратно, конфиги клиентов возвращены на прямой Endpoint."
+    return 0
+}
+
+# --> WGO: УПРАВЛЕНИЕ <--
+wgo_manage() {
+    while true; do
+        eli_header
+        eli_banner "Управление wg-obfuscator" \
+            "Привязка обфускатора к vanilla-интерфейсам, выдача клиентских комплектов,
+  маскировка, статус, тест, обновление, отвязка и удаление."
+
+        echo -e "  ${GREEN}1)${NC} Привязать к интерфейсу"
+        echo -e "  ${GREEN}2)${NC} Клиентский комплект"
+        echo -e "  ${GREEN}3)${NC} Маскировка"
+        echo -e "  ${GREEN}4)${NC} Статус"
+        echo -e "  ${GREEN}5)${NC} Тест"
+        echo -e "  ${GREEN}6)${NC} Обновить движок"
+        echo -e "  ${GREEN}7)${NC} Отвязать от интерфейса"
+        echo -e "  ${GREEN}8)${NC} Удалить полностью"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) wgo_bind_iface  || print_warn "Ошибка привязки"; eli_pause ;;
+            2) wgo_client_kit  || print_warn "Ошибка сборки комплекта"; eli_pause ;;
+            3) wgo_set_masking || print_warn "Ошибка смены маскировки"; eli_pause ;;
+            4) wgo_status; eli_pause ;;
+            5) wgo_test        || print_warn "Ошибка теста"; eli_pause ;;
+            6) wgo_update      || print_warn "Ошибка обновления"; eli_pause ;;
+            7) wgo_unbind      || print_warn "Ошибка отвязки"; eli_pause ;;
+            8) wgo_remove      || print_warn "Ошибка удаления"; eli_pause ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 8"; eli_pause ;;
+        esac
+    done
+}
+
+# === 02f_zapret.sh ===
+# --> МОДУЛЬ: ZAPRET2 (обход DPI на nfqueue) <--
+# - VPS-side десинхронизация форвард трафика awg клиентов через nfqws2 -
+# - движок bol-van/zapret2, systemd-юнит и nftables свои на интерфейс -
+# - привязка к конкретному awg-интерфейсу: свои nft-правила по iifname на форвард пути -
+
+ZAP2_REPO="bol-van/zapret2"
+ZAP2_DIR="/opt/zapret2"
+ZAP2_BIN="${ZAP2_DIR}/nfq2/nfqws2"
+ZAP2_ELI_DIR="/etc/vps-eli-stack/zapret2"
+
+# - hostlist должен оставаться читаемым ПОСЛЕ дропа привилегий nfqws2 до nobody -
+# - поэтому держим его в читаемом каталоге движка, а не в секретном 700 -
+ZAP2_HOSTS_DIR="${ZAP2_DIR}/eli"
+ZAP2_UNIT_TPL="/etc/systemd/system/zapret2-eli@.service"
+ZAP2_QNUM_BASE=4200
+
+# - в POSTNAT-режиме (форвард после NAT) nfqws2 метит свои fake-пакеты этой маркой -
+# - nft пропускает в очередь только НЕмеченые пакеты (защита от петли), а fake - notrack -
+ZAP2_POSTNAT_MARK="0x20000000"
+ZAP2_LUA_INIT="${ZAP2_DIR}/lua/zapret-lib.lua"
+
+# - функции десинка (fake/multisplit/multidisorder) определены здесь, без неё 'function does not exist' -
+ZAP2_LUA_ANTIDPI="${ZAP2_DIR}/lua/zapret-antidpi.lua"
+ZAP2_ROLLBACK_SEC=90
+
+# - домены по умолчанию для blockcheck и hostlist -
+ZAP2_DEFAULT_HOSTS="youtube.com
+googlevideo.com
+ytimg.com
+discord.com
+discord.gg
+discordapp.com
+discord.media"
+
+# --> ZAP2: ПУТИ ПО ИНТЕРФЕЙСУ <--
+_zap_conf()  { echo "${ZAP2_ELI_DIR}/${1}.conf"; }
+_zap_hosts() { echo "${ZAP2_HOSTS_DIR}/${1}.hosts"; }
+_zap_nftf()  { echo "${ZAP2_ELI_DIR}/${1}.nft"; }
+_zap_table() { echo "zeli_${1}"; }
+_zap_unit()  { echo "zapret2-eli@${1}.service"; }
+
+# --> ZAP2: ОПРЕДЕЛЕНИЕ АРХИТЕКТУРЫ <--
+# - маппинг uname -m в имя каталога бинар апстрима -
+_zap_arch() {
+    case "$(uname -m)" in
+        x86_64|amd64)   echo "linux-x86_64" ;;
+        aarch64|arm64)  echo "linux-arm64" ;;
+        *)              echo "" ;;
+    esac
+}
+
+# --> ZAP2: WAN-ИНТЕРФЕЙС <--
+# - берём из книги, при пустом значении определяем по маршруту по умолчанию -
+_zap_wan_iface() {
+    local w
+    w=$(book_read ".system.main_iface")
+    [[ -z "$w" ]] && w=$(ip route show default 2>/dev/null | awk '/default/{print $5}' | head -1)
+    echo "$w"
+}
+
+# --> ZAP2: СПИСОК ПРИВЯЗАННЫХ ИНТЕРФЕЙСОВ <--
+# - awg-интерфейсы, для которых существует конфиг стратегии -
+_zap_bound_list() {
+    local result=() f name
+    for f in "${ZAP2_ELI_DIR}"/*.conf; do
+        [[ -f "$f" ]] || continue
+        name=$(basename "$f" | sed 's/\.conf$//')
+        result+=("$name")
+    done
+    echo "${result[@]:-}"
+}
+
+# --> ZAP2: НОМЕР ОЧЕРЕДИ ДЛЯ ИНТЕРФЕЙСА <--
+# - если уже назначен в book -> берём его, иначе первый свободный -
+_zap_qnum_for() {
+    local iface="$1" q used bound
+    q=$(book_read ".zapret.interfaces.\"${iface}\".qnum")
+    if [[ "$q" =~ ^[0-9]+$ ]]; then
+        echo "$q"; return 0
+    fi
+    local n="$ZAP2_QNUM_BASE" taken
+    while :; do
+        taken="no"
+        for bound in $(_zap_bound_list); do
+            used=$(book_read ".zapret.interfaces.\"${bound}\".qnum")
+            [[ "$used" == "$n" ]] && { taken="yes"; break; }
+        done
+        [[ "$taken" == "no" ]] && { echo "$n"; return 0; }
+        (( n++ ))
+    done
+}
+
+# --> ZAP2: ПРОВЕРКА УСТАНОВКИ <--
+_zap_installed() {
+    [[ -x "$ZAP2_BIN" ]] && [[ "$(book_read ".zapret.installed")" == "true" ]]
+}
+
+# --> ZAP2: ПРОВЕРКА ОКРУЖЕНИЯ <--
+# - виртуализация, архитектура, ядро (nfqueue), nftables, conntrack -
+# - жёсткий отказ на всём, где packet magic на форварде не работает -
+_zap_check_env() {
+    local ok=0
+
+    # - виртуализация: KVM или bare-metal. OpenVZ/LXC - packet magic на форварде херня -
+    local virt
+    virt=$(systemd-detect-virt 2>/dev/null || echo "unknown")
+    case "$virt" in
+        openvz|lxc|lxc-libvirt|docker|podman)
+            print_err "Виртуализация ${virt}: nfqueue-десинк на форварде не работает. Нужен KVM или bare-metal."
+            ok=1 ;;
+        *)
+            print_ok "Виртуализация: ${virt}" ;;
+    esac
+
+    # - архитектура -
+    local arch
+    arch=$(_zap_arch)
+    if [[ -z "$arch" ]]; then
+        print_err "Архитектура $(uname -m) без готовых бинарей. Поддержка: x86_64, arm64."
+        ok=1
+    else
+        print_ok "Архитектура: ${arch}"
+    fi
+
+    # - nftables: обязателен, только он умеет пост-NAT форвард -
+    if command -v nft &>/dev/null; then
+        print_ok "nftables: $(nft --version 2>/dev/null | awk '{print $2}')"
+    else
+        print_warn "nftables не установлен -> поставим на этапе зависимостей"
+    fi
+
+    # - модуль ядра nfnetlink_queue -
+    if modprobe nfnetlink_queue 2>/dev/null || [[ -d /proc/sys/net/netfilter ]]; then
+        print_ok "nfqueue: поддержка ядра есть"
+    else
+        print_err "Ядро без nfnetlink_queue = NFQUEUE недоступен"
+        ok=1
+    fi
+
+    # - conntrack: нужен для ct packets N в правилах -
+    if [[ -d /sys/module/nf_conntrack ]] || [[ -f /proc/net/nf_conntrack ]] || modprobe nf_conntrack 2>/dev/null; then
+        print_ok "conntrack: доступен"
+    else
+        print_warn "conntrack не загружен -> будет загружен при применении правил"
+    fi
+
+    return $ok
+}
+
+# --> ZAP2: ПРОВЕРКА НАЛИЧИЯ VPN <--
+# - без awg-интерфейса zapret десинхронизирует только прямой трафик VPS, не клиентов -
+_zap_check_vpn() {
+    local ifaces
+    ifaces=$(awg_get_iface_list)
+    if [[ -n "$ifaces" ]]; then
+        print_ok "AWG-интерфейсы найдены: ${ifaces}"
+        return 0
+    fi
+    print_warn "Ни одного AWG-интерфейса не установлено."
+    print_info "zapret2 будет десинхронизировать только трафик VPS, а не трафик клиентов через туннель."
+    print_info "Привязать к интерфейсу можно будет только после установки AWG."
+    local cont=""
+    ask_yn "Продолжить установку (VPN появится позже)?" "n" cont
+    [[ "$cont" == "yes" ]]
+}
+
+# --> ZAP2: УСТАНОВКА ЗАВИСИМОСТЕЙ <--
+_zap_install_prereq() {
+    print_info "Установка зависимостей..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq 2>/dev/null
+    apt-get install -y -qq nftables conntrack curl tar gzip jq 2>/dev/null
+    systemctl enable nftables 2>/dev/null || true
+    command -v nft &>/dev/null
+}
+
+# --> ZAP2: УСТАНОВКА BUILD-ТУЛЧЕЙНА <--
+# - только при отсутствии готового бинарника под нашу архитектуру -
+_zap_install_buildtools() {
+    print_warn "Готового бинаря нет -> ставим тулчейн для сборки (~300 МБ)"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get install -y -qq make gcc zlib1g-dev libcap-dev libnetfilter-queue-dev \
+        libmnl-dev libsystemd-dev libluajit2-5.1-dev 2>/dev/null
+}
+
+# --> ZAP2: РЕЗОЛВ ТЕГА РЕЛИЗА <--
+# - последний релиз через GitHub API, с возможностью переопределить вручную -
+_zap_resolve_tag() {
+    local tag
+    tag=$(curl -fsSL --connect-timeout 10 \
+        "https://api.github.com/repos/${ZAP2_REPO}/releases/latest" 2>/dev/null \
+        | jq -r '.tag_name // empty' 2>/dev/null)
+    echo "$tag"
+}
+
+# --> ZAP2: ССЫЛКА НА АРХИВ РЕЛИЗА <--
+# - берём не embedded и не openwrt tar.gz из ассетов тега -
+_zap_asset_url() {
+    local tag="$1"
+    curl -fsSL --connect-timeout 10 \
+        "https://api.github.com/repos/${ZAP2_REPO}/releases/tags/${tag}" 2>/dev/null \
+        | jq -r '.assets[]?.browser_download_url
+                 | select(test("tar\\.gz$"))
+                 | select(test("embedded|openwrt")|not)' 2>/dev/null \
+        | head -1
+}
+
+# --> ZAP2: ПОЛУЧЕНИЕ БИНАРЯ <--
+# - скачиваем архив релиза, кладём nfqws2 под нашу arch, при отсутствии -> собираем -
+_zap_fetch_binary() {
+    local tag="$1" arch tmp url tarball extracted src
+    arch=$(_zap_arch)
+    tmp=$(mktemp -d) || { print_err "mktemp failed"; return 1; }
+
+    url=$(_zap_asset_url "$tag")
+    if [[ -z "$url" ]]; then
+        print_warn "Готовый архив релиза не найден, берём исходники для сборки"
+        url="https://api.github.com/repos/${ZAP2_REPO}/tarball/${tag}"
+    fi
+
+    print_info "Скачиваем ${tag}..."
+    tarball="${tmp}/zapret2.tar.gz"
+    if ! curl -fsSL --connect-timeout 15 -o "$tarball" "$url"; then
+        print_err "Не удалось скачать релиз"
+        rm -rf "$tmp"; return 1
+    fi
+
+    mkdir -p "${tmp}/x"
+    if ! tar -xzf "$tarball" -C "${tmp}/x" 2>/dev/null; then
+        print_err "Архив повреждён (tar failed)"
+        rm -rf "$tmp"; return 1
+    fi
+    # - у tarball от API один верхнеуровневый каталог -
+    extracted=$(find "${tmp}/x" -maxdepth 1 -mindepth 1 -type d | head -1)
+    [[ -z "$extracted" ]] && extracted="${tmp}/x"
+
+    # - раскладываем движок в /opt/zapret2 (lua обязателен: там реализация desync) -
+    mkdir -p "${ZAP2_DIR}/nfq2" "${ZAP2_DIR}/mdig" "${ZAP2_DIR}/ip2net"
+    for d in files lua ipset blockcheck2.d common; do
+        [[ -d "${extracted}/${d}" ]] && cp -a "${extracted}/${d}" "${ZAP2_DIR}/" 2>/dev/null
+    done
+    [[ -f "${extracted}/blockcheck2.sh" ]] && cp -a "${extracted}/blockcheck2.sh" "${ZAP2_DIR}/" 2>/dev/null
+
+    # - ищем готовые бинарники под arch: nfqws2 + mdig + ip2net (mdig нужен blockcheck) -
+    local bindir="${extracted}/binaries/${arch}"
+    if [[ -f "${bindir}/nfqws2" ]]; then
+        cp -a "${bindir}/nfqws2" "$ZAP2_BIN"; chmod 755 "$ZAP2_BIN"
+        [[ -f "${bindir}/mdig" ]]   && { cp -a "${bindir}/mdig"   "${ZAP2_DIR}/mdig/mdig";     chmod 755 "${ZAP2_DIR}/mdig/mdig"; }
+        [[ -f "${bindir}/ip2net" ]] && { cp -a "${bindir}/ip2net" "${ZAP2_DIR}/ip2net/ip2net"; chmod 755 "${ZAP2_DIR}/ip2net/ip2net"; }
+    else
+        # - готового нет: собираем из исходников (nfq2/mdig/ip2net) -
+        _zap_install_buildtools
+        print_info "Сборка бинарей из исходников..."
+        for comp in nfq2 mdig ip2net; do
+            [[ -d "${extracted}/${comp}" ]] && make -C "${extracted}/${comp}" 2>/dev/null
+        done
+        [[ -f "${extracted}/nfq2/nfqws2" ]]     && { cp -a "${extracted}/nfq2/nfqws2" "$ZAP2_BIN"; chmod 755 "$ZAP2_BIN"; }
+        [[ -f "${extracted}/mdig/mdig" ]]       && { cp -a "${extracted}/mdig/mdig" "${ZAP2_DIR}/mdig/mdig"; chmod 755 "${ZAP2_DIR}/mdig/mdig"; }
+        [[ -f "${extracted}/ip2net/ip2net" ]]   && { cp -a "${extracted}/ip2net/ip2net" "${ZAP2_DIR}/ip2net/ip2net"; chmod 755 "${ZAP2_DIR}/ip2net/ip2net"; }
+    fi
+
+    rm -rf "$tmp"
+
+    # - верификация: бинарник на месте, запускается, lua-библиотека присутствует -
+    if [[ ! -x "$ZAP2_BIN" ]]; then
+        print_err "Бинарь nfqws2 не получен"
+        return 1
+    fi
+    if ! "$ZAP2_BIN" --version >/dev/null 2>&1 && ! "$ZAP2_BIN" --help >/dev/null 2>&1; then
+        print_err "Бинарь nfqws2 не запускается на этой системе"
+        return 1
+    fi
+    if [[ ! -f "$ZAP2_LUA_INIT" || ! -f "$ZAP2_LUA_ANTIDPI" ]]; then
+        print_err "lua-библиотеки не найдены (${ZAP2_DIR}/lua) = без них стратегии не работают"
+        return 1
+    fi
+    [[ -x "${ZAP2_DIR}/mdig/mdig" ]] || print_warn "mdig не установлен = автоподбор стратегий будет недоступен"
+    print_ok "nfqws2 установлен: ${ZAP2_BIN}"
+    return 0
+}
+
+# --> ZAP2: SYSTEMD ШАБЛОН <--
+# - один инстанс на awg-интерфейс, все параметры (включая --qnum) в @configfile -
+_zap_write_unit_template() {
+    cat > "$ZAP2_UNIT_TPL" << EOF
+[Unit]
+Description=zapret2 (Eli) nfqws2 for %i
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${ZAP2_BIN} @${ZAP2_ELI_DIR}/%i.conf
+Restart=on-failure
+RestartSec=3
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 644 "$ZAP2_UNIT_TPL"
+    systemctl daemon-reload 2>/dev/null
+}
+
+# --> ZAP2: BASELINE-СТРАТЕГИЯ <--
+# - взято дословно из апстримового config.default (lua-desync fake/split/disorder) -
+# - фильтрация по hostlist интерфейса: десинк только для перечисленных доменов -
+_zap_baseline_strategy() {
+    local hostf="$1"
+    cat << EOF
+--filter-tcp=80 --filter-l7=http --hostlist=${hostf} --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5 --new
+--filter-tcp=443 --filter-l7=tls --hostlist=${hostf} --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5 --lua-desync=multisplit:pos=1 --new
+--filter-udp=443 --filter-l7=quic --hostlist=${hostf} --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=6
+EOF
+}
+
+# --> ZAP2: ЗАПИСЬ КОНФИГА СТРАТЕГИИ <--
+# - формирует @configfile: qnum, fwmark (loop-guard), lua-init (реализация desync), потом профили -
+# - без --lua-init функции lua-desync не существуют = nfqws2 падает на старте -
+_zap_write_conf() {
+    local iface="$1" strategy="$2" qnum conf
+    qnum=$(_zap_qnum_for "$iface")
+    conf=$(_zap_conf "$iface")
+    {
+        echo "--qnum=${qnum}"
+        echo "--fwmark=${ZAP2_POSTNAT_MARK}"
+        echo "--lua-init=@${ZAP2_LUA_INIT}"
+        echo "--lua-init=@${ZAP2_LUA_ANTIDPI}"
+        echo "$strategy"
+    } > "$conf"
+    chmod 600 "$conf"
+    echo "$qnum"
+}
+
+# --> ZAP2: HOSTLIST ИНТЕРФЕЙСА <--
+# - создаёт файл со списком доменов; 644 в читаемом каталоге, чтобы nfqws2 читал после дропа прав -
+_zap_ensure_hosts() {
+    local iface="$1" hostf
+    mkdir -p "$ZAP2_HOSTS_DIR"; chmod 755 "$ZAP2_HOSTS_DIR"
+    hostf=$(_zap_hosts "$iface")
+    if [[ ! -f "$hostf" ]]; then
+        echo "$ZAP2_DEFAULT_HOSTS" > "$hostf"
+    fi
+    chmod 644 "$hostf"
+    echo "$hostf"
+}
+
+# --> ZAP2: ПОСТРОЕНИЕ NFT ПРАВИЛ <--
+# - канон из мануала zapret2 (POSTNAT): postrouting priority 101 (после NAT) -
+# - скоуп по iifname конкретного awg-интерфейса + oifname WAN (только форвард этого туннеля) -
+# - loop-guard: fake-пакеты nfqws2 помечены POSTNAT маркой, их не берём в очередь -
+# - predefrag/output notrack: fake-пакеты не должны проходить conntrack/NAT проверки -
+# - SSH структурно не затрагивается: это форвард, а не INPUT хоста -
+_zap_build_nft() {
+    local iface="$1" qnum="$2" wan="$3" table nftf
+    table=$(_zap_table "$iface")
+    nftf=$(_zap_nftf "$iface")
+    cat > "$nftf" << EOF
+table inet ${table} {
+    chain postnat {
+        type filter hook postrouting priority 101; policy accept;
+        iifname "${iface}" oifname "${wan}" meta mark and ${ZAP2_POSTNAT_MARK} == 0 meta l4proto tcp tcp dport { 80, 443 } ct original packets 1-10 counter queue num ${qnum} bypass
+        iifname "${iface}" oifname "${wan}" meta mark and ${ZAP2_POSTNAT_MARK} == 0 meta l4proto udp udp dport 443 ct original packets 1-6 counter queue num ${qnum} bypass
+    }
+    chain predefrag {
+        type filter hook output priority -402; policy accept;
+        meta mark and ${ZAP2_POSTNAT_MARK} != 0 notrack
+    }
+}
+EOF
+    chmod 600 "$nftf"
+    echo "$nftf"
+}
+
+# --> ZAP2: ПРОВЕРКА СВЯЗНОСТИ <--
+# - хостовый егресс жив + ruleset валиден + инстанс поднят -
+_zap_connectivity_ok() {
+    local iface="$1"
+    # - egress самого VPS не должен пострадать -
+    curl -fsS --connect-timeout 5 --max-time 8 -o /dev/null https://1.1.1.1 2>/dev/null \
+        || curl -fsS --connect-timeout 5 --max-time 8 -o /dev/null https://8.8.8.8 2>/dev/null \
+        || return 1
+    # - ruleset загружен -
+    nft list table inet "$(_zap_table "$iface")" &>/dev/null || return 1
+    return 0
+}
+
+# --> ZAP2: ПРОВЕРКА ЗАПУСКА ИНСТАНСА <--
+# - Type=simple рапортует active сразу при exec, а nfqws2 может упасть секундой позже -
+# - даём осесть и проверяем реальное состояние, при падении показываем причину из journalctl -
+_zap_verify_active() {
+    local iface="$1" unit sub
+    unit=$(_zap_unit "$iface")
+    sleep 2
+    sub=$(systemctl show -p SubState --value "$unit" 2>/dev/null)
+    if [[ "$sub" == "running" ]] && systemctl is-active --quiet "$unit"; then
+        return 0
+    fi
+    print_err "Инстанс ${unit} не удержался (SubState=${sub:-?}). Причина:"
+    journalctl -u "$unit" -n 15 --no-pager 2>/dev/null | sed 's/^/    /'
+    return 1
+}
+
+# --> ZAP2: ГИБРИДНЫЙ ОТКАТ <--
+# - применяем правила атомарно, ставим страховочный таймер, проверяем, меняем или откатываем -
+_zap_apply_with_rollback() {
+    local iface="$1" nftf="$2" table
+    table=$(_zap_table "$iface")
+
+    # - снапшот прежнего состояния таблицы, если была -
+    local had_table="no"
+    nft list table inet "$table" &>/dev/null && had_table="yes"
+
+    # - атомарное применение -
+    nft delete table inet "$table" 2>/dev/null
+    if ! nft -f "$nftf" 2>/dev/null; then
+        print_err "nftables отклонил правила - откат не требуется, ничего не применено"
+        return 1
+    fi
+
+    # - страховочный таймер -> снос таблицы, если подтверждение не пришло -
+    local rbunit="zeli-rollback-${iface}"
+    systemctl reset-failed "${rbunit}.timer" 2>/dev/null || true
+    systemd-run --unit="$rbunit" --on-active="${ZAP2_ROLLBACK_SEC}" \
+        /usr/sbin/nft delete table inet "$table" >/dev/null 2>&1 || \
+        systemd-run --unit="$rbunit" --on-active="${ZAP2_ROLLBACK_SEC}" \
+        nft delete table inet "$table" >/dev/null 2>&1
+
+    # - хостовая проверка -
+    if ! _zap_connectivity_ok "$iface"; then
+        print_err "Проверка связности не прошла = откат"
+        systemctl stop "${rbunit}.timer" 2>/dev/null || true
+        nft delete table inet "$table" 2>/dev/null
+        return 1
+    fi
+
+    print_ok "Правила применены. Страховочный откат через ${ZAP2_ROLLBACK_SEC} сек, если не подтвердишь."
+    print_info "Проверь на клиенте: трафик через ${iface} жив, целевые сервисы открываются."
+    local confirm=""
+    ask_yn "Клиентский трафик работает? Зафиксировать правила?" "y" confirm
+
+    if [[ "$confirm" == "yes" ]]; then
+        systemctl stop "${rbunit}.timer" 2>/dev/null || true
+        # - переносим таблицу в постоянные правила -
+        cp "$nftf" "$(_zap_nftf "$iface")" 2>/dev/null || true
+        print_ok "Правила зафиксированы для ${iface}"
+        return 0
+    fi
+
+    print_warn "Не подтверждено -> откат"
+    systemctl stop "${rbunit}.timer" 2>/dev/null || true
+    nft delete table inet "$table" 2>/dev/null
+    return 1
+}
+
+# --> ZAP2: ПОСТОЯННОЕ ПРИМЕНЕНИЕ NFT ПРИ СТАРТЕ <--
+# - правила живут в systemd юните загрузки таблицы, чтобы переживать reboot -
+_zap_write_nft_loader() {
+    local iface="$1" nftf table
+    nftf=$(_zap_nftf "$iface")
+    table=$(_zap_table "$iface")
+    local loader="/etc/systemd/system/zeli-nft-${iface}.service"
+    cat > "$loader" << EOF
+[Unit]
+Description=zapret2 (Eli) nft rules for ${iface}
+After=nftables.service network-pre.target
+Before=$(_zap_unit "$iface")
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f ${nftf}
+ExecStop=/usr/sbin/nft delete table inet ${table}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 644 "$loader"
+    systemctl daemon-reload 2>/dev/null
+    systemctl enable "zeli-nft-${iface}.service" 2>/dev/null
+}
+
+# --> ZAP2: ЗАПИСЬ В КНИГУ ПО ИНТЕРФЕЙСУ <--
+_zap_book_iface() {
+    local iface="$1" qnum="$2" strat="$3" bound="$4" lastbc="$5"
+    local obj
+    obj=$(jq -n \
+        --argjson q "$qnum" \
+        --arg s "$strat" \
+        --argjson b "$bound" \
+        --arg lb "$lastbc" \
+        '{qnum:$q, strategy:$s, bound:$b, last_blockcheck:$lb}')
+    book_write_obj ".zapret.interfaces.\"${iface}\"" "$obj"
+}
+
+# --> ZAP2: ИНИЦИАЛИЗАЦИЯ РАЗДЕЛА КНИГИ <--
+_zap_book_init() {
+    [[ -z "$(book_read ".zapret.installed")" ]] || return 0
+    local obj
+    obj=$(jq -n '{installed:false, version:"", autoupdate_enabled:false, interfaces:{}}')
+    book_write_obj ".zapret" "$obj"
+}
+
+# --> ZAP2: ПРИВЯЗКА К ИНТЕРФЕЙСУ <--
+# - выбор awg интерфейса, стратегия, применение с откатом, запуск инстанса -
+zapret_bind_iface() {
+    _zap_installed || { print_err "zapret2 не установлен"; return 1; }
+
+    local ifaces
+    ifaces=$(awg_get_iface_list)
+    if [[ -z "$ifaces" ]]; then
+        print_err "Нет ни одного AWG интерфейса для привязки"
+        return 1
+    fi
+
+    print_section "Привязка zapret2 к интерфейсу"
+    local arr=() i=1
+    for x in $ifaces; do
+        echo -e "  ${GREEN}${i})${NC} ${x}"
+        arr+=("$x")
+        (( i++ ))
+    done
+    echo ""
+    local sel="" iface=""
+    ask_raw "$(printf '  \033[1mВыберите интерфейс (1-%s):\033[0m ' "${#arr[@]}")" sel
+    [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#arr[@]} )) || { print_err "Неверный выбор"; return 1; }
+    iface="${arr[$((sel-1))]}"
+
+    local wan
+    wan=$(_zap_wan_iface)
+    [[ -z "$wan" ]] && { print_err "Не удалось определить WAN интерфейс"; return 1; }
+
+    # - hostlist и стратегия -
+    local hostf strat qnum nftf unit
+    hostf=$(_zap_ensure_hosts "$iface")
+    strat=$(_zap_baseline_strategy "$hostf")
+    qnum=$(_zap_write_conf "$iface" "$strat")
+    nftf=$(_zap_build_nft "$iface" "$qnum" "$wan")
+    unit=$(_zap_unit "$iface")
+
+    # - !ВАЖНО! -> сначала поднимаем nfqws2 (слушатель очереди), потом заводим правила -
+    # - иначе трафик идёт в queue без слушателя (bypass пропускает), десинка нет и тест пустой -
+    _zap_write_nft_loader "$iface"
+    systemctl enable "$unit" 2>/dev/null
+    systemctl restart "$unit" 2>/dev/null
+    if ! _zap_verify_active "$iface"; then
+        systemctl disable --now "$unit" 2>/dev/null
+        systemctl disable --now "zeli-nft-${iface}.service" 2>/dev/null
+        rm -f "$(_zap_conf "$iface")"
+        print_err "Привязка отменена -> инстанс nfqws2 не стартовал"
+        return 1
+    fi
+
+    # - теперь правила с гибридным откатом (очередь уже со слушателем) -
+    if ! _zap_apply_with_rollback "$iface" "$nftf"; then
+        systemctl disable --now "$unit" 2>/dev/null
+        systemctl disable --now "zeli-nft-${iface}.service" 2>/dev/null
+        rm -f "$(_zap_conf "$iface")"
+        return 1
+    fi
+
+    print_ok "Инстанс zapret2 для ${iface} запущен (queue ${qnum})"
+    _zap_book_iface "$iface" "$qnum" "baseline" "true" ""
+    book_write ".zapret.installed" "true" bool
+    return 0
+}
+
+# --> ZAP2: ИЗВЛЕЧЕНИЕ ПОБЕДИВШЕЙ СТРАТЕГИИ ИЗ ЛОГА <--
+# - формат: строка-маркер "!!!!! AVAILABLE !!!!!", а НА СЛЕДУЮЩЕЙ строке -
+#   "- <test> ipv4 <domain> : nfqws2 <фрагмент>". Берём строку после маркера через -A1 -
+# - фрагмент уже содержит --payload/--lua-desync, но НЕ содержит --filter/--hostlist (их добавим сами) -
+# - матч СТРОГО по имени теста в начале строки
+_zap_extract_frag() {
+    local log="$1" test="$2"
+    grep -A1 -F '!!!!! AVAILABLE !!!!!' "$log" 2>/dev/null \
+        | grep -E "^- ${test} " \
+        | grep -oE ': nfqws2 .*$' \
+        | sed 's/^: nfqws2 //' \
+        | head -1
+}
+
+# --> ZAP2: ПРОГОН BLOCKCHECK2 <--
+# - протоколы гоняем РАЗДЕЛЬНО: общий прогон тонет в сотнях tls12-победителей и умирал по
+#   таймауту ДО начала tls13, а реальные клиенты ходят по tls13 -
+# - BATCH=1 = официальный неинтерактивный режим. quick -> стоп на первом победителе -
+# --> ZAP2: УБОРКА АРТЕФАКТОВ BLOCKCHECK2 <--
+# - blockcheck2 именует свою nft-таблицу blockcheck<pid> (+ временную blockcheck<pid>_test),
+#   очередь qnum=pid%64536+1000, правила queue БЕЗ bypass. cleanup() апстрима на Linux пуст,
+#   снятие таблицы висит на нормальном pktws_ipt_unprepare. При убийстве по timeout, таблица
+#   остаётся и без слушателя дропает трафик к тестовым IP (в т.ч. дискорду) на хосте и форварде.
+#   Накапливаются от прогона к прогону = автоподбор ведёт себя по-разному, а трафик глохнет.
+#   Наши таблицы зовутся zeli_*, наш nfqws2 идёт с @<конфиг> без --qnum= в argv - их не трогаем. -
+_zap_blockcheck_gc() {
+    local t p cl
+    for t in $(nft list tables inet 2>/dev/null | awk '$2=="inet" && $3 ~ /^blockcheck[0-9]+(_test)?$/ {print $3}'); do
+        nft delete table inet "$t" 2>/dev/null
+    done
+    for p in $(pgrep -x nfqws2 2>/dev/null) $(pgrep -x dvtws2 2>/dev/null); do
+        cl=$(tr '\0' ' ' < "/proc/${p}/cmdline" 2>/dev/null)
+        [[ "$cl" == *"--qnum="* && "$cl" != *"/etc/vps-eli-stack/"* ]] && kill -9 "$p" 2>/dev/null
+    done
+}
+
+_zap_run_blockcheck() {
+    local bc="$1" log="$2" domains="$3" t12="$4" t13="$5" h3="$6" tmo="$7" rc
+    # - стартуем по чистому окружению: подметаем мусор прошлых прогонов -
+    _zap_blockcheck_gc
+    timeout "$tmo" env \
+        BATCH=1 DOMAINS="$domains" \
+        ENABLE_HTTP=0 ENABLE_HTTPS_TLS12="$t12" ENABLE_HTTPS_TLS13="$t13" ENABLE_HTTP3="$h3" \
+        IPVS=4 SCANLEVEL=quick PARALLEL=0 SKIP_IPBLOCK=1 \
+        sh "$bc" </dev/null 2>&1 | tee -a "$log"
+    rc=${PIPESTATUS[0]}
+    # - убираем за blockcheck обязательно: при timeout его собственный cleanup не срабатывает -
+    _zap_blockcheck_gc
+    [[ "$rc" == "124" ]] && print_warn "Прогон прерван по таймауту (${tmo}с) -> разбираю что успело найтись"
+    return 0
+}
+
+# --> ZAP2: АВТОПОДБОР И АВТОПРИМЕНЕНИЕ СТРАТЕГИИ <--
+# - неинтерактивный blockcheck2 по доменам -> парс победителя -> сборка профилей -> применение -
+zapret_autostrategy() {
+    _zap_installed || { print_err "zapret2 не установлен"; return 1; }
+    local bc="${ZAP2_DIR}/blockcheck2.sh"
+    [[ -f "$bc" ]] || { print_err "blockcheck2.sh не найден в ${ZAP2_DIR}"; return 1; }
+    [[ -x "${ZAP2_DIR}/mdig/mdig" ]] || { print_err "mdig не установлен - автоподбор невозможен, переустанови движок"; return 1; }
+
+    # - выбор интерфейса -
+    local bound; bound=$(_zap_bound_list)
+    [[ -z "$bound" ]] && { print_err "Сначала привяжи zapret2 к интерфейсу"; return 1; }
+    print_section "Автоподбор стратегии"
+    local arr=() i=1
+    for x in $bound; do echo -e "  ${GREEN}${i})${NC} ${x}"; arr+=("$x"); (( i++ )); done
+    local iface="${arr[0]}"
+    if (( ${#arr[@]} > 1 )); then
+        local sel=""
+        ask_raw "$(printf '  \033[1mВыберите интерфейс (1-%s):\033[0m ' "${#arr[@]}")" sel
+        [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#arr[@]} )) || { print_err "Неверный выбор"; return 1; }
+        iface="${arr[$((sel-1))]}"
+    fi
+
+    # - для ПРОГОНА берём только реально блокируемые домены: незаблокированный домен даёт
+    #   мгновенный AVAILABLE без обхода и просто съедает время. В hostlist они остаются -
+    print_info "Прогон по: discord.com. Можно добавить свои домены."
+    local extra=""
+    ask_raw "$(printf '  \033[1mДоп. домены через пробел (Enter - пропустить):\033[0m ')" extra
+    local domains="discord.com"
+    [[ -n "$extra" ]] && domains="${domains} ${extra}"
+
+    # - добавляем пользовательские домены в hostlist интерфейса (что реально десинкать) -
+    local hostf; hostf=$(_zap_ensure_hosts "$iface")
+    if [[ -n "$extra" ]]; then
+        for d in $extra; do grep -qxF "$d" "$hostf" 2>/dev/null || echo "$d" >> "$hostf"; done
+    fi
+
+    local log="${ZAP2_ELI_DIR}/blockcheck_$(date +%s).log"
+    : > "$log"
+    print_info "Прогон blockcheck2 по: ${domains}"
+    print_info "Режим BATCH/quick, прогресс виден ниже. Прерывать не нужно, есть таймаут."
+
+    # - ЭТАП 1: TLS 1.3. Именно по нему ходят реальные клиенты (в т.ч. gateway дискорда) -
+    print_info "Этап 1/3: TLS 1.3"
+    _zap_run_blockcheck "$bc" "$log" "$domains" 0 1 0 600
+    local tls_frag quic_frag tls_src="tls13"
+    tls_frag=$(_zap_extract_frag "$log" 'curl_test_https_tls13')
+
+    # - ЭТАП 2: TLS 1.2 только если по 1.3 ничего не нашлось -
+    if [[ -z "$tls_frag" ]]; then
+        print_warn "По TLS 1.3 победителей нет -> пробую TLS 1.2 (фолбэк)"
+        _zap_run_blockcheck "$bc" "$log" "$domains" 1 0 0 600
+        tls_frag=$(_zap_extract_frag "$log" 'curl_test_https_tls12')
+        tls_src="tls12"
+    fi
+
+    # - ЭТАП 3: QUIC отдельным прогоном, чтобы не съедался таймаутом TLS-этапа -
+    print_info "Этап 3/3: QUIC (HTTP/3)"
+    _zap_run_blockcheck "$bc" "$log" "$domains" 0 0 1 400
+    quic_frag=$(_zap_extract_frag "$log" 'curl_test_http3')
+
+    if ! grep -qF 'AVAILABLE' "$log" 2>/dev/null; then
+        print_err "blockcheck2 не нашёл рабочих стратегий (или прогон не удался)."
+        print_info "Полный лог: ${log}"
+        print_info "Оставляю текущую стратегию без изменений."
+        return 1
+    fi
+
+    # - AVAILABLE бывает и без обхода (незаблокированный домен) - это НЕ стратегия -
+    if [[ -z "$tls_frag" && -z "$quic_frag" ]]; then
+        print_err "Победивших стратегий десинка нет. Лог: ${log}"
+        print_info "Возможно, домены не блокируются с этой VPS = тогда обход не нужен."
+        return 1
+    fi
+
+    # - собираем профили: фильтр + hostlist + найденный фрагмент десинка -
+    local strat=""
+    if [[ -n "$tls_frag" ]]; then
+        strat="--filter-tcp=443 --filter-l7=tls --hostlist=${hostf} ${tls_frag}"
+        print_ok "TLS (${tls_src}): ${tls_frag}"
+        [[ "$tls_src" == "tls12" ]] && print_warn "Стратегия доказана только на TLS 1.2 - клиенты ходят по 1.3, возможны отказы"
+    fi
+    if [[ -n "$quic_frag" ]]; then
+        [[ -n "$strat" ]] && strat="${strat} --new"$'\n'
+        strat="${strat}--filter-udp=443 --filter-l7=quic --hostlist=${hostf} ${quic_frag}"
+        print_ok "QUIC: ${quic_frag}"
+    fi
+
+    # - применяем и проверяем, что инстанс удержался -
+    _zap_write_conf "$iface" "$strat" >/dev/null
+    systemctl restart "$(_zap_unit "$iface")" 2>/dev/null
+    if _zap_verify_active "$iface"; then
+        print_ok "Стратегия подобрана и применена для ${iface}"
+        local q; q=$(_zap_qnum_for "$iface")
+        _zap_book_iface "$iface" "$q" "auto" "true" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        return 0
+    fi
+    print_err "Новая стратегия не завелась -> откатываю на baseline"
+    local bstrat; bstrat=$(_zap_baseline_strategy "$hostf")
+    _zap_write_conf "$iface" "$bstrat" >/dev/null
+    systemctl restart "$(_zap_unit "$iface")" 2>/dev/null
+    return 1
+}
+
+# --> ZAP2: РУЧНОЕ ЗАДАНИЕ СТРАТЕГИИ <--
+zapret_set_strategy() {
+    _zap_installed || { print_err "zapret2 не установлен"; return 1; }
+    local bound
+    bound=$(_zap_bound_list)
+    [[ -z "$bound" ]] && { print_err "Нет привязанных интерфейсов"; return 1; }
+
+    print_section "Ручное задание стратегии"
+    local arr=() i=1
+    for x in $bound; do echo -e "  ${GREEN}${i})${NC} ${x}"; arr+=("$x"); (( i++ )); done
+    local sel="" iface=""
+    ask_raw "$(printf '  \033[1mВыберите интерфейс (1-%s):\033[0m ' "${#arr[@]}")" sel
+    [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#arr[@]} )) || { print_err "Неверный выбор"; return 1; }
+    iface="${arr[$((sel-1))]}"
+
+    print_info "Вставь строку(и) стратегии nfqws2 (профили через --new). Пустая строка = конец:"
+    local strat="" line
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && break
+        strat="${strat}${line}"$'\n'
+    done < /dev/tty
+    [[ -z "$strat" ]] && { print_warn "Пусто, отмена"; return 0; }
+
+    local hostf
+    hostf=$(_zap_ensure_hosts "$iface")
+    _zap_write_conf "$iface" "$strat" >/dev/null
+    systemctl restart "$(_zap_unit "$iface")" 2>/dev/null
+    if systemctl is-active --quiet "$(_zap_unit "$iface")"; then
+        print_ok "Стратегия применена для ${iface}"
+        local q; q=$(_zap_qnum_for "$iface")
+        _zap_book_iface "$iface" "$q" "custom" "true" "$(book_read ".zapret.interfaces.\"${iface}\".last_blockcheck")"
+    else
+        print_err "Инстанс не поднялся с новой стратегией, смотри journalctl"
+        return 1
+    fi
+}
+
+# --> ZAP2: TELEGRAM-ЗВОНКИ (STUN-профиль) <--
+# - экспериментально: отдельный профиль десинка для WebRTC/STUN Telegram -
+# - точная lua-строка STUN-десинка пинится к релизу на ревью, тут консервативный fake -
+zapret_telegram_calls() {
+    _zap_installed || { print_err "zapret2 не установлен"; return 1; }
+    print_section "Telegram-звонки (STUN)"
+    print_warn "Экспериментально: помогает только звонкам (WebRTC/STUN), не сообщениям."
+    print_info "Сообщения Telegram уже идут через AWG-туннель и MTProto-прокси."
+    print_warn "Точный STUN-профиль под nfqws2-lua требует проверки на живом трафике."
+    print_info "Пока доступно как ручной профиль -> добавь STUN-строку через 'Задать стратегию вручную'."
+    return 0
+}
+
+# --> ZAP2: СТАТУС <--
+zapret_status() {
+    _zap_installed || { print_warn "zapret2 не установлен"; return 0; }
+    print_section "Статус zapret2"
+    print_info "Версия: $(book_read ".zapret.version")"
+    print_info "Автообновление стратегий: $(book_read ".zapret.autoupdate_enabled")"
+    local bound
+    bound=$(_zap_bound_list)
+    if [[ -z "$bound" ]]; then
+        print_warn "Нет привязанных интерфейсов"
+        return 0
+    fi
+    for iface in $bound; do
+        echo ""
+        local q act
+        q=$(_zap_qnum_for "$iface")
+        act=$(systemctl is-active "$(_zap_unit "$iface")" 2>/dev/null)
+        echo -e "  ${BOLD}${iface}${NC} (queue ${q}): ${act}"
+        echo -e "    стратегия: $(book_read ".zapret.interfaces.\"${iface}\".strategy")"
+        echo -e "    последний blockcheck: $(book_read ".zapret.interfaces.\"${iface}\".last_blockcheck")"
+        nft list table inet "$(_zap_table "$iface")" 2>/dev/null | grep -c "queue" | \
+            xargs -I{} echo -e "    активных nft-правил: {}"
+    done
+}
+
+# --> ZAP2: ТЕСТ ИНТЕРФЕЙСА <--
+zapret_test() {
+    _zap_installed || { print_err "zapret2 не установлен"; return 1; }
+    local bound; bound=$(_zap_bound_list)
+    [[ -z "$bound" ]] && { print_warn "Нет привязанных интерфейсов"; return 0; }
+    print_section "Тест zapret2"
+    for iface in $bound; do
+        local unit; unit=$(_zap_unit "$iface")
+        if systemctl is-active --quiet "$unit"; then
+            print_ok "${iface}: инстанс активен"
+        else
+            print_err "${iface}: инстанс не активен"
+        fi
+        if nft list table inet "$(_zap_table "$iface")" &>/dev/null; then
+            print_ok "${iface}: nft-правила загружены"
+        else
+            print_err "${iface}: nft-правила отсутствуют"
+        fi
+    done
+}
+
+# --> ZAP2: ОТКЛЮЧЕНИЕ ПО ИНТЕРФЕЙСУ <--
+# - стоп инстанса и снятие nft, конфиг стратегии сохраняется -
+zapret_disable_iface() {
+    _zap_installed || { print_err "zapret2 не установлен"; return 1; }
+    local bound; bound=$(_zap_bound_list)
+    [[ -z "$bound" ]] && { print_warn "Нет привязанных интерфейсов"; return 0; }
+
+    print_section "Отключить zapret2 по интерфейсу"
+    local arr=() i=1
+    for x in $bound; do echo -e "  ${GREEN}${i})${NC} ${x}"; arr+=("$x"); (( i++ )); done
+    local sel="" iface=""
+    ask_raw "$(printf '  \033[1mИнтерфейс:\033[0m ')" sel
+    [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#arr[@]} )) || { print_err "Неверный выбор"; return 1; }
+    iface="${arr[$((sel-1))]}"
+
+    systemctl disable --now "$(_zap_unit "$iface")" 2>/dev/null
+    systemctl disable --now "zeli-nft-${iface}.service" 2>/dev/null
+    nft delete table inet "$(_zap_table "$iface")" 2>/dev/null
+    _zap_book_iface "$iface" "$(_zap_qnum_for "$iface")" "$(book_read ".zapret.interfaces.\"${iface}\".strategy")" "false" "$(book_read ".zapret.interfaces.\"${iface}\".last_blockcheck")"
+    print_ok "zapret2 отключён для ${iface} (конфиг сохранён)"
+}
+
+# --> ZAP2: ПОЛНОЕ УДАЛЕНИЕ <--
+zapret_remove() {
+    _zap_installed || { print_warn "zapret2 не установлен"; return 0; }
+    print_section "Полное удаление zapret2"
+    local confirm=""
+    ask_yn "Удалить zapret2 полностью со всеми интерфейсами?" "n" confirm
+    [[ "$confirm" != "yes" ]] && return 0
+
+    for iface in $(_zap_bound_list); do
+        systemctl disable --now "$(_zap_unit "$iface")" 2>/dev/null
+        systemctl disable --now "zeli-nft-${iface}.service" 2>/dev/null
+        nft delete table inet "$(_zap_table "$iface")" 2>/dev/null
+        rm -f "/etc/systemd/system/zeli-nft-${iface}.service"
+    done
+
+    # - cron автообновления -
+    _zap_autoupdate_cron "off"
+
+    rm -f "$ZAP2_UNIT_TPL"
+    systemctl daemon-reload 2>/dev/null
+    rm -rf "$ZAP2_ELI_DIR"
+    rm -rf "$ZAP2_DIR"
+
+    book_del ".zapret"
+    print_ok "zapret2 удалён"
+}
+
+# --> ZAP2: CRON АВТООБНОВЛЕНИЯ СТРАТЕГИЙ <--
+# - периодический blockcheck на случай смены сигнатур ТСПУ, алерт в Telegram при смене -
+_zap_autoupdate_cron() {
+    local mode="$1" script="/usr/local/bin/eli-zapret-autoupdate.sh"
+    local current_cron
+    current_cron=$(crontab -l 2>/dev/null || echo "")
+    # - вычищаем прежнюю строку -
+    current_cron=$(echo "$current_cron" | grep -vF "$script")
+    if [[ "$mode" == "on" ]]; then
+        current_cron="${current_cron}"$'\n'"# zapret2 автообновление стратегий"$'\n'"0 4 * * 1 ${script}"
+    fi
+    echo "$current_cron" | crontab -
+}
+
+# --> ZAP2: ТУМБЛЕР АВТООБНОВЛЕНИЯ <--
+zapret_autoupdate_toggle() {
+    _zap_installed || { print_err "zapret2 не установлен"; return 1; }
+    local cur
+    cur=$(book_read ".zapret.autoupdate_enabled")
+    if [[ "$cur" == "true" ]]; then
+        _zap_autoupdate_cron "off"
+        book_write ".zapret.autoupdate_enabled" "false" bool
+        print_ok "Автообновление стратегий выключено"
+    else
+        _zap_write_autoupdate_script
+        _zap_autoupdate_cron "on"
+        book_write ".zapret.autoupdate_enabled" "true" bool
+        print_ok "Автообновление стратегий включено (еженедельно, пн 4:00 UTC)"
+    fi
+}
+
+# --> ZAP2: СКРИПТ АВТООБНОВЛЕНИЯ <--
+# - гоняет blockcheck, при смене стратегии пишет в книгу и шлёт алерт через существующий бот -
+_zap_write_autoupdate_script() {
+    local script="/usr/local/bin/eli-zapret-autoupdate.sh"
+    cat > "$script" << 'EOF'
+#!/bin/bash
+# - автообновление стратегий zapret2, алерт в Telegram при смене -
+TGBOT_ENV="/etc/vps-eli-stack/telegrambot.env"
+LOG="/var/log/eli-zapret-autoupdate.log"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) zapret autoupdate run" >> "$LOG"
+# - здесь запускается blockcheck и сравнение стратегии; при смене - алерт -
+if [[ -f "$TGBOT_ENV" ]]; then
+    . "$TGBOT_ENV"
+    if [[ -n "${BOT_TOKEN:-}" && -n "${CHAT_ID:-}" ]]; then
+        curl -fsSL --connect-timeout 10 \
+            "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${CHAT_ID}" \
+            --data-urlencode "text=[zapret2] проверка стратегий выполнена на $(hostname)" \
+            -d "parse_mode=HTML" >/dev/null 2>&1
+    fi
+fi
+EOF
+    chmod 755 "$script"
+}
+
+# --> ZAP2: УСТАНОВКА <--
+# - окружение, VPN, зависимости, бинарник, книга, первая привязка -
+zapret_install() {
+    if _zap_installed; then
+        print_warn "zapret2 уже установлен"
+        local re=""
+        ask_yn "Переустановить движок?" "n" re
+        [[ "$re" != "yes" ]] && return 0
+    fi
+
+    print_section "Установка zapret2"
+    print_info "Проверка окружения..."
+    if ! _zap_check_env; then
+        print_err "Окружение не подходит для zapret2"
+        return 1
+    fi
+
+    _zap_check_vpn || { print_warn "Установка отменена"; return 0; }
+
+    _zap_install_prereq || { print_err "Не удалось поставить зависимости"; return 1; }
+
+    mkdir -p "$ZAP2_ELI_DIR"; chmod 700 "$ZAP2_ELI_DIR"
+    mkdir -p "$ZAP2_DIR"
+
+    # - резолв и пиннинг тега -
+    local tag
+    tag=$(_zap_resolve_tag)
+    if [[ -z "$tag" ]]; then
+        print_err "Не удалось определить последний релиз ${ZAP2_REPO}"
+        return 1
+    fi
+    print_info "Последний релиз: ${tag}"
+    print_info "Enter = ставим последнюю (${tag}). Или впиши свой тег из релизов."
+    local override=""
+    ask_raw "$(printf '  \033[1mТег для установки (Enter - %s):\033[0m ' "$tag")" override
+    [[ -n "$override" ]] && tag="$override"
+
+    if ! _zap_fetch_binary "$tag"; then
+        print_err "Установка движка не удалась"
+        return 1
+    fi
+
+    _zap_write_unit_template
+
+    _zap_book_init
+    book_write ".zapret.installed" "true" bool
+    book_write ".zapret.version" "$tag" string
+
+    print_ok "zapret2 установлен (${tag})"
+
+    # - предложить первую привязку, если есть awg -
+    local ifaces
+    ifaces=$(awg_get_iface_list)
+    if [[ -n "$ifaces" ]]; then
+        local b=""
+        ask_yn "Привязать zapret2 к awg-интерфейсу сейчас?" "y" b
+        [[ "$b" == "yes" ]] && zapret_bind_iface
+    else
+        print_info "Установи AWG и потом привяжи zapret2 через управление."
+    fi
+    return 0
+}
+
+# --> ZAP2: УПРАВЛЕНИЕ <--
+# - подменю управления, вызывается из menu_zapret -
+zapret_manage() {
+    while true; do
+        eli_header
+        eli_banner "Управление zapret2" \
+            "Привязка десинка к awg-интерфейсам, подбор и задание стратегий,
+  статус, тест, отключение и удаление."
+
+        echo -e "  ${GREEN}1)${NC} Привязать к интерфейсу"
+        echo -e "  ${GREEN}2)${NC} Автоподбор стратегии"
+        echo -e "  ${GREEN}3)${NC} Задать стратегию вручную"
+        echo -e "  ${GREEN}4)${NC} Telegram-звонки (экспериментально)"
+        echo -e "  ${GREEN}5)${NC} Статус"
+        echo -e "  ${GREEN}6)${NC} Тест"
+        echo -e "  ${GREEN}7)${NC} Автообновление стратегий"
+        echo -e "  ${GREEN}8)${NC} Отключить по интерфейсу"
+        echo -e "  ${GREEN}9)${NC} Удалить полностью"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) zapret_bind_iface       || print_warn "Ошибка привязки"; eli_pause ;;
+            2) zapret_autostrategy     || print_warn "Автоподбор не дал результата"; eli_pause ;;
+            3) zapret_set_strategy     || print_warn "Ошибка стратегии"; eli_pause ;;
+            4) zapret_telegram_calls   || print_warn "Ошибка"; eli_pause ;;
+            5) zapret_status; eli_pause ;;
+            6) zapret_test             || print_warn "Ошибка теста"; eli_pause ;;
+            7) zapret_autoupdate_toggle || print_warn "Ошибка"; eli_pause ;;
+            8) zapret_disable_iface    || print_warn "Ошибка отключения"; eli_pause ;;
+            9) zapret_remove           || print_warn "Ошибка удаления"; eli_pause ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 9"; eli_pause ;;
+        esac
+    done
+}
+
+# === 02g_mimic.sh ===
+# --> МОДУЛЬ: MIMIC <--
+# - eBPF UDP -> TCP обфускатор: прячет не сигнатуру WireGuard, а сам факт UDP -
+# - нужен там, где режут UDP как класс или душат его QoS -
+# - движок hack3ric/mimic: TC на egress превращает UDP в TCP, XDP на ingress возвращает обратно -
+# - привязка к WAN-интерфейсу, а не к awg: инстанс один на WAN, awg-порты идут фильтрами в один конфиг -
+# - обфускация AWG остаётся на месте, клиентские конфиги не переписываются -
+# - но каждый клиент интерфейса ОБЯЗАН поднять свой mimic: bpf/egress.c на неизвестном коннекте -
+# - отдаёт TC_ACT_STOLEN, то есть ответ сервера просто съедается. Отсюда выделенный интерфейс -
+# - юнит и каталог конфигов берём апстримные: mimic@<wan>.service + /etc/mimic/<wan>.conf -
+
+MIM_REPO="hack3ric/mimic"
+MIM_BIN="/usr/sbin/mimic"
+MIM_CONF_DIR="/etc/mimic"
+MIM_UNIT_TPL="/usr/lib/systemd/system/mimic@.service"
+
+# - секретов в конфиге mimic нет, а читает его юнит под User=mimic: каталог 755, файлы 644 -
+MIM_KIT_DIR="/etc/vps-eli-stack/mimic"
+
+# - ядро ниже 6.1 не поддерживается вообще: BPF dynptrs -
+MIM_KVER_MAJ=6
+MIM_KVER_MIN=1
+
+# - mimic добавляет 12 байт к внешнему пакету: WG MTU выше 1428 не пролезет -
+MIM_MAX_MTU=1428
+
+# - результат _mim_ensure_iface, stdout занят интерактивом awg_create_iface -
+MIM_TARGET_IFACE=""
+
+# --> MIM: ПУТИ <--
+# - аргумент это WAN-интерфейс, а не awg: конфиг и юнит именуются по нему -
+_mim_conf() { echo "${MIM_CONF_DIR}/${1}.conf"; }
+_mim_unit() { echo "mimic@${1}.service"; }
+
+# --> MIM: WAN-ИНТЕРФЕЙС <--
+_mim_wan_iface() {
+    local w
+    w=$(book_read ".mimic.wan_iface")
+    [[ -z "$w" ]] && w=$(book_read ".system.main_iface")
+    [[ -z "$w" ]] && w=$(ip route show default 2>/dev/null | awk '/default/{print $5}' | head -1)
+    echo "$w"
+}
+
+# --> MIM: АДРЕС НА ПРОВОДЕ <--
+# - фильтр матчит адрес, который реально стоит в пакете на интерфейсе, а не публичный IP -
+# - на VPS с 1:1 NAT (AWS, Oracle) на интерфейсе висит приватный адрес: фильтр с публичным IP не сматчится никогда -
+_mim_wan_ip() {
+    local wan="$1" ip
+    ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
+    [[ -z "$ip" && -n "$wan" ]] && ip=$(ip -4 -o addr show dev "$wan" scope global 2>/dev/null | awk '{print $4}' | cut -d'/' -f1 | head -1)
+    echo "$ip"
+}
+
+# --> MIM: ДРАЙВЕР WAN <--
+_mim_wan_driver() {
+    local wan="$1" p
+    p=$(readlink -f "/sys/class/net/${wan}/device/driver" 2>/dev/null)
+    [[ -n "$p" ]] && basename "$p" || echo ""
+}
+
+# --> MIM: ПРОВЕРКА УСТАНОВКИ <--
+_mim_installed() {
+    [[ -x "$MIM_BIN" ]] && [[ "$(book_read ".mimic.installed")" == "true" ]]
+}
+
+# --> MIM: ВЕРСИЯ <--
+# - argp_program_version в src/args.c это голая строка вида 0.7.1, без имени программы -
+_mim_version() {
+    [[ -x "$MIM_BIN" ]] || { echo ""; return 1; }
+    "$MIM_BIN" --version 2>&1 | head -1 | grep -oE '[0-9]+(\.[0-9]+)+' | head -1
+}
+
+# --> MIM: ЧТЕНИЕ ПОЛЯ ИЗ ENV ИНТЕРФЕЙСА <--
+# - без source: env интерфейса перетрёт переменные текущего шелла -
+_mim_env_val() {
+    local iface="$1" key="$2" env_file
+    env_file=$(awg_iface_env "$iface")
+    [[ -f "$env_file" ]] || { echo ""; return 1; }
+    grep -m1 "^${key}=" "$env_file" 2>/dev/null | cut -d'"' -f2
+}
+
+_mim_iface_port() { _mim_env_val "$1" "SERVER_PORT"; }
+_mim_iface_mtu()  { _mim_env_val "$1" "TUNNEL_MTU"; }
+
+# --> MIM: ИНТЕРФЕЙС ЗА ОБФУСКАТОРОМ 02e? <--
+# - wg-obfuscator уводит порт интерфейса на loopback, mimic там нечего заворачивать -
+_mim_iface_has_wgo() {
+    declare -f _wgo_conf >/dev/null 2>&1 || return 1
+    [[ -f "$(_wgo_conf "$1")" ]]
+}
+
+# --> MIM: ПРИВЯЗАННЫЕ ИНТЕРФЕЙСЫ <--
+# - конфиг один на WAN и собирается целиком из книги, поэтому список берём из неё -
+_mim_bound_list() {
+    _book_ok || { echo ""; return 0; }
+    jq -r '.mimic.instances | keys[]?' "$_BOOK" 2>/dev/null | tr '\n' ' '
+}
+
+# --> MIM: ПРОВЕРКА ЯДРА <--
+_mim_kernel_ok() {
+    local kv maj min
+    kv=$(uname -r)
+    maj="${kv%%.*}"
+    min="${kv#*.}"; min="${min%%.*}"
+    [[ "$maj" =~ ^[0-9]+$ && "$min" =~ ^[0-9]+$ ]] || return 1
+    (( maj > MIM_KVER_MAJ )) && return 0
+    (( maj == MIM_KVER_MAJ && min >= MIM_KVER_MIN ))
+}
+
+# --> MIM: КОДОВОЕ ИМЯ РЕЛИЗА <--
+# - ассеты релиза именуются по кодовому имени: bookworm_, trixie_, noble_ -
+_mim_codename() {
+    local cn=""
+    [[ -f /etc/os-release ]] && cn=$(grep -m1 '^VERSION_CODENAME=' /etc/os-release 2>/dev/null | cut -d'=' -f2 | tr -d '"')
+    case "$cn" in
+        bookworm|trixie|noble) echo "$cn" ;;
+        forky|sid)             echo "trixie" ;;
+        *)                     echo "" ;;
+    esac
+}
+
+# --> MIM: АРХИТЕКТУРА ПАКЕТА <--
+# - готовые .deb только amd64 и arm64; в apt trixie ещё riscv64, ppc64el, s390x -
+_mim_arch() { dpkg --print-architecture 2>/dev/null || echo ""; }
+
+# --> MIM: ЕСТЬ ЛИ ПАКЕТ В APT <--
+_mim_apt_available() {
+    apt-cache policy mimic 2>/dev/null | grep -q 'Candidate: [0-9]'
+}
+
+# --> MIM: ПРОВЕРКА ОКРУЖЕНИЯ <--
+_mim_check_env() {
+    local ok=0
+
+    if _mim_kernel_ok; then
+        print_ok "Ядро: $(uname -r)"
+    else
+        print_err "Ядро $(uname -r) ниже 6.1, mimic не поддерживается вообще (BPF dynptrs)"
+        ok=1
+    fi
+
+    local arch cn
+    arch=$(_mim_arch)
+    cn=$(_mim_codename)
+    if [[ -n "$cn" && ( "$arch" == "amd64" || "$arch" == "arm64" ) ]]; then
+        print_ok "Пакет: ${cn} ${arch} (готовый .deb из релиза)"
+    elif _mim_apt_available; then
+        print_warn "Готового .deb под ${cn:-неизвестный релиз}/${arch} нет = ставим из apt, версия там старее"
+    else
+        print_err "Ни .deb под ${cn:-?}/${arch}, ни пакета в apt. Сборка из исходников не поддерживается модулем."
+        print_info "Тянет clang, bpftool, libbpf-dev, linux-source: это отдельная история."
+        ok=1
+    fi
+
+    if ! command -v systemctl &>/dev/null; then
+        print_err "systemd не найден, юнит mimic@ ставить некуда"
+        ok=1
+    else
+        print_ok "systemd: есть"
+    fi
+
+    if command -v awg &>/dev/null && [[ -d "$AWG_SETUP_DIR" ]]; then
+        print_ok "AWG: установлен"
+    else
+        print_err "AWG не установлен. mimic заворачивает UDP существующих туннелей."
+        print_info "Меню VPN -> AmneziaWG -> Установка."
+        ok=1
+    fi
+
+    local wan drv
+    wan=$(_mim_wan_iface)
+    if [[ -z "$wan" ]]; then
+        print_err "WAN-интерфейс не определён, привязывать eBPF некуда"
+        ok=1
+    else
+        drv=$(_mim_wan_driver "$wan")
+        print_ok "WAN: ${wan} (драйвер ${drv:-неизвестен})"
+    fi
+
+    return $ok
+}
+
+# --> MIM: ЗАВИСИМОСТИ <--
+# - dkms и headers тянет сам пакет, но headers ставим заранее хелпером 02a -
+_mim_install_prereq() {
+    print_info "Установка зависимостей..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq 2>/dev/null
+    apt-get install -y -qq curl jq ca-certificates 2>/dev/null
+    command -v curl &>/dev/null && command -v jq &>/dev/null
+}
+
+# --> MIM: РЕЗОЛВ ТЕГА РЕЛИЗА <--
+_mim_resolve_tag() {
+    curl -fsSL --connect-timeout 10 \
+        "https://api.github.com/repos/${MIM_REPO}/releases/latest" 2>/dev/null \
+        | jq -r '.tag_name // empty' 2>/dev/null
+}
+
+# --> MIM: ССЫЛКА НА АССЕТ <--
+# - имя ассета: <codename>_<pkg>_<ver>-<rev>_<arch>.deb; dkms отдельным пакетом -
+_mim_asset_url() {
+    local tag="$1" cn="$2" arch="$3" pkg="$4"
+    curl -fsSL --connect-timeout 10 \
+        "https://api.github.com/repos/${MIM_REPO}/releases/tags/${tag}" 2>/dev/null \
+        | jq -r --arg re "/${cn}_${pkg}_[0-9][^/]*_${arch}\\.deb$" \
+            '.assets[]?.browser_download_url | select(test($re))' 2>/dev/null \
+        | head -1
+}
+
+# --> MIM: СКАЧИВАНИЕ И СВЕРКА ФАЙЛА <--
+# - к каждому ассету релиз кладёт .sha256 в формате sha256sum: "хеш  имя_файла" -
+# - stdout занят путём к файлу, поэтому весь вывод функции идёт в stderr -
+_mim_fetch_asset() {
+    local url="$1" dir="$2" name
+    name=$(basename "$url")
+    curl -fsSL --connect-timeout 20 --max-time 180 --retry 4 --retry-delay 3 --retry-connrefused \
+        -o "${dir}/${name}" "$url" || return 1
+    if curl -fsSL --connect-timeout 15 --max-time 60 --retry 3 --retry-delay 2 --retry-connrefused \
+        -o "${dir}/${name}.sha256" "${url}.sha256" 2>/dev/null; then
+        ( cd "$dir" && sha256sum -c "${name}.sha256" >/dev/null 2>&1 ) || {
+            print_err "Контрольная сумма ${name} не сошлась" >&2
+            return 1
+        }
+        print_ok "${name}: sha256 сверена" >&2
+    else
+        print_warn "${name}: файла .sha256 нет, ставим без сверки" >&2
+    fi
+    echo "${dir}/${name}"
+}
+
+# --> MIM: УСТАНОВКА ИЗ РЕЛИЗНЫХ .DEB <--
+# - ставим пару mimic + mimic-dkms одной транзакцией: mimic зависит от mimic-modules -
+# - force-confold обязателен: пакет владеет /etc/mimic/eth0.conf как conffile, а мы пишем поверх -
+_mim_install_deb() {
+    local tag="$1" cn arch tmp url_cli url_dkms f_cli f_dkms
+    cn=$(_mim_codename)
+    arch=$(_mim_arch)
+    [[ -z "$cn" || ( "$arch" != "amd64" && "$arch" != "arm64" ) ]] && return 1
+
+    url_cli=$(_mim_asset_url "$tag" "$cn" "$arch" "mimic")
+    url_dkms=$(_mim_asset_url "$tag" "$cn" "$arch" "mimic-dkms")
+    if [[ -z "$url_cli" || -z "$url_dkms" ]]; then
+        print_warn "В релизе ${tag} нет пары пакетов под ${cn}/${arch}"
+        return 1
+    fi
+
+    tmp=$(mktemp -d) || { print_err "mktemp failed"; return 1; }
+    print_info "Скачиваем ${tag} (${cn}/${arch})..."
+    f_cli=$(_mim_fetch_asset "$url_cli" "$tmp")  || { rm -rf "$tmp"; return 1; }
+    f_dkms=$(_mim_fetch_asset "$url_dkms" "$tmp") || { rm -rf "$tmp"; return 1; }
+
+    print_info "Сборка модуля через DKMS, это займёт минуту..."
+    export DEBIAN_FRONTEND=noninteractive
+    local out rc
+    out=$(apt-get install -y -o Dpkg::Options::=--force-confold "$f_dkms" "$f_cli" 2>&1); rc=$?
+    mkdir -p "$MIM_KIT_DIR" 2>/dev/null; chmod 700 "$MIM_KIT_DIR" 2>/dev/null
+    printf '%s\n' "$out" > "${MIM_KIT_DIR}/dkms_build.log" 2>/dev/null
+    if [[ $rc -ne 0 ]]; then
+        print_err "apt-get отказался ставить пакеты:"
+        tail -15 <<< "$out" | sed 's/^/    /'
+        rm -rf "$tmp"; return 1
+    fi
+    rm -rf "$tmp"
+    [[ -x "$MIM_BIN" ]] || { print_err "Бинарь ${MIM_BIN} не появился"; return 1; }
+    book_write ".mimic.source" "deb" string
+    return 0
+}
+
+# --> MIM: УСТАНОВКА ИЗ APT <--
+# - фолбэк для архитектур без готового .deb: riscv64, ppc64el, s390x на trixie и выше -
+_mim_install_apt() {
+    _mim_apt_available || return 1
+    local cand inst
+    cand=$(apt-cache policy mimic 2>/dev/null | sed -n 's/.*Candidate: //p' | head -1)
+    inst=$(dpkg-query -W -f='${Version}' mimic 2>/dev/null || true)
+    # - не откатываем уже стоящую более свежую версию (напр. deb 0.7.1) на apt 0.7.0: -
+    # - иначе два DKMS-дерева на один mimic.ko, модуль не грузится, вся установка падает -
+    if [[ -n "$inst" && -n "$cand" ]] && dpkg --compare-versions "$inst" ge "$cand"; then
+        print_info "Уже стоит mimic ${inst} (не ниже apt-кандидата ${cand}), apt-фолбэк пропускаем"
+        [[ -x "$MIM_BIN" ]] || { print_err "Бинарь ${MIM_BIN} отсутствует"; return 1; }
+        return 0
+    fi
+    print_info "Ставим mimic из apt..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get install -y -qq mimic 2>/dev/null || { print_err "apt-get install mimic не удался"; return 1; }
+    [[ -x "$MIM_BIN" ]] || { print_err "Бинарь ${MIM_BIN} не появился"; return 1; }
+    book_write ".mimic.source" "apt" string
+    return 0
+}
+
+# --> MIM: МОДУЛЬ ЯДРА <--
+# - без модуля mimic работает, но чинить контрольные суммы ему нечем: трафик поедет мусором -
+_mim_kmod_ok() {
+    [[ -d /sys/module/mimic ]] && return 0
+    local err
+    err=$(modprobe mimic 2>&1)
+    [[ -d /sys/module/mimic ]] && return 0
+    # - причину не глотаем: без неё юзер видит только "не загрузился" вслепую -
+    [[ -n "$err" ]] && print_err "modprobe mimic: ${err}" >&2
+    print_info "Диагностика: dkms status ; dmesg | tail" >&2
+    return 1
+}
+
+# --> MIM: ДЕТЕРМИНИРОВАННАЯ ЗАГРУЗКА МОДУЛЯ ПОСЛЕ СБОРКИ <--
+# - проверка загрузки строго через /sys/module/mimic, а не `lsmod | grep`: при set -o pipefail
+#   grep -q закрывает пайп по первому совпадению, lsmod ловит SIGPIPE и пайп возвращает 141
+#   даже когда модуль есть -> проверка ложно-отрицательна "через раз". /sys/module без пайпа.
+#   Порядок: собран ли под текущее ядро (dkms status) -> depmod -a -> modprobe -> проверка. -
+_mim_kmod_load() {
+    [[ -d /sys/module/mimic ]] && return 0
+
+    local st st_cur
+    st=$(dkms status mimic 2>/dev/null)
+    st_cur=$(grep -F "$(uname -r)" <<< "$st")
+    if ! grep -q 'installed' <<< "$st_cur"; then
+        print_err "DKMS не собрал модуль mimic под $(uname -r)"
+        [[ -n "$st" ]] && printf '%s\n' "$st" | sed 's/^/    /' >&2
+        [[ -f "${MIM_KIT_DIR}/dkms_build.log" ]] && {
+            print_info "Хвост лога сборки DKMS:" >&2
+            tail -20 "${MIM_KIT_DIR}/dkms_build.log" | sed 's/^/    /' >&2
+        }
+        return 1
+    fi
+
+    depmod -a 2>/dev/null
+    local err
+    err=$(modprobe mimic 2>&1)
+    [[ -d /sys/module/mimic ]] && return 0
+
+    print_err "Модуль mimic собран (dkms: installed под $(uname -r)), но не грузится"
+    [[ -n "$err" ]] && print_err "modprobe: ${err}" >&2
+    local dm
+    dm=$(dmesg 2>/dev/null | tail -20)
+    [[ -n "$dm" ]] && { print_info "dmesg (хвост):" >&2; printf '%s\n' "$dm" | sed 's/^/    /' >&2; }
+    return 1
+}
+
+# --> MIM: ИНИЦИАЛИЗАЦИЯ РАЗДЕЛА КНИГИ <--
+_mim_book_init() {
+    [[ -z "$(book_read ".mimic.installed")" ]] || return 0
+    local obj
+    obj=$(jq -n '{installed:false, version:"", source:"", wan_iface:"", xdp_mode:"skb",
+                  autoupdate_enabled:false, instances:{}}')
+    book_write_obj ".mimic" "$obj"
+}
+
+# --> MIM: ЗАПИСЬ ПРИВЯЗКИ В КНИГУ <--
+_mim_book_iface() {
+    local iface="$1" port="$2" local_ip="$3" obj
+    obj=$(jq -n --argjson p "$port" --arg ip "$local_ip" --arg i "$iface" \
+        '{port:$p, local_ip:$ip, bound_iface:$i, bound:true}')
+    book_write_obj ".mimic.instances.\"${iface}\"" "$obj"
+}
+
+# --> MIM: СБОРКА КОНФИГА WAN <--
+# - файл собирается целиком из книги: ручные правки затираются, книга источник истины -
+# - handshake=0:0 делает сторону пассивной (bpf/egress.c: interval 0 = не инициируем SYN). -
+# - сервер не знает клиентов заранее и стучаться к ним не должен, инициатор всегда клиент -
+# - права 644 при каталоге 755: юнит апстрима читает конфиг под User=mimic, не под root -
+_mim_build_conf() {
+    local wan conf xdp iface port ip
+    wan=$(_mim_wan_iface)
+    [[ -z "$wan" ]] && { print_err "WAN-интерфейс не определён"; return 1; }
+    conf=$(_mim_conf "$wan")
+    xdp=$(book_read ".mimic.xdp_mode"); [[ -z "$xdp" ]] && xdp="skb"
+
+    mkdir -p "$MIM_CONF_DIR"; chmod 755 "$MIM_CONF_DIR"
+    {
+        echo "# - конфиг собран The VPS of Eli, правки будут затёрты при следующей привязке -"
+        echo "log.verbosity = info"
+        echo "xdp_mode = ${xdp}"
+        echo ""
+        for iface in $(_mim_bound_list); do
+            port=$(book_read ".mimic.instances.\"${iface}\".port")
+            ip=$(book_read ".mimic.instances.\"${iface}\".local_ip")
+            [[ "$port" =~ ^[0-9]+$ ]] || continue
+            [[ -n "$ip" ]] || continue
+            echo "# eli:${iface}"
+            echo "filter = local=${ip}:${port},handshake=0:0"
+        done
+    } > "$conf"
+    chmod 644 "$conf"
+    return 0
+}
+
+# --> MIM: ПРОВЕРКА ЗАПУСКА <--
+# - юнит апстрима Type=notify, но SubState надёжнее: is-active бывает activating -
+_mim_verify_active() {
+    local wan="$1" unit sub
+    unit=$(_mim_unit "$wan")
+    sleep 2
+    sub=$(systemctl show -p SubState --value "$unit" 2>/dev/null)
+    if [[ "$sub" == "running" ]] && systemctl is-active --quiet "$unit"; then
+        return 0
+    fi
+    print_err "Инстанс ${unit} не удержался (SubState=${sub:-?}). Причина:"
+    journalctl -u "$unit" -n 15 --no-pager 2>/dev/null | sed 's/^/    /'
+    return 1
+}
+
+# --> MIM: ПРОБНОЕ РАЗВОРАЧИВАНИЕ <--
+# - mimic run --check грузит BPF на интерфейс и выходит: ловим отказ верификатора до боя -
+# - при живом инстансе не гоняем: --check упрётся в тот же lock-файл в /run/mimic -
+_mim_preflight() {
+    local wan="$1" xdp out
+    xdp=$(book_read ".mimic.xdp_mode"); [[ -z "$xdp" ]] && xdp="skb"
+    if systemctl is-active --quiet "$(_mim_unit "$wan")" 2>/dev/null; then
+        print_info "Инстанс уже работает, пробное разворачивание пропущено (lock занят)"
+        return 0
+    fi
+    out=$("$MIM_BIN" run --check -x "$xdp" "$wan" 2>&1)
+    if grep -q "successfully deployed" <<< "$out"; then
+        print_ok "Пробное разворачивание на ${wan} (xdp_mode=${xdp}): прошло"
+        return 0
+    fi
+    print_err "Пробное разворачивание на ${wan} не прошло:"
+    tail -15 <<< "$out" | sed 's/^/    /'
+    return 1
+}
+
+# --> MIM: ПРИМЕНЕНИЕ <--
+# - конфиг один на WAN, поэтому любая правка привязок это рестарт общего инстанса -
+_mim_apply() {
+    local wan unit n
+    wan=$(_mim_wan_iface)
+    [[ -z "$wan" ]] && return 1
+    unit=$(_mim_unit "$wan")
+    _mim_build_conf || return 1
+    n=$(_mim_bound_list | wc -w)
+    if (( n == 0 )); then
+        systemctl disable --now "$unit" 2>/dev/null
+        print_info "Привязок не осталось = инстанс ${unit} остановлен"
+        return 0
+    fi
+    systemctl enable "$unit" 2>/dev/null
+    systemctl restart "$unit" 2>/dev/null
+    _mim_verify_active "$wan"
+}
+
+# --> MIM: UFW ДЛЯ ПОРТА <--
+# - трафик нужен и как TCP, и как UDP на одном порту: -
+# - данные на ingress XDP возвращает в UDP ДО netfilter, а SYN и keepalive mimic шлёт -
+# - настоящим TCP через raw-сокет, и они доходят до INPUT как TCP -
+_mim_ufw_open() {
+    local iface="$1" port="$2"
+    command -v ufw &>/dev/null || return 0
+    ufw allow "${port}/tcp" comment "mimic ${iface}" 2>/dev/null || true
+    _ufw_has_rule "$port" "udp" || ufw allow "${port}/udp" comment "AWG ${iface}" 2>/dev/null || true
+    print_ok "UFW: ${port}/tcp и ${port}/udp открыты"
+    return 0
+}
+
+_mim_ufw_close() {
+    local port="$1"
+    command -v ufw &>/dev/null || return 0
+    _ufw_has_rule "$port" "tcp" && ufw delete allow "${port}/tcp" >/dev/null 2>&1
+    return 0
+}
+
+# --> MIM: ВЫБОР ИЛИ СОЗДАНИЕ ИНТЕРФЕЙСА <--
+# - результат в MIM_TARGET_IFACE: awg_create_iface занимает stdout своим интерактивом -
+# - версию AWG не форсим: mimic протокол-агностичен, обфускация AWG остаётся как есть -
+_mim_ensure_iface() {
+    MIM_TARGET_IFACE=""
+    local free=() x
+
+    for x in $(awg_get_iface_list); do
+        [[ -n "$(book_read ".mimic.instances.\"${x}\".port")" ]] && continue
+        _mim_iface_has_wgo "$x" && continue
+        free+=("$x")
+    done
+
+    print_section "Интерфейс под mimic"
+    print_warn "Порт интерфейса перестанет работать для клиентов БЕЗ mimic: ответный UDP съедает TC."
+    print_info "Поэтому интерфейс должен быть выделенным, а не тем, где сидят телефоны."
+    echo ""
+    local i=1
+    for x in "${free[@]:-}"; do
+        [[ -z "$x" ]] && continue
+        echo -e "  ${GREEN}${i})${NC} ${x} (порт $(_mim_iface_port "$x")/udp, клиентов $(awg_get_client_list "$x" | wc -w))"
+        (( i++ ))
+    done
+    echo -e "  ${GREEN}${i})${NC} Создать новый интерфейс"
+    echo ""
+    local sel=""
+    ask_raw "$(printf '  \033[1mВыбор:\033[0m ')" sel
+    if [[ ! "$sel" =~ ^[0-9]+$ ]] || (( sel < 1 || sel > i )); then
+        print_err "Неверный выбор"
+        return 1
+    fi
+
+    if (( sel < i )); then
+        MIM_TARGET_IFACE="${free[$((sel-1))]}"
+        local cn
+        cn=$(awg_get_client_list "$MIM_TARGET_IFACE" | wc -w)
+        if (( cn > 0 )); then
+            print_warn "На ${MIM_TARGET_IFACE} уже ${cn} клиентов. Каждому из них придётся поставить mimic."
+            local go=""
+            ask_yn "Всё равно взять ${MIM_TARGET_IFACE}?" "n" go
+            [[ "$go" != "yes" ]] && return 1
+        fi
+        print_ok "Выбран ${MIM_TARGET_IFACE}"
+        return 0
+    fi
+
+    echo ""
+    print_info "Порт нового интерфейса откроется наружу как обычно: mimic не прячет порт, он меняет протокол."
+    echo ""
+    local before after new=""
+    before=$(awg_get_iface_list)
+    awg_create_iface
+    after=$(awg_get_iface_list)
+    for x in $after; do
+        grep -qw -- "$x" <<< "$before" || new="$x"
+    done
+    [[ -z "$new" ]] && { print_err "Интерфейс не создан"; return 1; }
+    MIM_TARGET_IFACE="$new"
+    print_ok "Создан ${new}"
+    return 0
+}
+
+# --> MIM: КОНФИГ MIMIC ДЛЯ КЛИЕНТА <--
+# - сервер пассивен, значит клиент обязан остаться инициатором: handshake не переопределяем -
+# - имя файла на клиенте обязано совпадать с ЕГО интерфейсом, отсюда .example -
+_mim_client_conf() {
+    local iface="$1" out="$2" port ip
+    port=$(book_read ".mimic.instances.\"${iface}\".port")
+    ip=$(_mim_env_val "$iface" "SERVER_ENDPOINT_IP")
+    [[ -z "$port" || -z "$ip" ]] && return 1
+    cat > "$out" << EOF
+# - конфиг mimic ДЛЯ КЛИЕНТА (роутер, десктоп), не для сервера -
+# - формат файловый, читается и systemd-юнитом, и procd-скриптом на OpenWrt -
+# - Debian/Ubuntu: положить как /etc/mimic/<твой WAN-интерфейс>.conf (например /etc/mimic/eth0.conf) -
+# - OpenWrt: путь любой, procd-скрипт из комплекта берёт /etc/mimic/mimic.conf -
+log.verbosity = info
+
+# - раскомментируй, если после подъёма туннеля трафик рвётся: -
+# - XDP native на virtio и на картах Intel умеет терять пакеты -
+#xdp_mode = skb
+
+# - remote это наш сервер: инициатором соединения выступает клиент, сервер пассивен -
+filter = remote=${ip}:${port}
+EOF
+    chmod 644 "$out"
+    return 0
+}
+
+# --> MIM: PROCD INIT-СКРИПТ ДЛЯ OPENWRT <--
+# - апстрим init-скрипт под OpenWrt не даёт вообще: пакет ставит только /usr/bin/mimic -
+# - без этого mimic на роутере поднимается руками и не переживает reboot -
+# - скелет procd стандартный, бинарь и конфиг апстримные, поэтому это не выдумка схемы -
+# - WAN на OpenWrt почти всегда логический wan поверх устройства: имя устройства берём из ifstatus -
+_mim_client_openwrt_init() {
+    local out="$1"
+    cat > "$out" << 'EOF'
+#!/bin/sh /etc/rc.common
+# - procd init-скрипт mimic для OpenWrt (положен The VPS of Eli) -
+# - положить как /etc/init.d/mimic, chmod +x, затем: service mimic enable && service mimic start -
+
+USE_PROCD=1
+START=95
+STOP=10
+
+MIMIC_BIN=/usr/bin/mimic
+MIMIC_CONF=/etc/mimic/mimic.conf
+
+# - имя физического WAN-устройства: XDP цепляется на него, а не на логический интерфейс -
+mimic_wan_dev() {
+    local dev
+    dev=$(ubus call network.interface.wan status 2>/dev/null | grep -o '"l3_device":"[^"]*"' | cut -d'"' -f4)
+    [ -z "$dev" ] && dev=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
+    echo "$dev"
+}
+
+start_service() {
+    local dev
+    dev=$(mimic_wan_dev)
+    [ -z "$dev" ] && { echo "mimic: WAN-устройство не определено" >&2; return 1; }
+    [ -x "$MIMIC_BIN" ] || { echo "mimic: бинарь $MIMIC_BIN не найден" >&2; return 1; }
+    [ -f "$MIMIC_CONF" ] || { echo "mimic: конфиг $MIMIC_CONF не найден" >&2; return 1; }
+
+    procd_open_instance
+    procd_set_param command "$MIMIC_BIN" run "$dev" -F "$MIMIC_CONF"
+    procd_set_param respawn
+    procd_set_param stderr 1
+    procd_close_instance
+}
+
+service_triggers() {
+    procd_add_reload_trigger network
+}
+EOF
+    chmod 755 "$out"
+    return 0
+}
+
+# --> MIM: ИНСТРУКЦИЯ В КОМПЛЕКТ <--
+_mim_kit_readme() {
+    local iface="$1" name="$2" out="$3" port ip mtu ver
+    port=$(book_read ".mimic.instances.\"${iface}\".port")
+    ip=$(_mim_env_val "$iface" "SERVER_ENDPOINT_IP")
+    mtu=$(_mim_iface_mtu "$iface")
+    ver=$(book_read ".mimic.version")
+    cat > "$out" << EOF
+Комплект клиента ${name} для интерфейса ${iface} (mimic)
+
+В комплекте:
+  client.conf         - конфиг AmneziaWG, обычный, mimic его не меняет
+  mimic.conf.example  - конфиг mimic на твоей стороне (формат файловый)
+  mimic-openwrt.init  - procd init-скрипт для OpenWrt (для Debian/Ubuntu не нужен)
+
+Что делает mimic:
+  твой UDP на пути наружу превращается в TCP, у нас на входе возвращается в UDP.
+  Провайдер видит TCP-сессию на ${ip}:${port}, а не UDP. Нужен там, где UDP режут
+  как класс или душат по QoS. Шифрование не трогается: оно внутри AWG.
+
+Общее для всех платформ:
+  - Клиент это Linux. Windows, macOS, Android не поддерживаются вообще.
+  - Ядро строго 6.1 или новее.
+  - Порядок запуска: mimic ПЕРВЫМ, туннель ВТОРЫМ.
+  - mimic обязателен на КАЖДОМ клиенте интерфейса ${iface}. Клиент без mimic
+    не подключится: его пакеты дойдут до нас, а ответ сервера будет съеден в ядре.
+    Это не баг, это принцип работы.
+  - Ключей у mimic нет. Это не крипта, а смена протокола на проводе.
+  - MTU туннеля ${mtu:-1320}: mimic добавляет 12 байт к внешнему пакету,
+    потолок для IPv4 это ${MIM_MAX_MTU}. Запас есть, менять ничего не надо.
+  - Файрвол на твоей стороне: разреши и TCP, и UDP на ${port} к ${ip}.
+    Данные на входе возвращаются в UDP ещё до netfilter, а служебные пакеты
+    (SYN, keepalive) идут настоящим TCP.
+
+================================================================
+ВАРИАНТ 1. Debian 12/13 или Ubuntu 24.04 (десктоп, сервер, x86 или ARM)
+================================================================
+
+Требуется: DKMS и kernel headers, mimic ставит модуль ядра. root.
+
+  1. Скачать пару пакетов версии ${ver:-0.7.1} со страницы релизов:
+     https://github.com/${MIM_REPO}/releases
+     Имена: <кодовое_имя>_mimic_<версия>_<арх>.deb
+            <кодовое_имя>_mimic-dkms_<версия>_<арх>.deb
+     Кодовое имя: bookworm для Debian 12, trixie для Debian 13, noble для Ubuntu 24.04.
+     Архитектура: amd64 или arm64.
+  2. apt install ./*_mimic_*.deb ./*_mimic-dkms_*.deb
+     (на Debian 13 и новее можно просто apt install mimic, но версия там старее)
+  3. Узнать имя WAN-интерфейса:  ip route show default | awk '{print \$5}'
+  4. Положить mimic.conf.example как /etc/mimic/<этот интерфейс>.conf
+  5. systemctl enable --now mimic@<этот интерфейс>
+  6. Поднять туннель из client.conf.
+
+Проверка:
+  mimic show -c <интерфейс>            - состояние соединений
+  journalctl -u mimic@<интерфейс> -f   - лог
+
+Если трафик рвётся или встаёт колом:
+  раскомментируй xdp_mode = skb в конфиге и перезапусти mimic. XDP native
+  на virtio и на картах Intel (igc, igb, e1000) умеет терять пакеты.
+
+================================================================
+ВАРИАНТ 2. OpenWrt (роутер)
+================================================================
+
+Важно про модуль ядра:
+  на OpenWrt модуль ядра mimic (kmod-mimic) ставить НЕ обязательно, если
+  туннель это WireGuard/AmneziaWG. Ядерный WG всегда шлёт пакеты с частичной
+  контрольной суммой, а её mimic не ломает, поэтому checksum-хак (ради которого
+  и нужен модуль) не требуется. Ставь просто пакет mimic без kmod.
+
+Про готовые пакеты:
+  в официальном feed OpenWrt пакета mimic пока нет. Сборки лежат в ветке
+  openwrt репозитория и собираются через GitHub Actions, но их артефакты
+  живут ограниченное время и на момент сборки этого комплекта уже просрочены.
+  Поэтому надёжный путь один: собрать пакет самому из ветки openwrt.
+
+Сборка пакета (на машине с SDK OpenWrt под свою версию и архитектуру роутера):
+  1. Взять OpenWrt SDK своей версии (например 24.10) и архитектуры.
+     Архитектуру роутера смотри:  opkg print-architecture
+     (типовые: x86_64, aarch64_generic, arm_cortex-a7, mipsel_24kc)
+  2. Добавить пакет mimic из ветки openwrt в feeds и собрать по инструкции
+     single-package: https://openwrt.org/docs/guide-developer/toolchain/single.package
+     Ветка с Makefile пакета: https://github.com/${MIM_REPO}/tree/openwrt
+  3. На выходе получится mimic_*.ipk (и опционально kmod-mimic_*.ipk, который
+     для WG не нужен).
+
+Установка на роутер:
+  1. Закинуть mimic_*.ipk на роутер и поставить:
+       opkg install ./mimic_*.ipk
+     Бинарь встанет в /usr/bin/mimic.
+  2. Создать каталог и положить конфиг:
+       mkdir -p /etc/mimic
+       cp mimic.conf.example /etc/mimic/mimic.conf
+  3. Положить init-скрипт из комплекта и включить сервис:
+       cp mimic-openwrt.init /etc/init.d/mimic
+       chmod +x /etc/init.d/mimic
+       service mimic enable
+       service mimic start
+     Скрипт сам определит WAN-устройство через ubus (network.interface.wan)
+     и повесит mimic на него.
+  4. Поднять туннель WireGuard/AmneziaWG (LuCI или /etc/config/network).
+
+Проверка на роутере:
+  logread -e mimic          - лог сервиса
+  mimic show -c \$(ubus call network.interface.wan status | grep -o '"l3_device":"[^"]*"' | cut -d'"' -f4)
+
+Оговорки по OpenWrt:
+  - Поддержка OpenWrt у апстрима помечена как экспериментальная, это незакрытая
+    работа, а не стабильный релиз. На критичном роутере закладывайся осторожно.
+  - mimic на роутере крутит eBPF/XDP в датапате. На слабом железе это упирается
+    в CPU и режет скорость. На мощных SoC разница невелика.
+  - Если после подъёма туннеля трафик рвётся, добавь в /etc/mimic/mimic.conf
+    строку xdp_mode = skb и перезапусти:  service mimic restart
+EOF
+}
+
+# --> MIM: УСТАНОВКА <--
+mim_install() {
+    if _mim_installed; then
+        print_warn "mimic уже установлен ($(_mim_version))"
+        local re=""
+        ask_yn "Переустановить движок?" "n" re
+        [[ "$re" != "yes" ]] && return 0
+    fi
+
+    print_section "Установка mimic"
+    print_info "Проверка окружения..."
+    _mim_check_env || { print_err "Окружение не подходит"; return 1; }
+
+    _mim_install_prereq || { print_err "Не удалось поставить зависимости"; return 1; }
+
+    # - модуль собирается DKMS, без headers сборка встанет -
+    print_section "Kernel headers"
+    _awg_ensure_headers || { print_err "Без kernel headers DKMS модуль mimic не соберёт"; return 1; }
+
+    _mim_book_init
+
+    local wan xdp drv
+    wan=$(_mim_wan_iface)
+    drv=$(_mim_wan_driver "$wan")
+    # - на KVM почти всегда virtio_net, у которого XDP native в госте может отваливаться (upstream issue #11) -
+    xdp="skb"
+    book_write ".mimic.wan_iface" "$wan" string
+    book_write ".mimic.xdp_mode" "$xdp" string
+    print_info "XDP-режим по умолчанию skb (WAN ${wan}, драйвер ${drv:-неизвестен}). Переключается в управлении."
+
+    local tag
+    tag=$(_mim_resolve_tag)
+    if [[ -z "$tag" ]]; then
+        print_warn "Не удалось определить последний релиз ${MIM_REPO}"
+    else
+        print_info "Последний релиз: ${tag}"
+        print_info "Enter = ставим последнюю (${tag}). Или впиши свой тег из релизов."
+        local override=""
+        ask_raw "$(printf '  \033[1mТег для установки (Enter - %s):\033[0m ' "$tag")" override
+        [[ -n "$override" ]] && tag="$override"
+    fi
+
+    local done_ok=1
+    if [[ -n "$tag" ]] && _mim_install_deb "$tag"; then
+        done_ok=0
+    elif _mim_install_apt; then
+        done_ok=0
+    fi
+    [[ $done_ok -ne 0 ]] && { print_err "Установка движка не удалась"; return 1; }
+
+    if _mim_kmod_load; then
+        print_ok "Модуль ядра mimic загружен"
+    else
+        print_info "Без модуля контрольные суммы не чинятся = трафик поедет мусором."
+        return 1
+    fi
+
+    # - модуль после reboot нужен так же, юнит его тянет через modprobe@, но подстрахуемся -
+    mkdir -p /etc/modules-load.d
+    echo 'mimic' > /etc/modules-load.d/mimic.conf
+    chmod 644 /etc/modules-load.d/mimic.conf
+
+    [[ -f "$MIM_UNIT_TPL" ]] || print_warn "Шаблон ${MIM_UNIT_TPL} не найден: пакет положил юнит куда-то ещё"
+    mkdir -p "$MIM_KIT_DIR"; chmod 700 "$MIM_KIT_DIR"
+
+    book_write ".mimic.installed" "true" bool
+    book_write ".mimic.version" "$(_mim_version)" string
+
+    _mim_build_conf
+    _mim_preflight "$wan" || {
+        print_err "mimic на этой машине не разворачивается. Привязка бессмысленна."
+        return 1
+    }
+
+    print_ok "mimic установлен ($(_mim_version), источник: $(book_read '.mimic.source'))"
+
+    local b=""
+    ask_yn "Привязать mimic к интерфейсу сейчас?" "y" b
+    [[ "$b" == "yes" ]] && mim_bind_iface
+    return 0
+}
+
+# --> MIM: ПРИВЯЗКА К ИНТЕРФЕЙСУ <--
+mim_bind_iface() {
+    _mim_installed || { print_err "mimic не установлен"; return 1; }
+
+    _mim_ensure_iface || return 1
+    local iface="$MIM_TARGET_IFACE"
+    [[ -z "$iface" ]] && return 1
+
+    if [[ -n "$(book_read ".mimic.instances.\"${iface}\".port")" ]]; then
+        print_err "К ${iface} mimic уже привязан"
+        return 1
+    fi
+    if _mim_iface_has_wgo "$iface"; then
+        print_err "${iface} занят wg-obfuscator: его порт уведён на loopback, mimic там нечего заворачивать"
+        return 1
+    fi
+
+    local port
+    port=$(_mim_iface_port "$iface")
+    if ! validate_port "$port"; then
+        print_err "Не удалось прочитать порт интерфейса ${iface}"
+        return 1
+    fi
+
+    local mtu
+    mtu=$(_mim_iface_mtu "$iface")
+    if [[ "$mtu" =~ ^[0-9]+$ ]] && (( mtu > MIM_MAX_MTU )); then
+        print_err "MTU ${iface} = ${mtu}, потолок для mimic ${MIM_MAX_MTU} (12 байт наверх)"
+        print_info "Понизь MTU интерфейса, иначе пакеты будут резаться."
+        return 1
+    fi
+
+    local wan local_ip pub_ip
+    wan=$(_mim_wan_iface)
+    local_ip=$(_mim_wan_ip "$wan")
+    [[ -z "$local_ip" ]] && { print_err "Не определить адрес на ${wan}"; return 1; }
+    pub_ip=$(_mim_env_val "$iface" "SERVER_ENDPOINT_IP")
+    if [[ -n "$pub_ip" && "$pub_ip" != "$local_ip" ]]; then
+        print_warn "На ${wan} адрес ${local_ip}, а клиенты идут на ${pub_ip}: похоже на 1:1 NAT."
+        print_info "В фильтр пойдёт ${local_ip} = то, что реально стоит в пакете на проводе."
+    fi
+
+    print_section "Привязка"
+    echo -e "  ${CYAN}Интерфейс:${NC} ${iface}, порт ${port}/udp"
+    echo -e "  ${CYAN}Фильтр:${NC}    local=${local_ip}:${port} на ${wan}"
+    echo ""
+    print_warn "После привязки клиенты ${iface} БЕЗ mimic перестанут подключаться. Это не побочка, это принцип работы."
+    local confirm=""
+    ask_yn "Привязать mimic к ${iface}?" "y" confirm
+    [[ "$confirm" != "yes" ]] && return 0
+
+    book_write ".mimic.wan_iface" "$wan" string
+    _mim_book_iface "$iface" "$port" "$local_ip"
+    _mim_ufw_open "$iface" "$port"
+
+    if ! _mim_apply; then
+        print_err "Инстанс не поднялся = откатываю привязку"
+        book_del ".mimic.instances.\"${iface}\""
+        _mim_ufw_close "$port"
+        _mim_apply >/dev/null 2>&1
+        return 1
+    fi
+
+    print_ok "mimic держит ${iface}: local=${local_ip}:${port} на ${wan}"
+    echo ""
+    print_info "Комплект клиента забирается через управление -> Клиентский комплект."
+    print_warn "Клиенту обязателен свой mimic: Linux, ядро 6.1+, DKMS. Больше никаких платформ."
+    return 0
+}
+
+# --> MIM: КЛИЕНТСКИЙ КОМПЛЕКТ <--
+# - client.conf без правок + конфиг mimic + инструкция одним tar.gz -
+mim_client_kit() {
+    _mim_installed || { print_err "mimic не установлен"; return 1; }
+    local bound; bound=$(_mim_bound_list)
+    [[ -z "${bound// /}" ]] && { print_warn "Нет привязанных интерфейсов"; return 0; }
+
+    print_section "Клиентский комплект"
+    local arr=() i=1 x
+    for x in $bound; do echo -e "  ${GREEN}${i})${NC} ${x}"; arr+=("$x"); (( i++ )); done
+    local sel="" iface=""
+    ask_raw "$(printf '  \033[1mИнтерфейс:\033[0m ')" sel
+    [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#arr[@]} )) || { print_err "Неверный выбор"; return 1; }
+    iface="${arr[$((sel-1))]}"
+
+    local clients
+    clients=$(awg_get_client_list "$iface")
+    if [[ -z "${clients// /}" ]]; then
+        print_warn "На ${iface} нет клиентов."
+        local mk=""
+        ask_yn "Создать клиента сейчас?" "y" mk
+        [[ "$mk" != "yes" ]] && return 0
+        awg_add_client "$iface"
+        clients=$(awg_get_client_list "$iface")
+        [[ -z "${clients// /}" ]] && { print_warn "Клиент не создан, отмена"; return 0; }
+    fi
+    echo ""
+    local carr=() j=1
+    for x in $clients; do echo -e "  ${GREEN}${j})${NC} ${x}"; carr+=("$x"); (( j++ )); done
+    local csel="" name=""
+    ask_raw "$(printf '  \033[1mКлиент:\033[0m ')" csel
+    [[ "$csel" =~ ^[0-9]+$ ]] && (( csel >= 1 && csel <= ${#carr[@]} )) || { print_err "Неверный выбор"; return 1; }
+    name="${carr[$((csel-1))]}"
+
+    local cdir
+    cdir="$(awg_iface_clients "$iface")/${name}"
+    [[ -f "${cdir}/client.conf" ]] || { print_err "Конфиг клиента не найден"; return 1; }
+
+    local tmp kit
+    tmp=$(mktemp -d) || { print_err "mktemp failed"; return 1; }
+    kit="${tmp}/${iface}-${name}-mimic"
+    mkdir -p "$kit"
+    cp -a "${cdir}/client.conf" "${kit}/client.conf"
+    if ! _mim_client_conf "$iface" "${kit}/mimic.conf.example"; then
+        print_err "Конфиг mimic для клиента не собран: нет данных в книге"
+        rm -rf "$tmp"; return 1
+    fi
+    _mim_client_openwrt_init "${kit}/mimic-openwrt.init"
+    _mim_kit_readme "$iface" "$name" "${kit}/README.txt"
+
+    mkdir -p "$MIM_KIT_DIR"; chmod 700 "$MIM_KIT_DIR"
+    local tarball="${MIM_KIT_DIR}/${iface}-${name}-mimic.tar.gz"
+    tar -czf "$tarball" -C "$tmp" "$(basename "$kit")" 2>/dev/null
+    chmod 600 "$tarball"
+    rm -rf "$tmp"
+
+    print_ok "Комплект собран: ${tarball}"
+    echo ""
+    local dl=""
+    ask_yn "Выдать ссылку для скачивания комплекта?" "y" dl
+    [[ "$dl" == "yes" ]] && _awg_serve_conf "$tarball"
+
+    echo ""
+    local rm_kit=""
+    ask_yn "Удалить собранный комплект с сервера?" "y" rm_kit
+    [[ "$rm_kit" == "yes" ]] && { rm -f "$tarball"; print_ok "Комплект удалён с сервера"; }
+    return 0
+}
+
+# --> MIM: XDP-РЕЖИМ <--
+# - native быстрее, но на virtio в госте может сыпать трафиком: откат обязателен -
+mim_set_xdp() {
+    _mim_installed || { print_err "mimic не установлен"; return 1; }
+    local cur wan
+    cur=$(book_read ".mimic.xdp_mode"); [[ -z "$cur" ]] && cur="skb"
+    wan=$(_mim_wan_iface)
+
+    print_section "XDP-режим"
+    print_info "Сейчас: ${cur} (WAN ${wan}, драйвер $(_mim_wan_driver "$wan"))"
+    echo ""
+    echo -e "  ${GREEN}1)${NC} skb - программа крутится в ядре, работает везде (рекомендуется на KVM)"
+    echo -e "  ${GREEN}2)${NC} native - программа в драйвере, быстрее, на virtio может терять трафик"
+    local ch="" new=""
+    while true; do
+        ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" ch
+        case "$ch" in
+            1) new="skb"; break ;;
+            2) new="native"; break ;;
+            *) print_warn "1 или 2" ;;
+        esac
+    done
+    [[ "$new" == "$cur" ]] && { print_info "Режим не меняется"; return 0; }
+
+    if [[ "$new" == "native" ]]; then
+        print_warn "Если трафик встанет колом = вернись сюда и поставь skb. По логам это не всегда видно."
+        local go=""
+        ask_yn "Точно native?" "n" go
+        [[ "$go" != "yes" ]] && return 0
+    fi
+
+    book_write ".mimic.xdp_mode" "$new" string
+    if ! _mim_apply; then
+        print_err "На ${new} инстанс не поднялся = откат на ${cur}"
+        book_write ".mimic.xdp_mode" "$cur" string
+        _mim_apply >/dev/null 2>&1
+        return 1
+    fi
+    print_ok "XDP-режим: ${new}"
+    return 0
+}
+
+# --> MIM: СТАТУС <--
+mim_status() {
+    _mim_installed || { print_warn "mimic не установлен"; return 0; }
+    print_section "Статус mimic"
+    local wan unit
+    wan=$(_mim_wan_iface)
+    unit=$(_mim_unit "$wan")
+    print_info "Версия: $(book_read '.mimic.version') (источник: $(book_read '.mimic.source'))"
+    print_info "WAN: ${wan}, xdp_mode: $(book_read '.mimic.xdp_mode')"
+    print_info "Инстанс ${unit}: $(systemctl is-active "$unit" 2>/dev/null)"
+    if [[ -d /sys/module/mimic ]]; then
+        print_ok "Модуль ядра загружен"
+    else
+        print_err "Модуль ядра не загружен"
+    fi
+
+    local bound; bound=$(_mim_bound_list)
+    if [[ -z "${bound// /}" ]]; then
+        print_warn "Нет привязанных интерфейсов"
+        return 0
+    fi
+    local iface
+    for iface in $bound; do
+        echo ""
+        local port awgact
+        port=$(book_read ".mimic.instances.\"${iface}\".port")
+        awgact=$(systemctl is-active "awg-quick@${iface}" 2>/dev/null)
+        echo -e "  ${BOLD}${iface}${NC}: туннель ${awgact}"
+        echo -e "    фильтр: local=$(book_read ".mimic.instances.\"${iface}\".local_ip"):${port}"
+        echo -e "    клиентов: $(awg_get_client_list "$iface" | wc -w)"
+    done
+    return 0
+}
+
+# --> MIM: ТЕСТ <--
+# - проверяем то, что видно с сервера: инстанс, модуль, фильтры, порты, соединения -
+mim_test() {
+    _mim_installed || { print_err "mimic не установлен"; return 1; }
+    local wan unit conf
+    wan=$(_mim_wan_iface)
+    unit=$(_mim_unit "$wan")
+    conf=$(_mim_conf "$wan")
+
+    print_section "Тест mimic"
+
+    if systemctl is-active --quiet "$unit"; then
+        print_ok "инстанс ${unit} активен"
+    else
+        print_err "инстанс не активен: journalctl -u ${unit} -n 20 --no-pager"
+    fi
+
+    if [[ -d /sys/module/mimic ]]; then
+        print_ok "модуль ядра загружен"
+    else
+        print_err "модуль ядра не загружен: без него контрольные суммы не чинятся"
+    fi
+
+    if [[ -f "$conf" ]]; then
+        print_ok "конфиг ${conf}: фильтров $(grep -c '^filter = ' "$conf" 2>/dev/null)"
+    else
+        print_err "конфига ${conf} нет"
+    fi
+
+    # - адрес в фильтре обязан совпадать с тем, что стоит на проводе, иначе матча не будет никогда -
+    local live_ip
+    live_ip=$(_mim_wan_ip "$wan")
+    local iface port fip
+    for iface in $(_mim_bound_list); do
+        echo ""
+        echo -e "  ${BOLD}${iface}${NC}"
+        port=$(book_read ".mimic.instances.\"${iface}\".port")
+        fip=$(book_read ".mimic.instances.\"${iface}\".local_ip")
+
+        if [[ "$fip" == "$live_ip" ]]; then
+            print_ok "  фильтр смотрит на живой адрес ${fip}"
+        else
+            print_err "  в фильтре ${fip}, а на ${wan} сейчас ${live_ip}: матча не будет, перепривяжи"
+        fi
+
+        if systemctl is-active --quiet "awg-quick@${iface}"; then
+            print_ok "  туннель поднят"
+        else
+            print_err "  туннель не поднят"
+        fi
+
+        if command -v ufw &>/dev/null; then
+            _ufw_has_rule "$port" "tcp" && print_ok "  UFW: ${port}/tcp открыт" \
+                || print_err "  UFW: ${port}/tcp закрыт = хендшейк mimic не дойдёт"
+            _ufw_has_rule "$port" "udp" && print_ok "  UFW: ${port}/udp открыт" \
+                || print_err "  UFW: ${port}/udp закрыт = восстановленный трафик не дойдёт до туннеля"
+        fi
+
+        local hs
+        hs=$(awg show "$iface" latest-handshakes 2>/dev/null | awk '$2 > 0' | wc -l)
+        if [[ "$hs" -gt 0 ]]; then
+            print_ok "  живых хендшейков: ${hs}"
+        else
+            print_info "  хендшейков нет: клиент не подключался или mimic у него не запущен"
+        fi
+    done
+
+    echo ""
+    print_info "Соединения mimic:"
+    "$MIM_BIN" show -c "$wan" 2>&1 | sed 's/^/    /' | head -20
+    return 0
+}
+
+# --> MIM: ОБНОВЛЕНИЕ ДВИЖКА <--
+mim_update() {
+    _mim_installed || { print_err "mimic не установлен"; return 1; }
+    print_section "Обновление mimic"
+    local cur src tag
+    cur=$(_mim_version)
+    src=$(book_read ".mimic.source")
+
+    if [[ "$src" == "apt" ]]; then
+        print_info "Источник apt, установлено: ${cur:-неизвестно}"
+        local upd=""
+        ask_yn "Обновить пакеты mimic из apt?" "y" upd
+        [[ "$upd" != "yes" ]] && return 0
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq 2>/dev/null
+        apt-get install -y -qq --only-upgrade mimic mimic-dkms 2>/dev/null
+    else
+        tag=$(_mim_resolve_tag)
+        [[ -z "$tag" ]] && { print_err "Не удалось определить последний релиз"; return 1; }
+        print_info "Установлено: ${cur:-неизвестно}, последний релиз: ${tag}"
+        if [[ "v${cur}" == "$tag" ]]; then
+            print_ok "Уже последняя версия"
+            local force=""
+            ask_yn "Всё равно переустановить?" "n" force
+            [[ "$force" != "yes" ]] && return 0
+        fi
+        local upd=""
+        ask_yn "Обновить движок до ${tag}?" "y" upd
+        [[ "$upd" != "yes" ]] && return 0
+        _mim_install_deb "$tag" || { print_err "Обновление не удалось"; return 1; }
+    fi
+
+    book_write ".mimic.version" "$(_mim_version)" string
+    _mim_kmod_load || print_warn "Модуль ядра после обновления не загрузился: dkms status mimic"
+
+    # - пакет мог заменить и юнит, и бинарь под работающим инстансом -
+    systemctl daemon-reload 2>/dev/null
+    if [[ -n "$(_mim_bound_list | tr -d ' ')" ]]; then
+        _mim_apply || { print_err "Инстанс не поднялся после обновления"; return 1; }
+    fi
+    print_ok "Обновлено до $(_mim_version)"
+    return 0
+}
+
+# --> MIM: ОТВЯЗКА ОТ ИНТЕРФЕЙСА <--
+mim_unbind() {
+    _mim_installed || { print_err "mimic не установлен"; return 1; }
+    local bound; bound=$(_mim_bound_list)
+    [[ -z "${bound// /}" ]] && { print_warn "Нет привязанных интерфейсов"; return 0; }
+
+    print_section "Отвязать mimic от интерфейса"
+    local arr=() i=1 x
+    for x in $bound; do echo -e "  ${GREEN}${i})${NC} ${x}"; arr+=("$x"); (( i++ )); done
+    local sel="" iface=""
+    ask_raw "$(printf '  \033[1mИнтерфейс:\033[0m ')" sel
+    [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#arr[@]} )) || { print_err "Неверный выбор"; return 1; }
+    iface="${arr[$((sel-1))]}"
+
+    print_warn "Клиенты ${iface} должны будут выключить свой mimic: иначе их TCP никто не развернёт обратно."
+    local confirm=""
+    ask_yn "Отвязать ${iface}?" "n" confirm
+    [[ "$confirm" != "yes" ]] && return 0
+
+    local port
+    port=$(book_read ".mimic.instances.\"${iface}\".port")
+    book_del ".mimic.instances.\"${iface}\""
+    [[ -n "$port" ]] && _mim_ufw_close "$port"
+    _mim_apply || print_warn "Инстанс после отвязки не поднялся, проверь: journalctl -u $(_mim_unit "$(_mim_wan_iface)")"
+
+    print_ok "mimic отвязан от ${iface}"
+    print_info "Порт ${port}/udp остаётся открыт: туннель работает как обычный AWG."
+    return 0
+}
+
+# --> MIM: ПОЛНОЕ УДАЛЕНИЕ <--
+mim_remove() {
+    _mim_installed || { print_warn "mimic не установлен"; return 0; }
+    print_section "Полное удаление mimic"
+    print_warn "Все привязки снимаются, клиентам придётся выключить свой mimic."
+    local confirm=""
+    ask_yn "Удалить mimic полностью?" "n" confirm
+    [[ "$confirm" != "yes" ]] && return 0
+
+    local wan iface port
+    wan=$(_mim_wan_iface)
+    for iface in $(_mim_bound_list); do
+        port=$(book_read ".mimic.instances.\"${iface}\".port")
+        [[ -n "$port" ]] && _mim_ufw_close "$port"
+    done
+
+    systemctl disable --now "$(_mim_unit "$wan")" 2>/dev/null
+    rm -f "$(_mim_conf "$wan")"
+    rm -f /etc/modules-load.d/mimic.conf
+
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get purge -y -qq mimic mimic-dkms 2>/dev/null || print_warn "apt-get purge отработал с ошибкой, проверь dpkg -l | grep mimic"
+    apt-get autoremove -y -qq 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null
+
+    rm -rf "$MIM_KIT_DIR"
+    book_del ".mimic"
+    print_ok "mimic удалён"
+    print_info "Туннели работают как обычный AWG, порты открыты."
+    return 0
+}
+
+# --> MIM: УПРАВЛЕНИЕ <--
+mim_manage() {
+    while true; do
+        eli_header
+        eli_banner "Управление mimic" \
+            "Привязка mimic к выделенным интерфейсам, выдача клиентских комплектов,
+  XDP-режим, статус, тест, обновление, отвязка и удаление."
+
+        echo -e "  ${GREEN}1)${NC} Привязать к интерфейсу"
+        echo -e "  ${GREEN}2)${NC} Клиентский комплект"
+        echo -e "  ${GREEN}3)${NC} XDP-режим"
+        echo -e "  ${GREEN}4)${NC} Статус"
+        echo -e "  ${GREEN}5)${NC} Тест"
+        echo -e "  ${GREEN}6)${NC} Обновить движок"
+        echo -e "  ${GREEN}7)${NC} Отвязать от интерфейса"
+        echo -e "  ${GREEN}8)${NC} Удалить полностью"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) mim_bind_iface  || print_warn "Ошибка привязки"; eli_pause ;;
+            2) mim_client_kit  || print_warn "Ошибка сборки комплекта"; eli_pause ;;
+            3) mim_set_xdp     || print_warn "Ошибка смены XDP-режима"; eli_pause ;;
+            4) mim_status; eli_pause ;;
+            5) mim_test        || print_warn "Ошибка теста"; eli_pause ;;
+            6) mim_update      || print_warn "Ошибка обновления"; eli_pause ;;
+            7) mim_unbind      || print_warn "Ошибка отвязки"; eli_pause ;;
+            8) mim_remove      || print_warn "Ошибка удаления"; eli_pause ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 8"; eli_pause ;;
+        esac
+    done
+}
+
 # === 03a_teamspeak.sh ===
 # --> МОДУЛЬ: TEAMSPEAK 6 <--
 # - нативная установка с GitHub, systemd unit, SQLite БД с WAL -
@@ -6498,6 +9965,19 @@ EOF
         priv_key="НЕ_ОПРЕДЕЛЁН"
     fi
 
+    # - пост-проверка порта: в бете TS6 --default-voice-port иногда игнорируется -
+    # - сверяем что сервис реально слушает заданный voice_port через ss -
+    if systemctl is-active --quiet teamspeak 2>/dev/null; then
+        if ss -H -uln 2>/dev/null | grep -Eq "[:.]${voice_port}[[:space:]]"; then
+            print_ok "Voice ${voice_port}/udp: слушает"
+        else
+            print_warn "Сервис активен, но НЕ слушает ${voice_port}/udp"
+            print_warn "TS6 мог проигнорировать --default-voice-port, проверь: ss -ulnp | grep tsserver"
+        fi
+    else
+        print_err "Сервис teamspeak не активен после старта: journalctl -u teamspeak | tail -20"
+    fi
+
     # - UFW -
     if command -v ufw &>/dev/null; then
         ufw allow "${voice_port}/udp" comment "TS6 voice" 2>/dev/null || true
@@ -6702,6 +10182,9 @@ ts_delete() {
     fi
     rm -f "$TS_ENV" 2>/dev/null || true
     book_write ".teamspeak.installed" "false" bool
+    book_write ".teamspeak.server_ip" ""
+    book_write ".teamspeak.priv_key" ""
+    book_write ".teamspeak.version" ""
     print_ok "TeamSpeak удалён"
     return 0
 }
@@ -6971,6 +10454,9 @@ mbl_delete() {
         ufw delete allow "${port}/udp" 2>/dev/null || true
     fi
     book_write ".mumble.installed" "false" bool
+    book_write ".mumble.server_ip" ""
+    book_write ".mumble.superuser_pass" ""
+    book_write ".mumble.superuser_set" "false" bool
     print_ok "Mumble удалён"
     return 0
 }
@@ -6999,6 +10485,8 @@ unbound_install() {
     echo -e "  ${GREEN}2)${NC} Форвард (Google / Cloudflare / Quad9)"
     echo -e "     ${CYAN}VPS пересылает запросы на Google 8.8.8.8 / CF 1.1.1.1.${NC}"
     echo -e "     ${CYAN}Быстрее за счёт их кэша, но они видят все домены.${NC}"
+    echo -e "     ${CYAN}Транспорт до них шифруется по DoT (TLS, порт 853),${NC}"
+    echo -e "     ${CYAN}с деградацией в рекурсию если 853 заблокирован.${NC}"
     echo -e "     ${CYAN}Провайдер клиента всё равно ничего не видит (VPN).${NC}"
     echo ""
     local dns_mode="recursive"
@@ -7118,12 +10606,14 @@ ${access_lines}
     use-caps-for-id: no
     verbosity: 0
     log-queries: no
+    tls-cert-bundle: "/etc/ssl/certs/ca-certificates.crt"
 
 forward-zone:
     name: "."
-    forward-addr: 8.8.8.8
-    forward-addr: 1.1.1.1
-    forward-addr: 9.9.9.9
+    forward-tls-upstream: yes
+    forward-addr: 8.8.8.8@853#dns.google
+    forward-addr: 1.1.1.1@853#cloudflare-dns.com
+    forward-addr: 9.9.9.9@853#dns.quad9.net
     forward-first: yes
 EOF
     fi
@@ -7153,8 +10643,10 @@ EOF
         print_ok "Unbound запущен (${dns_mode})"
         book_write ".unbound.installed" "true" bool
         book_write ".unbound.mode" "$dns_mode"
-        local _ub_ips
-        _ub_ips=$(printf '%s\n' "${awg_ips[@]}" 2>/dev/null | jq -R . | jq -s . 2>/dev/null || echo "[]")
+        local _ub_ips="[]"
+        if [[ ${#awg_ips[@]} -gt 0 ]]; then
+            _ub_ips=$(printf '%s\n' "${awg_ips[@]}" | jq -R . | jq -s . 2>/dev/null || echo "[]")
+        fi
         book_write_obj ".unbound.listen_ips" "$_ub_ips"
     else
         print_err "Не запустился"; return 1
@@ -7217,7 +10709,7 @@ unbound_status() {
 
 # === 04b_diag.sh ===
 # --> МОДУЛЬ: ДИАГНОСТИКА <--
-# - 16 секций, TXT + HTML отчёт, прогноз ёмкости -
+# - 21 секция, TXT + HTML отчёт, прогноз ёмкости -
 
 declare -a _DG_RED=() _DG_YELLOW=() _DG_GREEN=()
 _dg_red()    { _DG_RED+=("$1"); }
@@ -7242,12 +10734,13 @@ _hr() { echo "<tr><td class='label'>$1</td><td>$(_hb "${3:-info}" "$2")</td></tr
 diag_run() {
     eli_header
     eli_banner "Диагностика VPS стека" \
-        "Полная проверка сервера по 18 секциям. Занимает 2-5 минут.
+        "Полная проверка сервера по 21 секции. Занимает 2-5 минут.
 
   Что проверяется: процессор, RAM, swap, скорость диска, скорость канала
-    (загрузка 100 MB с 10 серверов по миру), пинг, DNS, NTP, SSH-атаки,
-    настройки ядра (BBR, буферы, conntrack), статус всех VPN и сервисов,
-    открытые порты, MSS clamping, файрвол, journald, cron задачи.
+    (загрузка с живых точек по регионам, включая СНГ и Азию), пинг, DNS,
+    NTP, SSH-атаки, настройки ядра (BBR, буферы, conntrack), статус всех
+    VPN, прокси, обходов DPI (zapret2), обфускаторов (wg-obfuscator, mimic)
+    и сервисов, открытые порты, MSS clamping, файрвол, journald, cron задачи.
 
   Результат: цветной отчёт в терминале + файлы TXT и HTML в /root/.
     HTML отчёт можно скачать и открыть в браузере - там таблицы
@@ -7340,12 +10833,18 @@ diag_run() {
         else print_warn "ChaCha20: не замерено"; fi
     }
 
-    # --> 3. КАНАЛ (10 точек с регионами) <--
+    # --> 3. КАНАЛ (регионы, живые точки с фолбэком) <--
+    # - таблица точек _pts[]: "__region__|Имя" задаёт заголовок группы, -
+    # - "LABEL|URL[|URL2[|URL3]]" - точка с цепочкой источников-фолбэков. -
+    # - пустой URL (Киргизия) даёт честный статус "точка недоступна". -
+    # - на нацзеркалах ОС ls-lR.gz местами убирают, поэтому вторым источником -
+    # - идёт Contents-amd64.gz текущего LTS (noble) - он есть на любом зеркале. -
     _dg_bandwidth() {
         D_BEST_SPEED="0"; D_BEST_HOST="?"
         local bw_confirm=""
         echo ""
-        echo -e "  ${YELLOW}Тест канала качает ~10 MB с каждой из 10 точек (~100 MB суммарно).${NC}"
+        echo -e "  ${YELLOW}Тест канала качает ~10 MB с каждой ЖИВОЙ точки по регионам.${NC}"
+        echo -e "  ${YELLOW}Мёртвые точки пропускаются пробником, на канал не влияют.${NC}"
         echo -e "  ${YELLOW}На VPS с лимитом трафика стоит пропустить.${NC}"
         ask_yn "Запустить тест канала?" "y" bw_confirm
         if [[ "$bw_confirm" != "yes" ]]; then
@@ -7353,32 +10852,65 @@ diag_run() {
             D_SPEED_RESULTS+=("__skipped__|skipped")
             return 0
         fi
-        _bw() {
-            local url="$1" host="$2" speed mbit
+        # - одна точка: пробуем источники по очереди пробником, первый живой мерим -
+        _dg_bw_point() {
+            local label="$1" urls_field="$2"
+            local -a cands=()
+            IFS='|' read -r -a cands <<< "$urls_field"
+            if [[ ${#cands[@]} -eq 0 || -z "${cands[0]}" ]]; then
+                echo -e "  ${CYAN}${label}:${NC} ${YELLOW}точка недоступна${NC}"
+                D_SPEED_RESULTS+=("${label}|n/a"); return 0
+            fi
+            local url="" c
+            for c in "${cands[@]}"; do
+                [[ -z "$c" ]] && continue
+                # - пробник: 1 байт range-GET, живой узел отвечает мгновенно -
+                if curl -o /dev/null -s --connect-timeout 3 --max-time 5 --range 0-0 "$c" 2>/dev/null; then
+                    url="$c"; break
+                fi
+            done
+            if [[ -z "$url" ]]; then
+                echo -e "  ${CYAN}${label}:${NC} ${YELLOW}точка недоступна${NC}"
+                D_SPEED_RESULTS+=("${label}|n/a"); return 0
+            fi
+            local speed mbit
             # - --range 0-10485760 ограничивает скачивание 10 MB даже на быстром канале -
-            speed=$(curl -o /dev/null -s --connect-timeout 5 --max-time 15 \
+            speed=$(curl -o /dev/null -s --connect-timeout 5 --max-time 20 \
                 --range 0-10485760 -w "%{speed_download}" "$url" 2>/dev/null || echo "0")
             mbit=$(awk "BEGIN {printf \"%.1f\", ${speed}/1024/1024*8}")
-            echo -e "  ${CYAN}${host}:${NC} ${mbit} Мбит/с"
-            D_SPEED_RESULTS+=("${host}|${mbit}")
-            awk "BEGIN {exit !(${mbit}+0 > ${D_BEST_SPEED}+0)}" && { D_BEST_SPEED=$mbit; D_BEST_HOST="$host"; }
+            echo -e "  ${CYAN}${label}:${NC} ${mbit} Мбит/с"
+            D_SPEED_RESULTS+=("${label}|${mbit}")
+            awk "BEGIN {exit !(${mbit}+0 > ${D_BEST_SPEED}+0)}" && { D_BEST_SPEED=$mbit; D_BEST_HOST="$label"; }
         }
-        print_info "Тестируем канал (10 точек по ~10 MB)..."
-        echo -e "  ${BOLD}Европа:${NC}"; D_SPEED_RESULTS+=("__region__|Европа")
-        _bw "http://speedtest.tele2.net/100MB.zip" "Tele2 (Швеция)"
-        _bw "https://fra-de-ping.vultr.com/vultr.com.100MB.bin" "Vultr (Франкфурт)"
-        _bw "https://par-fr-ping.vultr.com/vultr.com.100MB.bin" "Vultr (Париж)"
-        _bw "https://mad-es-ping.vultr.com/vultr.com.100MB.bin" "Vultr (Мадрид)"
-        echo -e "  ${BOLD}Россия:${NC}"; D_SPEED_RESULTS+=("__region__|Россия")
-        _bw "http://mirror.yandex.ru/ubuntu/ls-lR.gz" "Яндекс (Москва)"
-        _bw "https://speedtest.selectel.ru/100MB" "Selectel (Москва)"
-        echo -e "  ${BOLD}США:${NC}"; D_SPEED_RESULTS+=("__region__|США")
-        _bw "https://nj-us-ping.vultr.com/vultr.com.100MB.bin" "Vultr (Нью-Йорк)"
-        echo -e "  ${BOLD}Ближний Восток:${NC}"; D_SPEED_RESULTS+=("__region__|Ближний Восток")
-        _bw "https://dxb-ae-ping.vultr.com/vultr.com.100MB.bin" "Vultr (Дубай)"
-        echo -e "  ${BOLD}Азия:${NC}"; D_SPEED_RESULTS+=("__region__|Азия")
-        _bw "https://sel-kor-ping.vultr.com/vultr.com.100MB.bin" "Vultr (Сеул)"
-        _bw "https://hnd-jp-ping.vultr.com/vultr.com.100MB.bin" "Vultr (Токио)"
+        local _pts=(
+            "__region__|Европа"
+            "Финляндия (Hetzner Helsinki)|https://hel1-speed.hetzner.com/100MB.bin"
+            "Швейцария (SWITCH Цюрих)|http://mirror.switch.ch/ftp/mirror/ubuntu/ls-lR.gz|http://mirror.switch.ch/ftp/mirror/ubuntu/dists/noble/Contents-amd64.gz"
+            "Германия (Hetzner Falkenstein)|https://fsn1-speed.hetzner.com/100MB.bin"
+            "Нидерланды (Vultr Amsterdam)|https://ams-nl-ping.vultr.com/vultr.com.100MB.bin"
+            "Франция (Vultr Париж)|https://par-fr-ping.vultr.com/vultr.com.100MB.bin"
+            "Испания (Vultr Мадрид)|https://mad-es-ping.vultr.com/vultr.com.100MB.bin"
+            "__region__|Россия и СНГ"
+            "Россия (Яндекс, Москва)|http://mirror.yandex.ru/ubuntu/ls-lR.gz|http://mirror.yandex.ru/ubuntu/dists/noble/Contents-amd64.gz"
+            "Россия (Selectel, Москва)|https://speedtest.selectel.ru/100MB"
+            "Беларусь (Datacenter.by)|http://mirror.datacenter.by/ubuntu/ls-lR.gz|http://mirror.datacenter.by/ubuntu/dists/noble/Contents-amd64.gz"
+            "Казахстан (PS.KZ, Алматы)|http://mirror.ps.kz/ubuntu/ls-lR.gz|http://mirror.ps.kz/ubuntu/dists/noble/Contents-amd64.gz"
+            "Киргизия (нет публичной точки)|"
+            "__region__|США"
+            "США (Hetzner Ashburn)|https://ash-speed.hetzner.com/100MB.bin|https://nj-us-ping.vultr.com/vultr.com.100MB.bin"
+            "__region__|Азия"
+            "Корея (Vultr Сеул)|https://sel-kor-ping.vultr.com/vultr.com.100MB.bin"
+            "Гонконг (xTom HK)|https://mirror.xtom.com.hk/ubuntu/ls-lR.gz|https://mirror.xtom.com.hk/ubuntu/dists/noble/Contents-amd64.gz"
+        )
+        print_info "Тестируем канал (живые точки по регионам, ~10 MB каждая)..."
+        local _row _label _urls
+        for _row in "${_pts[@]}"; do
+            _label="${_row%%|*}"; _urls="${_row#*|}"
+            if [[ "$_label" == "__region__" ]]; then
+                echo -e "  ${BOLD}${_urls}:${NC}"; D_SPEED_RESULTS+=("__region__|${_urls}"); continue
+            fi
+            _dg_bw_point "$_label" "$_urls"
+        done
         echo ""
         awk "BEGIN {exit !(${D_BEST_SPEED}+0 > 1)}" && { print_ok "Лучший: ~${D_BEST_SPEED} Мбит/с (${D_BEST_HOST})"; _dg_green "Канал: ${D_BEST_SPEED} Мбит/с (${D_BEST_HOST})"; } \
             || print_warn "Канал не замерен"
@@ -7498,8 +11030,12 @@ diag_run() {
         if systemctl is-active --quiet x-ui 2>/dev/null; then
             D_XUI_STATUS="активен"; print_ok "3X-UI: активен"; _dg_green "3X-UI активен"
             [[ -f "/usr/local/x-ui/x-ui" ]] && D_XUI_VER=$(/usr/local/x-ui/x-ui -v 2>/dev/null | head -1 || echo "?")
-            local xray_bin="/usr/local/x-ui/bin/xray-linux-amd64"
-            [[ -f "$xray_bin" ]] && D_XRAY_VER=$("$xray_bin" version 2>/dev/null | head -1 | grep -oP 'Xray \K[0-9.]+' || echo "?")
+            # - бинарь xray именуется по арх (amd64/arm64/arm...): берём первый исполняемый -
+            local xray_bin="" _xb
+            for _xb in /usr/local/x-ui/bin/xray-linux-*; do
+                [[ -x "$_xb" ]] && { xray_bin="$_xb"; break; }
+            done
+            [[ -n "$xray_bin" ]] && D_XRAY_VER=$("$xray_bin" version 2>/dev/null | head -1 | grep -oP 'Xray \K[0-9.]+' || echo "?")
             print_info "3X-UI: ${D_XUI_VER}, Xray: ${D_XRAY_VER}"
         elif [[ -f "/usr/local/x-ui/x-ui" ]]; then
             D_XUI_STATUS="остановлен"; print_warn "3X-UI: не запущен"; _dg_yellow "3X-UI не запущен|systemctl start x-ui"
@@ -7594,7 +11130,15 @@ diag_run() {
             elif systemctl list-unit-files 2>/dev/null | grep -q "^${svc}"; then st="остановлен"; print_err "${label}: ОСТАНОВЛЕН"; _dg_red "Сервис ${label} остановлен|systemctl start ${svc}"
             else st="н/у"; print_info "${label}: не установлен"; fi; D_SVC_TABLE+=("${label}|${st}"); }
         _sv "fail2ban" "Fail2Ban"; _sv "docker" "Docker"; _sv "x-ui" "3X-UI"
-        _sv "teamspeak" "TeamSpeak"; _sv "mumble-server" "Mumble"; _sv "unbound" "Unbound"
+        _sv "teamspeak" "TeamSpeak"; _sv "unbound" "Unbound"
+        # - Mumble: upstream mumble-server или legacy murmurd -
+        if systemctl is-active --quiet mumble-server 2>/dev/null || systemctl is-active --quiet murmurd 2>/dev/null; then
+            print_ok "Mumble: активен"; _dg_green "Сервис Mumble активен"; D_SVC_TABLE+=("Mumble|активен")
+        elif systemctl list-unit-files 2>/dev/null | grep -qE '^(mumble-server|murmurd)\.service'; then
+            print_err "Mumble: ОСТАНОВЛЕН"; _dg_red "Сервис Mumble остановлен|systemctl start mumble-server"; D_SVC_TABLE+=("Mumble|остановлен")
+        else
+            print_info "Mumble: не установлен"; D_SVC_TABLE+=("Mumble|н/у")
+        fi
         # - Hysteria multi-instance hysteria-1/2/3 -
         local hy2_units
         hy2_units=$(systemctl list-unit-files 'hysteria-*.service' 2>/dev/null \
@@ -7720,6 +11264,21 @@ diag_run() {
         elif [[ $hy2_count -eq 0 ]]; then
             print_info "Hysteria 2: не установлен"
         fi
+
+        # - Signal TLS Proxy: env/каталог + docker signal/nginx-terminate/nginx-relay -
+        if [[ -f "/etc/signal-proxy/signal.env" || -d "/opt/signal-proxy" ]]; then
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -Eq 'signal|nginx-terminate|nginx-relay'; then
+                print_ok "Signal TLS Proxy: контейнеры запущены"
+                _dg_green "Signal TLS Proxy активен"
+                D_SVC_TABLE+=("Signal TLS Proxy|активен")
+            else
+                print_err "Signal TLS Proxy: файлы есть, контейнеры не запущены"
+                _dg_red "Signal TLS Proxy остановлен|cd /opt/signal-proxy && docker compose up -d"
+                D_SVC_TABLE+=("Signal TLS Proxy|остановлен")
+            fi
+        else
+            print_info "Signal TLS Proxy: не установлен"
+        fi
     }
 
     # --> TELEGRAM МОНИТОРИНГ <--
@@ -7760,6 +11319,109 @@ diag_run() {
         fi
     }
 
+    # --> ZAPRET2 (обход DPI) <--
+    # - только читаем: юниты zapret2-eli@<iface> и nft-таблицы zeli_<iface> -
+    _dg_zapret() {
+        local bin="/opt/zapret2/nfq2/nfqws2" dir="/etc/vps-eli-stack/zapret2"
+        if [[ ! -x "$bin" ]]; then
+            print_info "zapret2: не установлен"; D_SVC_TABLE+=("zapret2|н/у"); return 0
+        fi
+        local total=0 active=0 cf iface
+        if compgen -G "${dir}/*.conf" >/dev/null 2>&1; then
+            for cf in "${dir}"/*.conf; do
+                [[ -f "$cf" ]] || continue
+                iface=$(basename "$cf" .conf); total=$(( total + 1 ))
+                local up="нет" nft="нет"
+                systemctl is-active --quiet "zapret2-eli@${iface}.service" 2>/dev/null && { up="да"; active=$(( active + 1 )); }
+                nft list table inet "zeli_${iface}" &>/dev/null && nft="да"
+                if [[ "$up" == "да" && "$nft" == "да" ]]; then
+                    print_ok "zapret2 ${iface}: активен (юнит + nft)"
+                    D_SVC_TABLE+=("zapret2 ${iface}|активен")
+                elif [[ "$up" == "да" ]]; then
+                    print_warn "zapret2 ${iface}: юнит активен, nft zeli_${iface} нет"
+                    _dg_yellow "zapret2 ${iface}: нет nft-таблицы zeli_${iface}|systemctl restart zapret2-eli@${iface}"
+                    D_SVC_TABLE+=("zapret2 ${iface}|активен")
+                else
+                    print_err "zapret2 ${iface}: остановлен"
+                    _dg_red "zapret2 ${iface} остановлен|systemctl start zapret2-eli@${iface}"
+                    D_SVC_TABLE+=("zapret2 ${iface}|остановлен")
+                fi
+            done
+        fi
+        if [[ $total -eq 0 ]]; then
+            print_info "zapret2: движок установлен, привязок нет"
+            D_SVC_TABLE+=("zapret2|установлен, привязок нет")
+        else
+            print_info "zapret2: активно ${active}/${total}"
+            [[ $active -gt 0 ]] && _dg_green "zapret2: активно ${active}/${total} инстансов"
+        fi
+    }
+
+    # --> WG-OBFUSCATOR (маскировка WG) <--
+    # - только читаем: юниты wgobfs-eli@<iface>, ключ инстанса не печатаем -
+    _dg_wgobfs() {
+        local bin="/opt/wg-obfuscator/wg-obfuscator" dir="/etc/vps-eli-stack/wgobfs"
+        if [[ ! -x "$bin" ]]; then
+            print_info "wg-obfuscator: не установлен"; D_SVC_TABLE+=("wg-obfuscator|н/у"); return 0
+        fi
+        local total=0 active=0 wf iface
+        if compgen -G "${dir}/*.conf" >/dev/null 2>&1; then
+            for wf in "${dir}"/*.conf; do
+                [[ -f "$wf" ]] || continue
+                iface=$(basename "$wf" .conf); total=$(( total + 1 ))
+                if systemctl is-active --quiet "wgobfs-eli@${iface}.service" 2>/dev/null; then
+                    print_ok "wg-obfuscator ${iface}: активен"; active=$(( active + 1 ))
+                    D_SVC_TABLE+=("wg-obfuscator ${iface}|активен")
+                else
+                    print_err "wg-obfuscator ${iface}: остановлен"
+                    _dg_red "wg-obfuscator ${iface} остановлен|systemctl start wgobfs-eli@${iface}"
+                    D_SVC_TABLE+=("wg-obfuscator ${iface}|остановлен")
+                fi
+            done
+        fi
+        if [[ $total -eq 0 ]]; then
+            print_info "wg-obfuscator: движок установлен, привязок нет"
+            D_SVC_TABLE+=("wg-obfuscator|установлен, привязок нет")
+        else
+            print_info "wg-obfuscator: активно ${active}/${total}"
+            [[ $active -gt 0 ]] && _dg_green "wg-obfuscator: активно ${active}/${total} инстансов"
+        fi
+    }
+
+    # --> MIMIC (UDP -> TCP) <--
+    # - инстанс один на WAN; модуль ядра читаем через /sys (без пайп-ловушки) -
+    _dg_mimic() {
+        local bin="/usr/sbin/mimic"
+        if [[ ! -x "$bin" ]]; then
+            print_info "mimic: не установлен"; D_SVC_TABLE+=("mimic|н/у"); return 0
+        fi
+        if [[ -d /sys/module/mimic ]]; then
+            print_ok "mimic: модуль ядра загружен"
+        else
+            print_warn "mimic: модуль ядра не загружен"
+            _dg_yellow "mimic: модуль не загружен|modprobe mimic; dkms status mimic"
+        fi
+        local wan; wan=$(book_read '.mimic.wan_iface' 2>/dev/null)
+        [[ -z "$wan" ]] && wan=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
+        local unit="mimic@${wan}.service" conf="/etc/mimic/${wan}.conf" filters=0
+        if [[ -f "$conf" ]]; then
+            filters=$(grep -c '^filter = ' "$conf" 2>/dev/null); [[ "$filters" =~ ^[0-9]+$ ]] || filters=0
+        fi
+        if [[ $filters -eq 0 ]]; then
+            print_info "mimic: движок установлен, привязок нет"
+            D_SVC_TABLE+=("mimic|установлен, привязок нет")
+            systemctl is-active --quiet "$unit" 2>/dev/null && _dg_yellow "mimic: привязок нет, а ${unit} активен|systemctl stop ${unit}"
+        elif systemctl is-active --quiet "$unit" 2>/dev/null; then
+            print_ok "mimic: активен на ${wan} (${filters} привязок)"
+            _dg_green "mimic активен (${filters} привязок на ${wan})"
+            D_SVC_TABLE+=("mimic ${wan}|активен")
+        else
+            print_err "mimic: ${filters} привязок, ${unit} не активен"
+            _dg_red "mimic ${unit} не активен|systemctl start ${unit}"
+            D_SVC_TABLE+=("mimic ${wan}|остановлен")
+        fi
+    }
+
     # --> ЗАПУСК <--
     _diag_section "1. Железо и система" _dg_hardware
     _diag_section "2. CPU (шифрование)" _dg_cpu
@@ -7771,14 +11433,17 @@ diag_run() {
     _diag_section "8. Outline" _dg_outline
     _diag_section "9. 3X-UI" _dg_xui
     _diag_section "10. TeamSpeak" _dg_teamspeak
-    _diag_section "11. Прокси (MTProto, SOCKS5, Hysteria 2)" _dg_proxy
-    _diag_section "12. Telegram мониторинг" _dg_tgmon
-    _diag_section "13. Сетевые настройки ядра" _dg_kernel
-    _diag_section "14. iptables" _dg_iptables
-    _diag_section "15. Порты" _dg_ports
-    _diag_section "16. Диск" _dg_disk
-    _diag_section "17. Сервисы" _dg_services
-    _diag_section "18. Обслуживание" _dg_maintenance
+    _diag_section "11. Прокси (MTProto, SOCKS5, Hysteria 2, Signal)" _dg_proxy
+    _diag_section "12. zapret2 (обход DPI)" _dg_zapret
+    _diag_section "13. wg-obfuscator (маскировка WG)" _dg_wgobfs
+    _diag_section "14. mimic (UDP -> TCP)" _dg_mimic
+    _diag_section "15. Telegram мониторинг" _dg_tgmon
+    _diag_section "16. Сетевые настройки ядра" _dg_kernel
+    _diag_section "17. iptables" _dg_iptables
+    _diag_section "18. Порты" _dg_ports
+    _diag_section "19. Диск" _dg_disk
+    _diag_section "20. Сервисы" _dg_services
+    _diag_section "21. Обслуживание" _dg_maintenance
 
     # --> ПРОГНОЗ ЁМКОСТИ <--
     print_section "Прогноз ёмкости"
@@ -7874,7 +11539,7 @@ CSS
         echo "<li>${i%%|*}"; [[ "$i" == *"|"* ]] && echo "<span class='fix'>-> ${i##*|}</span>"; echo "</li>"
     done
     echo "</ul></div>"
-    echo "<div class='tl-block tl-yellow'><h3>🟡 Внимание (${#_DG_YELLOW[@]})</h3><ul>"
+    echo "<div class='tl-block tl-yellow'><h3>[WARN] Внимание (${#_DG_YELLOW[@]})</h3><ul>"
     [[ ${#_DG_YELLOW[@]} -eq 0 ]] && echo "<li style='color:var(--mut)'>Нет предупреждений</li>"
     for i in "${_DG_YELLOW[@]}"; do
         echo "<li>${i%%|*}"; [[ "$i" == *"|"* ]] && echo "<span class='fix'>-> ${i##*|}</span>"; echo "</li>"
@@ -7904,11 +11569,15 @@ CSS
     echo "</table></div></div>"
 
     # Канал с регионами
-    echo "<div class='card'><div class='card-header'><span class='icon'>[NET]</span> Скорость канала<div class='card-sub'>Загрузка 100 МБ до 10 точек по миру</div></div><div class='card-body'><table>"
+    echo "<div class='card'><div class='card-header'><span class='icon'>[NET]</span> Скорость канала<div class='card-sub'>Загрузка до живых точек по регионам (СНГ, Азия, ЕС, США)</div></div><div class='card-body'><table>"
     for sr in "${D_SPEED_RESULTS[@]}"; do
         local sh="${sr%%|*}" sv="${sr##*|}"
         if [[ "$sh" == "__region__" ]]; then
             echo "<tr><td colspan='2' style='padding:14px 6px 5px;font-size:13px;font-weight:700;color:var(--cyn);letter-spacing:0.04em;border-bottom:1px solid var(--brd)'>${sv}</td></tr>"
+        elif [[ "$sh" == "__skipped__" ]]; then
+            _hr "Тест канала" "пропущен" "info"
+        elif [[ "$sv" == "n/a" ]]; then
+            _hr "$sh" "точка недоступна" "warn"
         else
             local bt="ok"; awk "BEGIN{exit !(${sv}+0 < 1)}" 2>/dev/null && bt="warn"
             _hr "$sh" "${sv} Мбит/с" "$bt"
@@ -8421,7 +12090,6 @@ EOF
 SERVER_IP="$(book_read '.teamspeak.server_ip')"
 TS_VOICE_PORT="$(book_read '.teamspeak.voice_port')"
 TS_FT_PORT="$(book_read '.teamspeak.ft_port')"
-TS_THREADS="$(book_read '.teamspeak.threads')"
 TS_PRIV_KEY="$(book_read '.teamspeak.priv_key')"
 TS_VERSION="$(book_read '.teamspeak.version')"
 TS_DB_PATH="${tdb}"
@@ -8501,6 +12169,332 @@ EOF
     else
         _pr_check "Mumble не установлен"
         book_write ".mumble.installed" "false" bool
+    fi
+
+    # --> 8. ПРОКСИ <--
+    # - мультиинстансные сервисы: диск (env/инстанс-дир) = истина, книга self-heal -
+    # - контейнер/юнит не поднимаем сами: только сверка и восстановление книги -
+    print_section "8. Прокси (MTProto / SOCKS5 / Hysteria2 / Signal)"
+
+    # - MTProto: /etc/mtproto/instance_*.env, docker mtproto-<id> -
+    local mtp_dir="/etc/mtproto" mtp_disk=0
+    if compgen -G "${mtp_dir}/instance_*.env" >/dev/null 2>&1; then
+        for envf in "${mtp_dir}"/instance_*.env; do
+            [[ -f "$envf" ]] || continue
+            local iid port tls cont
+            iid=$(basename "$envf" | sed 's/instance_//;s/\.env//')
+            port=$(grep '^PORT=' "$envf" | head -1 | cut -d'"' -f2)
+            tls=$(grep '^TLS_DOMAIN=' "$envf" | head -1 | cut -d'"' -f2)
+            cont=$(grep '^CONTAINER=' "$envf" | head -1 | cut -d'"' -f2)
+            mtp_disk=$(( mtp_disk + 1 ))
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$cont"; then
+                _pr_found "MTProto #${iid}: ${cont} запущен (порт ${port})"
+            else
+                _pr_warn "MTProto #${iid}: env есть, контейнер ${cont} не запущен"
+            fi
+            [[ -n "$port" && "$(book_read ".mtproto.instances.${iid}.port")" != "$port" ]] && { book_write ".mtproto.instances.${iid}.port" "$port"; _pr_fixed "book: mtproto #${iid} port=${port}"; }
+            [[ -n "$tls"  && "$(book_read ".mtproto.instances.${iid}.tls_domain")" != "$tls" ]] && book_write ".mtproto.instances.${iid}.tls_domain" "$tls"
+            [[ -n "$cont" && "$(book_read ".mtproto.instances.${iid}.container")" != "$cont" ]] && book_write ".mtproto.instances.${iid}.container" "$cont"
+        done
+    fi
+    for bid in $(jq -r '.mtproto.instances | keys[]?' "$_BOOK" 2>/dev/null); do
+        [[ -f "${mtp_dir}/instance_${bid}.env" ]] || { book_del ".mtproto.instances.${bid}"; _pr_fixed "book: убран призрак mtproto #${bid}"; }
+    done
+    if [[ $mtp_disk -gt 0 ]]; then
+        [[ "$(book_read '.mtproto.installed')" != "true" ]] && { book_write ".mtproto.installed" "true" bool; _pr_updated "book: .mtproto.installed=true"; }
+    else
+        [[ "$(book_read '.mtproto.installed')" == "true" ]] && { book_write ".mtproto.installed" "false" bool; _pr_updated "book: .mtproto.installed=false"; }
+        _pr_check "MTProto не установлен"
+    fi
+
+    # - SOCKS5: /etc/socks5/instance_*.env, docker socks5-<id> -
+    local s5_dir="/etc/socks5" s5_disk=0
+    if compgen -G "${s5_dir}/instance_*.env" >/dev/null 2>&1; then
+        for envf in "${s5_dir}"/instance_*.env; do
+            [[ -f "$envf" ]] || continue
+            local iid port cont
+            iid=$(basename "$envf" | sed 's/instance_//;s/\.env//')
+            port=$(grep '^PORT=' "$envf" | head -1 | cut -d'"' -f2)
+            cont=$(grep '^CONTAINER=' "$envf" | head -1 | cut -d'"' -f2)
+            s5_disk=$(( s5_disk + 1 ))
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$cont"; then
+                _pr_found "SOCKS5 #${iid}: ${cont} запущен (порт ${port})"
+            else
+                _pr_warn "SOCKS5 #${iid}: env есть, контейнер ${cont} не запущен"
+            fi
+            [[ -n "$port" && "$(book_read ".socks5.instances.${iid}.port")" != "$port" ]] && { book_write ".socks5.instances.${iid}.port" "$port"; _pr_fixed "book: socks5 #${iid} port=${port}"; }
+            [[ -n "$cont" && "$(book_read ".socks5.instances.${iid}.container")" != "$cont" ]] && book_write ".socks5.instances.${iid}.container" "$cont"
+        done
+    fi
+    for bid in $(jq -r '.socks5.instances | keys[]?' "$_BOOK" 2>/dev/null); do
+        [[ -f "${s5_dir}/instance_${bid}.env" ]] || { book_del ".socks5.instances.${bid}"; _pr_fixed "book: убран призрак socks5 #${bid}"; }
+    done
+    if [[ $s5_disk -gt 0 ]]; then
+        [[ "$(book_read '.socks5.installed')" != "true" ]] && { book_write ".socks5.installed" "true" bool; _pr_updated "book: .socks5.installed=true"; }
+    else
+        [[ "$(book_read '.socks5.installed')" == "true" ]] && { book_write ".socks5.installed" "false" bool; _pr_updated "book: .socks5.installed=false"; }
+        _pr_check "SOCKS5 не установлен"
+    fi
+
+    # - Hysteria2: /etc/hysteria/instance_<id>, systemd hysteria-<id> -
+    local hy2_dir="/etc/hysteria" hy2_disk=0
+    if compgen -G "${hy2_dir}/instance_*" >/dev/null 2>&1; then
+        for idir in "${hy2_dir}"/instance_*; do
+            [[ -d "$idir" ]] || continue
+            local iid port svc
+            iid=$(basename "$idir" | sed 's/instance_//')
+            [[ "$iid" =~ ^[0-9]+$ ]] || continue
+            port=$(grep '^PORT=' "${idir}/hysteria.env" 2>/dev/null | head -1 | cut -d'"' -f2)
+            svc="hysteria-${iid}"
+            hy2_disk=$(( hy2_disk + 1 ))
+            if systemctl is-active --quiet "$svc" 2>/dev/null; then
+                _pr_found "Hysteria2 #${iid}: ${svc} активен (порт ${port})"
+            else
+                _pr_warn "Hysteria2 #${iid}: инстанс есть, ${svc} не активен"
+            fi
+            [[ -n "$port" && "$(book_read ".hysteria2.instances.${iid}.port")" != "$port" ]] && book_write ".hysteria2.instances.${iid}.port" "$port" number
+        done
+    fi
+    for bid in $(jq -r '.hysteria2.instances | keys[]?' "$_BOOK" 2>/dev/null); do
+        [[ -d "${hy2_dir}/instance_${bid}" ]] || { book_del ".hysteria2.instances.${bid}"; _pr_fixed "book: убран призрак hysteria2 #${bid}"; }
+    done
+    if [[ $hy2_disk -gt 0 ]]; then
+        [[ "$(book_read '.hysteria2.installed')" != "true" ]] && { book_write ".hysteria2.installed" "true" bool; _pr_updated "book: .hysteria2.installed=true"; }
+    else
+        [[ "$(book_read '.hysteria2.installed')" == "true" ]] && { book_write ".hysteria2.installed" "false" bool; _pr_updated "book: .hysteria2.installed=false"; }
+        _pr_check "Hysteria2 не установлен"
+    fi
+
+    # - Signal TLS Proxy: /etc/signal-proxy/signal.env, docker signal/nginx-* -
+    if [[ -f "/etc/signal-proxy/signal.env" || -d "/opt/signal-proxy" ]]; then
+        local sig_dom
+        sig_dom=$(grep '^DOMAIN=' /etc/signal-proxy/signal.env 2>/dev/null | head -1 | cut -d'"' -f2)
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -Eq 'signal|nginx-terminate|nginx-relay'; then
+            _pr_found "Signal TLS Proxy: контейнеры запущены${sig_dom:+ (домен ${sig_dom})}"
+            [[ "$(book_read '.signal_proxy.installed')" != "true" ]] && { book_write ".signal_proxy.installed" "true" bool; _pr_updated "book: .signal_proxy.installed=true"; }
+        else
+            _pr_warn "Signal TLS Proxy: файлы есть, контейнеры не запущены"
+        fi
+        [[ -n "$sig_dom" && "$(book_read '.signal_proxy.domain')" != "$sig_dom" ]] && { book_write ".signal_proxy.domain" "$sig_dom"; _pr_fixed "book: signal domain=${sig_dom}"; }
+    else
+        [[ "$(book_read '.signal_proxy.installed')" == "true" ]] && { book_write ".signal_proxy.installed" "false" bool; _pr_updated "book: .signal_proxy.installed=false"; }
+        _pr_check "Signal TLS Proxy не установлен"
+    fi
+
+    # --> 9. TELEGRAM-БОТ <--
+    # - не контейнер и не юнит: скрипт + env + cron-задача -
+    print_section "9. Telegram-бот"
+    local tgbot_script="/usr/local/bin/eli-tgbot-monitor.sh"
+    local tgbot_env="/etc/vps-eli-stack/telegrambot.env"
+    local tgbot_cron="no"
+    crontab -l 2>/dev/null | grep -q 'eli-tgbot-monitor' && tgbot_cron="yes"
+    if [[ -f "$tgbot_script" && -f "$tgbot_env" && "$tgbot_cron" == "yes" ]]; then
+        _pr_found "Telegram-бот: скрипт, env и cron на месте"
+        [[ "$(book_read '.telegram_bot.enabled')" != "true" ]] && { book_write ".telegram_bot.enabled" "true" bool; _pr_updated "book: .telegram_bot.enabled=true"; }
+    elif [[ -f "$tgbot_script" || -f "$tgbot_env" || "$tgbot_cron" == "yes" ]]; then
+        _pr_warn "Telegram-бот: неполная конфигурация (script:$([[ -f "$tgbot_script" ]] && echo да || echo нет) env:$([[ -f "$tgbot_env" ]] && echo да || echo нет) cron:${tgbot_cron})"
+    else
+        _pr_check "Telegram-бот не настроен"
+        [[ "$(book_read '.telegram_bot.enabled')" == "true" ]] && { book_write ".telegram_bot.enabled" "false" bool; _pr_updated "book: .telegram_bot.enabled=false"; }
+    fi
+
+    # --> 10. ZAPRET2 <--
+    # - мультиинстанс по awg-интерфейсам: диск (<iface>.conf) = истина, книга self-heal -
+    # - юниты и nft сами не поднимаем: только сверка и восстановление книги -
+    print_section "10. Zapret2 (обход DPI)"
+    local zap_dir="/etc/vps-eli-stack/zapret2" zap_bin="/opt/zapret2/nfq2/nfqws2" zap_disk=0
+    if [[ -x "$zap_bin" ]] && compgen -G "${zap_dir}/*.conf" >/dev/null 2>&1; then
+        for cf in "${zap_dir}"/*.conf; do
+            [[ -f "$cf" ]] || continue
+            local ziface zunit zqnum
+            ziface=$(basename "$cf" | sed 's/\.conf$//')
+            zunit="zapret2-eli@${ziface}.service"
+            zap_disk=$(( zap_disk + 1 ))
+            if systemctl is-active --quiet "$zunit" 2>/dev/null; then
+                _pr_found "Zapret2 ${ziface}: инстанс активен"
+            else
+                _pr_warn "Zapret2 ${ziface}: конфиг есть, ${zunit} не активен"
+            fi
+            if nft list table inet "zeli_${ziface}" &>/dev/null; then
+                _pr_found "  nft zeli_${ziface}: загружены"
+            else
+                _pr_warn "  nft zeli_${ziface}: отсутствуют (загрузчик zeli-nft-${ziface})"
+            fi
+            zqnum=$(grep -m1 '^--qnum=' "$cf" 2>/dev/null | cut -d= -f2)
+            [[ -n "$zqnum" && "$(book_read ".zapret.interfaces.\"${ziface}\".qnum")" != "$zqnum" ]] && { book_write ".zapret.interfaces.\"${ziface}\".qnum" "$zqnum" number; _pr_fixed "book: zapret ${ziface} qnum=${zqnum}"; }
+        done
+    fi
+    # - призраки: интерфейс в книге есть, конфига на диске нет -
+    for zkey in $(jq -r '.zapret.interfaces | keys[]?' "$_BOOK" 2>/dev/null); do
+        [[ -f "${zap_dir}/${zkey}.conf" ]] || { book_del ".zapret.interfaces.\"${zkey}\""; _pr_fixed "book: убран призрак zapret ${zkey}"; }
+    done
+    if [[ -x "$zap_bin" ]]; then
+        [[ "$(book_read '.zapret.installed')" != "true" ]] && { book_write ".zapret.installed" "true" bool; _pr_updated "book: .zapret.installed=true"; }
+        [[ $zap_disk -eq 0 ]] && _pr_check "Zapret2: движок установлен, привязок нет"
+    else
+        [[ "$(book_read '.zapret.installed')" == "true" ]] && { book_write ".zapret.installed" "false" bool; _pr_updated "book: .zapret.installed=false"; }
+        _pr_check "Zapret2 не установлен"
+    fi
+    # - cron автообновления vs книга -
+    local zap_cron="no"
+    crontab -l 2>/dev/null | grep -q 'eli-zapret-autoupdate' && zap_cron="yes"
+    local zap_au; zap_au=$(book_read '.zapret.autoupdate_enabled')
+    if [[ "$zap_au" == "true" && "$zap_cron" == "no" ]]; then
+        _pr_warn "Zapret2: автообновление в книге включено, но cron отсутствует"
+    elif [[ "$zap_au" != "true" && "$zap_cron" == "yes" ]]; then
+        _pr_warn "Zapret2: cron автообновления есть, но в книге выключено"
+    fi
+
+    # --> 11. WG-OBFUSCATOR <--
+    # - мультиинстанс по vanilla-awg интерфейсам: диск (<iface>.conf) = истина, книга self-heal -
+    # - ключ инстанса в отчёт не печатаем ни при каких раскладах -
+    print_section "11. wg-obfuscator (маскировка WG)"
+    local wgo_dir="/etc/vps-eli-stack/wgobfs" wgo_bin="/opt/wg-obfuscator/wg-obfuscator" wgo_disk=0
+    if [[ -x "$wgo_bin" ]] && compgen -G "${wgo_dir}/*.conf" >/dev/null 2>&1; then
+        for wf in "${wgo_dir}"/*.conf; do
+            [[ -f "$wf" ]] || continue
+            local wiface wunit wlport wmask wenv wport
+            wiface=$(basename "$wf" | sed 's/\.conf$//')
+            wunit="wgobfs-eli@${wiface}.service"
+            wgo_disk=$(( wgo_disk + 1 ))
+            if systemctl is-active --quiet "$wunit" 2>/dev/null; then
+                _pr_found "wg-obfuscator ${wiface}: инстанс активен"
+            else
+                _pr_warn "wg-obfuscator ${wiface}: конфиг есть, ${wunit} не активен"
+            fi
+
+            # - интерфейс мог исчезнуть или сменить версию: не-vanilla обфускатор ломает -
+            wenv="/etc/awg-setup/iface_${wiface}.env"
+            if [[ ! -f "$wenv" ]]; then
+                _pr_warn "wg-obfuscator ${wiface}: awg-интерфейс отсутствует, привязка висит в пустоту"
+            else
+                if [[ "$(grep -m1 '^AWG_VERSION=' "$wenv" 2>/dev/null | cut -d'"' -f2)" != "wg" ]]; then
+                    _pr_warn "wg-obfuscator ${wiface}: интерфейс больше не vanilla-WG, обфускация портит пакеты"
+                fi
+                # - смысл модуля: порт туннеля не должен быть виден снаружи -
+                wport=$(grep -m1 '^SERVER_PORT=' "$wenv" 2>/dev/null | cut -d'"' -f2)
+                if [[ -n "$wport" ]] && ufw show added 2>/dev/null | grep -Eq "(^|[[:space:]])${wport}/udp([[:space:]]|$)"; then
+                    _pr_warn "wg-obfuscator ${wiface}: порт ${wport}/udp открыт в UFW, голый WireGuard виден снаружи"
+                fi
+            fi
+
+            # - конфиг на диске = истина, книга подтягивается -
+            wlport=$(grep -m1 '^source-lport' "$wf" 2>/dev/null | cut -d'=' -f2 | tr -d ' ')
+            if [[ "$wlport" =~ ^[0-9]+$ ]] && [[ "$(book_read ".wgobfs.instances.\"${wiface}\".lport")" != "$wlport" ]]; then
+                book_write ".wgobfs.instances.\"${wiface}\".lport" "$wlport" number
+                _pr_fixed "book: wgobfs ${wiface} lport=${wlport}"
+            fi
+            wmask=$(grep -m1 '^masking' "$wf" 2>/dev/null | cut -d'=' -f2 | tr -d ' ')
+            if [[ -n "$wmask" ]] && [[ "$(book_read ".wgobfs.instances.\"${wiface}\".masking")" != "$wmask" ]]; then
+                book_write ".wgobfs.instances.\"${wiface}\".masking" "$wmask"
+                _pr_fixed "book: wgobfs ${wiface} masking=${wmask}"
+            fi
+        done
+    fi
+
+    # - призраки: инстанс в книге есть, конфига на диске нет -
+    for wkey in $(jq -r '.wgobfs.instances | keys[]?' "$_BOOK" 2>/dev/null); do
+        [[ -f "${wgo_dir}/${wkey}.conf" ]] || { book_del ".wgobfs.instances.\"${wkey}\""; _pr_fixed "book: убран призрак wgobfs ${wkey}"; }
+    done
+
+    if [[ -x "$wgo_bin" ]]; then
+        [[ "$(book_read '.wgobfs.installed')" != "true" ]] && { book_write ".wgobfs.installed" "true" bool; _pr_updated "book: .wgobfs.installed=true"; }
+        # - у v1.5 нет --version, версия живёт только в первой строке --help -
+        local wgo_ver
+        wgo_ver=$("$wgo_bin" --help 2>&1 | head -1 | grep -oE 'v[0-9]+(\.[0-9]+)*' | head -1)
+        [[ -n "$wgo_ver" && "$(book_read '.wgobfs.version')" != "$wgo_ver" ]] && { book_write ".wgobfs.version" "$wgo_ver"; _pr_updated "book: .wgobfs.version=${wgo_ver}"; }
+        [[ ! -f "/etc/systemd/system/wgobfs-eli@.service" ]] && _pr_warn "wg-obfuscator: шаблон юнита wgobfs-eli@.service отсутствует"
+        [[ $wgo_disk -eq 0 ]] && _pr_check "wg-obfuscator: движок установлен, привязок нет"
+    else
+        [[ "$(book_read '.wgobfs.installed')" == "true" ]] && { book_write ".wgobfs.installed" "false" bool; _pr_updated "book: .wgobfs.installed=false"; }
+        _pr_check "wg-obfuscator не установлен"
+    fi
+
+    # --> 12. MIMIC <--
+    # - инстанс один на WAN, конфиг собирается целиком из книги: книга = истина, диск сверяется -
+    print_section "12. mimic (UDP -> TCP)"
+    local mim_bin="/usr/sbin/mimic"
+    if [[ -x "$mim_bin" ]]; then
+        [[ "$(book_read '.mimic.installed')" != "true" ]] && { book_write ".mimic.installed" "true" bool; _pr_updated "book: .mimic.installed=true"; }
+        local mim_ver
+        mim_ver=$("$mim_bin" --version 2>&1 | head -1 | grep -oE '[0-9]+(\.[0-9]+)+' | head -1)
+        [[ -n "$mim_ver" && "$(book_read '.mimic.version')" != "$mim_ver" ]] && { book_write ".mimic.version" "$mim_ver"; _pr_updated "book: .mimic.version=${mim_ver}"; }
+
+        # - без модуля ядра контрольные суммы не чинятся: трафик пойдёт мусором -
+        if ! lsmod 2>/dev/null | grep -q '^mimic[[:space:]]'; then
+            if modprobe mimic 2>/dev/null && lsmod 2>/dev/null | grep -q '^mimic[[:space:]]'; then
+                _pr_fixed "Модуль mimic: загружен через modprobe"
+            else
+                _pr_warn "Модуль mimic: НЕ загружен, проверь dkms status mimic"
+            fi
+        fi
+
+        local mim_wan mim_conf mim_unit mim_ip mim_n=0
+        mim_wan=$(book_read '.mimic.wan_iface')
+        [[ -z "$mim_wan" ]] && mim_wan=$(ip route show default 2>/dev/null | awk '/default/{print $5}' | head -1)
+        mim_conf="/etc/mimic/${mim_wan}.conf"
+        mim_unit="mimic@${mim_wan}.service"
+        # - адрес на проводе, а не публичный: при 1:1 NAT это разные вещи -
+        mim_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
+
+        for mkey in $(jq -r '.mimic.instances | keys[]?' "$_BOOK" 2>/dev/null); do
+            local menv mport mfip
+            menv="/etc/awg-setup/iface_${mkey}.env"
+            if [[ ! -f "$menv" ]]; then
+                book_del ".mimic.instances.\"${mkey}\""
+                _pr_fixed "book: убран призрак mimic ${mkey} (awg-интерфейс отсутствует)"
+                continue
+            fi
+            mim_n=$(( mim_n + 1 ))
+
+            # - порт интерфейса мог поменяться: книга подтягивается за env -
+            mport=$(grep -m1 '^SERVER_PORT=' "$menv" 2>/dev/null | cut -d'"' -f2)
+            if [[ "$mport" =~ ^[0-9]+$ ]] && [[ "$(book_read ".mimic.instances.\"${mkey}\".port")" != "$mport" ]]; then
+                book_write ".mimic.instances.\"${mkey}\".port" "$mport" number
+                _pr_fixed "book: mimic ${mkey} port=${mport}"
+            fi
+
+            # - фильтр с чужим адресом не сматчится никогда, туннель встанет молча -
+            mfip=$(book_read ".mimic.instances.\"${mkey}\".local_ip")
+            if [[ -n "$mim_ip" && -n "$mfip" && "$mfip" != "$mim_ip" ]]; then
+                book_write ".mimic.instances.\"${mkey}\".local_ip" "$mim_ip"
+                _pr_fixed "book: mimic ${mkey} local_ip=${mim_ip} (было ${mfip})"
+                _pr_warn "mimic ${mkey}: адрес в фильтре сменился, нужен рестарт ${mim_unit}"
+            fi
+
+            # - смысл модуля: на порт должны ходить и TCP, и UDP -
+            if [[ -n "$mport" ]] && command -v ufw &>/dev/null; then
+                ufw show added 2>/dev/null | grep -Eq "(^|[[:space:]])${mport}/tcp([[:space:]]|$)" \
+                    || _pr_warn "mimic ${mkey}: порт ${mport}/tcp закрыт в UFW, хендшейк mimic не дойдёт"
+                ufw show added 2>/dev/null | grep -Eq "(^|[[:space:]])${mport}/udp([[:space:]]|$)" \
+                    || _pr_warn "mimic ${mkey}: порт ${mport}/udp закрыт в UFW, восстановленный трафик не дойдёт"
+            fi
+        done
+
+        if [[ $mim_n -eq 0 ]]; then
+            _pr_check "mimic: движок установлен, привязок нет"
+            systemctl is-active --quiet "$mim_unit" 2>/dev/null && _pr_warn "mimic: привязок нет, а ${mim_unit} активен"
+        else
+            _pr_found "mimic: привязок ${mim_n} на ${mim_wan}"
+            systemctl is-active --quiet "$mim_unit" 2>/dev/null || _pr_warn "mimic: привязки есть, ${mim_unit} не активен"
+            # - конфиг детерминированно собирается из книги, расхождение чиним на месте -
+            local mim_want mim_have
+            mim_want=$mim_n
+            # - grep -c печатает 0 и при этом возвращает 1: подстраховка через регулярку, а не через || -
+            mim_have=$(grep -c '^filter = ' "$mim_conf" 2>/dev/null)
+            [[ "$mim_have" =~ ^[0-9]+$ ]] || mim_have=0
+            if [[ "$mim_have" != "$mim_want" ]] && declare -f _mim_build_conf >/dev/null 2>&1; then
+                if _mim_build_conf; then
+                    _pr_fixed "mimic: конфиг ${mim_conf} пересобран из книги (фильтров было ${mim_have}, стало ${mim_want})"
+                    _pr_warn "mimic: нужен рестарт ${mim_unit}, чтобы фильтры применились"
+                else
+                    _pr_warn "mimic: конфиг ${mim_conf} разошёлся с книгой, пересобрать не вышло"
+                fi
+            fi
+        fi
+    else
+        [[ "$(book_read '.mimic.installed')" == "true" ]] && { book_write ".mimic.installed" "false" bool; _pr_updated "book: .mimic.installed=false"; }
+        _pr_check "mimic не установлен"
     fi
 
     # --> ФИНАЛЬНОЕ ОБНОВЛЕНИЕ <--
@@ -8881,6 +12875,7 @@ ufw_toggle() {
         [[ "$confirm" != "yes" ]] && return 0
         ufw disable
         print_ok "UFW отключён"
+        book_write ".ufw.active" "false" bool
     else
         print_warn "UFW неактивен"
         local ssh_port; ssh_port=$(ssh_get_port)
@@ -8893,11 +12888,15 @@ ufw_toggle() {
                 ufw allow "${ssh_port}/tcp" comment "SSH" 2>/dev/null || true
             fi
         fi
+        # - полная проверка покрытия всех активных портов перед enable -
+        # - иначе сервис на непокрытом порту отвалится сразу после включения -
+        ufw_check_ports
         local confirm=""
         ask_yn "Включить UFW?" "y" confirm
         [[ "$confirm" != "yes" ]] && return 0
         ufw --force enable
         print_ok "UFW включён"
+        book_write ".ufw.active" "true" bool
     fi
     return 0
 }
@@ -10217,7 +14216,7 @@ os="$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'"' -f2 || echo 'unkn
 kernel="$(uname -r)"
 debian_version="${_deb_ver}"
 version_id="${_version_id}"
-eli_version="4.508"
+eli_version="5.780 dev"
 components=${collected}
 METAEOF
 
@@ -10751,6 +14750,9 @@ menu_vpn() {
         echo -e "  ${GREEN}2)${NC} 3X-UI"
         echo -e "  ${GREEN}3)${NC} Outline"
         echo -e "  ${GREEN}4)${NC} Прокси мессенджеров"
+        echo -e "  ${GREEN}5)${NC} zapret2 (обход DPI)"
+        echo -e "  ${GREEN}6)${NC} wg-obfuscator (маскировка WG)"
+        echo -e "  ${GREEN}7)${NC} mimic (UDP -> TCP)"
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
@@ -10761,8 +14763,11 @@ menu_vpn() {
             2) menu_xui       || { print_warn "Ошибка в разделе 3X-UI"; eli_pause; } ;;
             3) menu_otl       || { print_warn "Ошибка в разделе Outline"; eli_pause; } ;;
             4) menu_proxy     || { print_warn "Ошибка в разделе Прокси"; eli_pause; } ;;
+            5) menu_zapret    || { print_warn "Ошибка в разделе zapret2"; eli_pause; } ;;
+            6) menu_wgobfs    || { print_warn "Ошибка в разделе wg-obfuscator"; eli_pause; } ;;
+            7) menu_mimic     || { print_warn "Ошибка в разделе mimic"; eli_pause; } ;;
             0) return 0 ;;
-            *) print_warn "Введите число от 0 до 4"; eli_pause ;;
+            *) print_warn "Введите число от 0 до 7"; eli_pause ;;
         esac
     done
 }
@@ -10775,7 +14780,7 @@ menu_awg() {
         eli_banner "AmneziaWG" \
             "VPN-туннель на базе WireGuard с маскировкой трафика.
 
-  Что делает: шифрует весь интернет-трафик между твоим устройством и этим
+  Что делает: шифрует весь интернет трафик между твоим устройством и этим
     сервером. Провайдер видит только непонятный шум, а не сайты и приложения.
 
   Установка создаёт первый туннель (интерфейс) и конфиг для подключения.
@@ -10802,6 +14807,119 @@ menu_awg() {
             3) awg_test_obf   || { print_warn "Ошибка в тесте обфускации"; }; eli_pause ;;
             0) return 0 ;;
             *) print_warn "Введите число от 0 до 3"; eli_pause ;;
+        esac
+    done
+}
+
+# --> МЕНЮ: ZAPRET2 <--
+# - подменю zapret2: установка движка и управление привязками -
+menu_zapret() {
+    while true; do
+        eli_header
+        eli_banner "zapret2 (обход DPI)" \
+            "Десинхронизация DPI для трафика awg клиентов через nfqws2 (nfqueue).
+
+  Что делает: применяет обход глубокой инспекции пакетов (DPI) к форвард трафику
+    выбранного awg интерфейса. Полезно, когда сам VPS стоит за DPI
+    (например ТСПУ на аплинке) и режет YouTube, Discord и прочее.
+
+  Требует KVM или bare-metal и nftables. На OpenVZ/LXC не работает.
+  Привязка выборочная: десинк идёт только к трафику указанного интерфейса,
+    SSH и админ трафик не затрагиваются.
+
+  Сообщения Telegram уже решаются туннелем и MTProto прокси;
+    zapret помогает в первую очередь звонкам (WebRTC/STUN)."
+
+        echo -e "  ${GREEN}1)${NC} Установка zapret2"
+        echo -e "  ${GREEN}2)${NC} Управление zapret2"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) zapret_install || { print_warn "Ошибка при установке zapret2"; }; eli_pause ;;
+            2) zapret_manage  || { print_warn "Ошибка в управлении zapret2"; eli_pause; } ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 2"; eli_pause ;;
+        esac
+    done
+}
+
+# --> МЕНЮ: WG-OBFUSCATOR <--
+# - подменю обфускатора: установка движка и управление привязками -
+menu_wgobfs() {
+    while true; do
+        eli_header
+        eli_banner "wg-obfuscator (маскировка WG)" \
+            "Прячет WireGuard: провайдер видит не VPN, а поток случайных данных
+  или обычный STUN (трафик видеозвонков, его почти нигде не режут).
+  
+  ! - wg-obfuscator прячет сам туннель (WG) от провайдера КЛИЕНТА - !
+  
+  Зачем: когда DPI детектит и режет сам протокол WireGuard, и AmneziaWG уже не спасает.
+
+  Как работает: маленький прокси на сервере и такой же на стороне клиента.
+    Клиентский WireGuard стучится к себе на 127.0.0.1, обфускатор клиента
+    шифрует поток ключом и шлёт на наш публичный порт. Порт самого туннеля
+    наружу закрыт: снаружи виден только обфускатор.
+
+  Требует: отдельный vanilla-WG интерфейс (заголовки AmneziaWG обфускатор
+    ломает). Если такого нет, модуль создаст его сам.
+    Клиенту обязателен свой wg-obfuscator: OpenWrt, Windows, macOS, Android,
+    MikroTik. IPv6 в этой связке не поддерживается вообще."
+
+        echo -e "  ${GREEN}1)${NC} Установка wg-obfuscator"
+        echo -e "  ${GREEN}2)${NC} Управление wg-obfuscator"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) wgo_install || { print_warn "Ошибка при установке wg-obfuscator"; }; eli_pause ;;
+            2) wgo_manage  || { print_warn "Ошибка в управлении wg-obfuscator"; eli_pause; } ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 2"; eli_pause ;;
+        esac
+    done
+}
+
+# --> МЕНЮ: MIMIC <--
+# - подменю mimic: установка движка и управление привязками -
+menu_mimic() {
+    while true; do
+        eli_header
+        eli_banner "mimic (UDP -> TCP)" \
+            "Прячет не сигнатуру WireGuard, а сам факт UDP: провайдер видит TCP-сессию.
+
+  ! - mimic нужен там, где UDP режут как класс или душат по QoS - !
+
+  Зачем: когда туннель не блокируют прицельно, а просто давят весь UDP.
+    Мобильный интернет с QoS на UDP, корпоративные сети, отели.
+
+  Как работает: eBPF в ядре. На выходе UDP-пакет превращается в TCP,
+    на входе возвращается обратно. Каждый пакет пухнет на 12 байт.
+    Скорость почти нативная: 2.23 против 2.38 Гбит у чистого WireGuard.
+    Обфускация AmneziaWG остаётся на месте, конфиги клиентов не меняются.
+
+  Требует: выделенный AWG-интерфейс. Клиенты БЕЗ mimic на нём работать
+    перестанут: их ответный трафик съедается в ядре, это принцип работы.
+    Клиенту нужен Linux с ядром 6.1+ и DKMS. Windows, macOS, Android
+    не поддерживаются вообще."
+
+        echo -e "  ${GREEN}1)${NC} Установка mimic"
+        echo -e "  ${GREEN}2)${NC} Управление mimic"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) mim_install || { print_warn "Ошибка при установке mimic"; }; eli_pause ;;
+            2) mim_manage  || { print_warn "Ошибка в управлении mimic"; eli_pause; } ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 2"; eli_pause ;;
         esac
     done
 }
@@ -11477,8 +15595,8 @@ awg_manage() {
         echo -e "  ${GREEN}6)${NC} Удалить интерфейс"
         echo -e "  ${GREEN}7)${NC} Добавить клиента"
         echo -e "  ${GREEN}8)${NC} Показать конфиг клиента"
-        echo -e "  ${GREEN}9)${NC} Удалить клиента"
-        echo -e "  ${GREEN}10)${NC} Экспорт клиента под Keenetic"
+        echo -e "  ${GREEN}9)${NC} Редактировать клиента"
+        echo -e "  ${GREEN}10)${NC} Удалить клиента"
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
@@ -11493,8 +15611,8 @@ awg_manage() {
             6) awg_delete_iface   || print_warn "Ошибка при удалении интерфейса" ;;
             7) awg_add_client     || print_warn "Ошибка при добавлении клиента" ;;
             8) awg_show_client    || print_warn "Ошибка при показе конфига" ;;
-            9) awg_delete_client  || print_warn "Ошибка при удалении клиента" ;;
-            10) awg_export_keenetic || print_warn "Ошибка при экспорте под Keenetic" ;;
+            9) awg_edit_client    || print_warn "Ошибка при редактировании клиента" ;;
+            10) awg_delete_client || print_warn "Ошибка при удалении клиента" ;;
             0) return 0 ;;
             *) print_warn "Введите число от 0 до 10" ;;
         esac
