@@ -245,6 +245,19 @@ EOF
         priv_key="НЕ_ОПРЕДЕЛЁН"
     fi
 
+    # - пост-проверка порта: в бете TS6 --default-voice-port иногда игнорируется -
+    # - сверяем что сервис реально слушает заданный voice_port через ss -
+    if systemctl is-active --quiet teamspeak 2>/dev/null; then
+        if ss -H -uln 2>/dev/null | grep -Eq "[:.]${voice_port}[[:space:]]"; then
+            print_ok "Voice ${voice_port}/udp: слушает"
+        else
+            print_warn "Сервис активен, но НЕ слушает ${voice_port}/udp"
+            print_warn "TS6 мог проигнорировать --default-voice-port, проверь: ss -ulnp | grep tsserver"
+        fi
+    else
+        print_err "Сервис teamspeak не активен после старта: journalctl -u teamspeak | tail -20"
+    fi
+
     # - UFW -
     if command -v ufw &>/dev/null; then
         ufw allow "${voice_port}/udp" comment "TS6 voice" 2>/dev/null || true
@@ -449,6 +462,9 @@ ts_delete() {
     fi
     rm -f "$TS_ENV" 2>/dev/null || true
     book_write ".teamspeak.installed" "false" bool
+    book_write ".teamspeak.server_ip" ""
+    book_write ".teamspeak.priv_key" ""
+    book_write ".teamspeak.version" ""
     print_ok "TeamSpeak удалён"
     return 0
 }
