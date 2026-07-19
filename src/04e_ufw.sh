@@ -54,6 +54,7 @@ ufw_toggle() {
         [[ "$confirm" != "yes" ]] && return 0
         ufw disable
         print_ok "UFW отключён"
+        book_write ".ufw.active" "false" bool
     else
         print_warn "UFW неактивен"
         local ssh_port; ssh_port=$(ssh_get_port)
@@ -66,11 +67,15 @@ ufw_toggle() {
                 ufw allow "${ssh_port}/tcp" comment "SSH" 2>/dev/null || true
             fi
         fi
+        # - полная проверка покрытия всех активных портов перед enable -
+        # - иначе сервис на непокрытом порту отвалится сразу после включения -
+        ufw_check_ports
         local confirm=""
         ask_yn "Включить UFW?" "y" confirm
         [[ "$confirm" != "yes" ]] && return 0
         ufw --force enable
         print_ok "UFW включён"
+        book_write ".ufw.active" "true" bool
     fi
     return 0
 }
