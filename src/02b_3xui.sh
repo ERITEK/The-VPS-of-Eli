@@ -87,10 +87,11 @@ _xui_fetch_release_info() {
 # --> 3X-UI: СКАЧАТЬ И РАСПАКОВАТЬ tar.gz <--
 # - чистая установка без вызова upstream install.sh (там интерактивные prompts) -
 _xui_fetch_and_extract() {
-    local arch tmpdir tarball
+    local arch tmpdir tarball exdir
     arch=$(_xui_arch)
     tmpdir=$(mktemp -d)
     tarball="${tmpdir}/x-ui-linux-${arch}.tar.gz"
+    exdir="${tmpdir}/extract"
 
     print_info "Скачиваем ${XUI_TAG} для ${arch}..."
     if ! curl -4fLRo "$tarball" --connect-timeout 15 "$XUI_TARBALL_URL"; then
@@ -99,19 +100,39 @@ _xui_fetch_and_extract() {
         return 1
     fi
 
-    # - чистим старую установку -
+    # - целостность архива до того как трогать рабочую установку -
+    if ! gzip -t "$tarball" 2>/dev/null; then
+        print_err "Скачанный архив битый (gzip -t не прошёл)"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # - распаковка во временную папку, архив содержит папку x-ui/ -
+    mkdir -p "$exdir"
+    if ! tar -xzf "$tarball" -C "$exdir"; then
+        print_err "Не удалось распаковать tar.gz"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # - новая сборка валидна (есть бинарь) до сноса старой установки -
+    if [[ ! -f "${exdir}/x-ui/x-ui" ]]; then
+        print_err "В архиве нет x-ui/x-ui, старую установку не трогаю"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # - только теперь останавливаем сервис и подменяем установку -
     systemctl stop "$XUI_SERVICE" 2>/dev/null || true
     rm -rf "$XUI_DIR"
-
-    # - распаковка в /usr/local, архив содержит папку x-ui/ -
-    if ! tar -xzf "$tarball" -C /usr/local/; then
-        print_err "Не удалось распаковать tar.gz"
+    if ! mv "${exdir}/x-ui" "$XUI_DIR"; then
+        print_err "Не удалось переместить новую сборку в ${XUI_DIR}"
         rm -rf "$tmpdir"
         return 1
     fi
     rm -rf "$tmpdir"
 
-    [[ ! -d "$XUI_DIR" ]] && { print_err "После распаковки ${XUI_DIR} не найден"; return 1; }
+    [[ ! -d "$XUI_DIR" ]] && { print_err "После установки ${XUI_DIR} не найден"; return 1; }
 
     chmod +x "${XUI_DIR}/x-ui" 2>/dev/null || true
     chmod +x "${XUI_DIR}/x-ui.sh" 2>/dev/null || true
