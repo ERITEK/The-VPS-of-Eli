@@ -1,5 +1,5 @@
 # --> МОДУЛЬ: ДИАГНОСТИКА <--
-# - 16 секций, TXT + HTML отчёт, прогноз ёмкости -
+# - 21 секция, TXT + HTML отчёт, прогноз ёмкости -
 
 declare -a _DG_RED=() _DG_YELLOW=() _DG_GREEN=()
 _dg_red()    { _DG_RED+=("$1"); }
@@ -24,12 +24,13 @@ _hr() { echo "<tr><td class='label'>$1</td><td>$(_hb "${3:-info}" "$2")</td></tr
 diag_run() {
     eli_header
     eli_banner "Диагностика VPS стека" \
-        "Полная проверка сервера по 18 секциям. Занимает 2-5 минут.
+        "Полная проверка сервера по 21 секции. Занимает 2-5 минут.
 
   Что проверяется: процессор, RAM, swap, скорость диска, скорость канала
-    (загрузка 100 MB с 10 серверов по миру), пинг, DNS, NTP, SSH-атаки,
-    настройки ядра (BBR, буферы, conntrack), статус всех VPN и сервисов,
-    открытые порты, MSS clamping, файрвол, journald, cron задачи.
+    (загрузка с живых точек по регионам, включая СНГ и Азию), пинг, DNS,
+    NTP, SSH-атаки, настройки ядра (BBR, буферы, conntrack), статус всех
+    VPN, прокси, обходов DPI (zapret2), обфускаторов (wg-obfuscator, mimic)
+    и сервисов, открытые порты, MSS clamping, файрвол, journald, cron задачи.
 
   Результат: цветной отчёт в терминале + файлы TXT и HTML в /root/.
     HTML отчёт можно скачать и открыть в браузере - там таблицы
@@ -122,12 +123,18 @@ diag_run() {
         else print_warn "ChaCha20: не замерено"; fi
     }
 
-    # --> 3. КАНАЛ (10 точек с регионами) <--
+    # --> 3. КАНАЛ (регионы, живые точки с фолбэком) <--
+    # - таблица точек _pts[]: "__region__|Имя" задаёт заголовок группы, -
+    # - "LABEL|URL[|URL2[|URL3]]" - точка с цепочкой источников-фолбэков. -
+    # - пустой URL (Киргизия) даёт честный статус "точка недоступна". -
+    # - на нацзеркалах ОС ls-lR.gz местами убирают, поэтому вторым источником -
+    # - идёт Contents-amd64.gz текущего LTS (noble) - он есть на любом зеркале. -
     _dg_bandwidth() {
         D_BEST_SPEED="0"; D_BEST_HOST="?"
         local bw_confirm=""
         echo ""
-        echo -e "  ${YELLOW}Тест канала качает ~10 MB с каждой из 10 точек (~100 MB суммарно).${NC}"
+        echo -e "  ${YELLOW}Тест канала качает ~10 MB с каждой ЖИВОЙ точки по регионам.${NC}"
+        echo -e "  ${YELLOW}Мёртвые точки пропускаются пробником, на канал не влияют.${NC}"
         echo -e "  ${YELLOW}На VPS с лимитом трафика стоит пропустить.${NC}"
         ask_yn "Запустить тест канала?" "y" bw_confirm
         if [[ "$bw_confirm" != "yes" ]]; then
@@ -135,32 +142,65 @@ diag_run() {
             D_SPEED_RESULTS+=("__skipped__|skipped")
             return 0
         fi
-        _bw() {
-            local url="$1" host="$2" speed mbit
+        # - одна точка: пробуем источники по очереди пробником, первый живой мерим -
+        _dg_bw_point() {
+            local label="$1" urls_field="$2"
+            local -a cands=()
+            IFS='|' read -r -a cands <<< "$urls_field"
+            if [[ ${#cands[@]} -eq 0 || -z "${cands[0]}" ]]; then
+                echo -e "  ${CYAN}${label}:${NC} ${YELLOW}точка недоступна${NC}"
+                D_SPEED_RESULTS+=("${label}|n/a"); return 0
+            fi
+            local url="" c
+            for c in "${cands[@]}"; do
+                [[ -z "$c" ]] && continue
+                # - пробник: 1 байт range-GET, живой узел отвечает мгновенно -
+                if curl -o /dev/null -s --connect-timeout 3 --max-time 5 --range 0-0 "$c" 2>/dev/null; then
+                    url="$c"; break
+                fi
+            done
+            if [[ -z "$url" ]]; then
+                echo -e "  ${CYAN}${label}:${NC} ${YELLOW}точка недоступна${NC}"
+                D_SPEED_RESULTS+=("${label}|n/a"); return 0
+            fi
+            local speed mbit
             # - --range 0-10485760 ограничивает скачивание 10 MB даже на быстром канале -
-            speed=$(curl -o /dev/null -s --connect-timeout 5 --max-time 15 \
+            speed=$(curl -o /dev/null -s --connect-timeout 5 --max-time 20 \
                 --range 0-10485760 -w "%{speed_download}" "$url" 2>/dev/null || echo "0")
             mbit=$(awk "BEGIN {printf \"%.1f\", ${speed}/1024/1024*8}")
-            echo -e "  ${CYAN}${host}:${NC} ${mbit} Мбит/с"
-            D_SPEED_RESULTS+=("${host}|${mbit}")
-            awk "BEGIN {exit !(${mbit}+0 > ${D_BEST_SPEED}+0)}" && { D_BEST_SPEED=$mbit; D_BEST_HOST="$host"; }
+            echo -e "  ${CYAN}${label}:${NC} ${mbit} Мбит/с"
+            D_SPEED_RESULTS+=("${label}|${mbit}")
+            awk "BEGIN {exit !(${mbit}+0 > ${D_BEST_SPEED}+0)}" && { D_BEST_SPEED=$mbit; D_BEST_HOST="$label"; }
         }
-        print_info "Тестируем канал (10 точек по ~10 MB)..."
-        echo -e "  ${BOLD}Европа:${NC}"; D_SPEED_RESULTS+=("__region__|Европа")
-        _bw "http://speedtest.tele2.net/100MB.zip" "Tele2 (Швеция)"
-        _bw "https://fra-de-ping.vultr.com/vultr.com.100MB.bin" "Vultr (Франкфурт)"
-        _bw "https://par-fr-ping.vultr.com/vultr.com.100MB.bin" "Vultr (Париж)"
-        _bw "https://mad-es-ping.vultr.com/vultr.com.100MB.bin" "Vultr (Мадрид)"
-        echo -e "  ${BOLD}Россия:${NC}"; D_SPEED_RESULTS+=("__region__|Россия")
-        _bw "http://mirror.yandex.ru/ubuntu/ls-lR.gz" "Яндекс (Москва)"
-        _bw "https://speedtest.selectel.ru/100MB" "Selectel (Москва)"
-        echo -e "  ${BOLD}США:${NC}"; D_SPEED_RESULTS+=("__region__|США")
-        _bw "https://nj-us-ping.vultr.com/vultr.com.100MB.bin" "Vultr (Нью-Йорк)"
-        echo -e "  ${BOLD}Ближний Восток:${NC}"; D_SPEED_RESULTS+=("__region__|Ближний Восток")
-        _bw "https://dxb-ae-ping.vultr.com/vultr.com.100MB.bin" "Vultr (Дубай)"
-        echo -e "  ${BOLD}Азия:${NC}"; D_SPEED_RESULTS+=("__region__|Азия")
-        _bw "https://sel-kor-ping.vultr.com/vultr.com.100MB.bin" "Vultr (Сеул)"
-        _bw "https://hnd-jp-ping.vultr.com/vultr.com.100MB.bin" "Vultr (Токио)"
+        local _pts=(
+            "__region__|Европа"
+            "Финляндия (Hetzner Helsinki)|https://hel1-speed.hetzner.com/100MB.bin"
+            "Швейцария (SWITCH Цюрих)|http://mirror.switch.ch/ftp/mirror/ubuntu/ls-lR.gz|http://mirror.switch.ch/ftp/mirror/ubuntu/dists/noble/Contents-amd64.gz"
+            "Германия (Hetzner Falkenstein)|https://fsn1-speed.hetzner.com/100MB.bin"
+            "Нидерланды (Vultr Amsterdam)|https://ams-nl-ping.vultr.com/vultr.com.100MB.bin"
+            "Франция (Vultr Париж)|https://par-fr-ping.vultr.com/vultr.com.100MB.bin"
+            "Испания (Vultr Мадрид)|https://mad-es-ping.vultr.com/vultr.com.100MB.bin"
+            "__region__|Россия и СНГ"
+            "Россия (Яндекс, Москва)|http://mirror.yandex.ru/ubuntu/ls-lR.gz|http://mirror.yandex.ru/ubuntu/dists/noble/Contents-amd64.gz"
+            "Россия (Selectel, Москва)|https://speedtest.selectel.ru/100MB"
+            "Беларусь (Datacenter.by)|http://mirror.datacenter.by/ubuntu/ls-lR.gz|http://mirror.datacenter.by/ubuntu/dists/noble/Contents-amd64.gz"
+            "Казахстан (PS.KZ, Алматы)|http://mirror.ps.kz/ubuntu/ls-lR.gz|http://mirror.ps.kz/ubuntu/dists/noble/Contents-amd64.gz"
+            "Киргизия (нет публичной точки)|"
+            "__region__|США"
+            "США (Hetzner Ashburn)|https://ash-speed.hetzner.com/100MB.bin|https://nj-us-ping.vultr.com/vultr.com.100MB.bin"
+            "__region__|Азия"
+            "Корея (Vultr Сеул)|https://sel-kor-ping.vultr.com/vultr.com.100MB.bin"
+            "Гонконг (xTom HK)|https://mirror.xtom.com.hk/ubuntu/ls-lR.gz|https://mirror.xtom.com.hk/ubuntu/dists/noble/Contents-amd64.gz"
+        )
+        print_info "Тестируем канал (живые точки по регионам, ~10 MB каждая)..."
+        local _row _label _urls
+        for _row in "${_pts[@]}"; do
+            _label="${_row%%|*}"; _urls="${_row#*|}"
+            if [[ "$_label" == "__region__" ]]; then
+                echo -e "  ${BOLD}${_urls}:${NC}"; D_SPEED_RESULTS+=("__region__|${_urls}"); continue
+            fi
+            _dg_bw_point "$_label" "$_urls"
+        done
         echo ""
         awk "BEGIN {exit !(${D_BEST_SPEED}+0 > 1)}" && { print_ok "Лучший: ~${D_BEST_SPEED} Мбит/с (${D_BEST_HOST})"; _dg_green "Канал: ${D_BEST_SPEED} Мбит/с (${D_BEST_HOST})"; } \
             || print_warn "Канал не замерен"
@@ -280,8 +320,12 @@ diag_run() {
         if systemctl is-active --quiet x-ui 2>/dev/null; then
             D_XUI_STATUS="активен"; print_ok "3X-UI: активен"; _dg_green "3X-UI активен"
             [[ -f "/usr/local/x-ui/x-ui" ]] && D_XUI_VER=$(/usr/local/x-ui/x-ui -v 2>/dev/null | head -1 || echo "?")
-            local xray_bin="/usr/local/x-ui/bin/xray-linux-amd64"
-            [[ -f "$xray_bin" ]] && D_XRAY_VER=$("$xray_bin" version 2>/dev/null | head -1 | grep -oP 'Xray \K[0-9.]+' || echo "?")
+            # - бинарь xray именуется по арх (amd64/arm64/arm...): берём первый исполняемый -
+            local xray_bin="" _xb
+            for _xb in /usr/local/x-ui/bin/xray-linux-*; do
+                [[ -x "$_xb" ]] && { xray_bin="$_xb"; break; }
+            done
+            [[ -n "$xray_bin" ]] && D_XRAY_VER=$("$xray_bin" version 2>/dev/null | head -1 | grep -oP 'Xray \K[0-9.]+' || echo "?")
             print_info "3X-UI: ${D_XUI_VER}, Xray: ${D_XRAY_VER}"
         elif [[ -f "/usr/local/x-ui/x-ui" ]]; then
             D_XUI_STATUS="остановлен"; print_warn "3X-UI: не запущен"; _dg_yellow "3X-UI не запущен|systemctl start x-ui"
@@ -376,7 +420,15 @@ diag_run() {
             elif systemctl list-unit-files 2>/dev/null | grep -q "^${svc}"; then st="остановлен"; print_err "${label}: ОСТАНОВЛЕН"; _dg_red "Сервис ${label} остановлен|systemctl start ${svc}"
             else st="н/у"; print_info "${label}: не установлен"; fi; D_SVC_TABLE+=("${label}|${st}"); }
         _sv "fail2ban" "Fail2Ban"; _sv "docker" "Docker"; _sv "x-ui" "3X-UI"
-        _sv "teamspeak" "TeamSpeak"; _sv "mumble-server" "Mumble"; _sv "unbound" "Unbound"
+        _sv "teamspeak" "TeamSpeak"; _sv "unbound" "Unbound"
+        # - Mumble: upstream mumble-server или legacy murmurd -
+        if systemctl is-active --quiet mumble-server 2>/dev/null || systemctl is-active --quiet murmurd 2>/dev/null; then
+            print_ok "Mumble: активен"; _dg_green "Сервис Mumble активен"; D_SVC_TABLE+=("Mumble|активен")
+        elif systemctl list-unit-files 2>/dev/null | grep -qE '^(mumble-server|murmurd)\.service'; then
+            print_err "Mumble: ОСТАНОВЛЕН"; _dg_red "Сервис Mumble остановлен|systemctl start mumble-server"; D_SVC_TABLE+=("Mumble|остановлен")
+        else
+            print_info "Mumble: не установлен"; D_SVC_TABLE+=("Mumble|н/у")
+        fi
         # - Hysteria multi-instance hysteria-1/2/3 -
         local hy2_units
         hy2_units=$(systemctl list-unit-files 'hysteria-*.service' 2>/dev/null \
@@ -502,6 +554,21 @@ diag_run() {
         elif [[ $hy2_count -eq 0 ]]; then
             print_info "Hysteria 2: не установлен"
         fi
+
+        # - Signal TLS Proxy: env/каталог + docker signal/nginx-terminate/nginx-relay -
+        if [[ -f "/etc/signal-proxy/signal.env" || -d "/opt/signal-proxy" ]]; then
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -Eq 'signal|nginx-terminate|nginx-relay'; then
+                print_ok "Signal TLS Proxy: контейнеры запущены"
+                _dg_green "Signal TLS Proxy активен"
+                D_SVC_TABLE+=("Signal TLS Proxy|активен")
+            else
+                print_err "Signal TLS Proxy: файлы есть, контейнеры не запущены"
+                _dg_red "Signal TLS Proxy остановлен|cd /opt/signal-proxy && docker compose up -d"
+                D_SVC_TABLE+=("Signal TLS Proxy|остановлен")
+            fi
+        else
+            print_info "Signal TLS Proxy: не установлен"
+        fi
     }
 
     # --> TELEGRAM МОНИТОРИНГ <--
@@ -542,6 +609,109 @@ diag_run() {
         fi
     }
 
+    # --> ZAPRET2 (обход DPI) <--
+    # - только читаем: юниты zapret2-eli@<iface> и nft-таблицы zeli_<iface> -
+    _dg_zapret() {
+        local bin="/opt/zapret2/nfq2/nfqws2" dir="/etc/vps-eli-stack/zapret2"
+        if [[ ! -x "$bin" ]]; then
+            print_info "zapret2: не установлен"; D_SVC_TABLE+=("zapret2|н/у"); return 0
+        fi
+        local total=0 active=0 cf iface
+        if compgen -G "${dir}/*.conf" >/dev/null 2>&1; then
+            for cf in "${dir}"/*.conf; do
+                [[ -f "$cf" ]] || continue
+                iface=$(basename "$cf" .conf); total=$(( total + 1 ))
+                local up="нет" nft="нет"
+                systemctl is-active --quiet "zapret2-eli@${iface}.service" 2>/dev/null && { up="да"; active=$(( active + 1 )); }
+                nft list table inet "zeli_${iface}" &>/dev/null && nft="да"
+                if [[ "$up" == "да" && "$nft" == "да" ]]; then
+                    print_ok "zapret2 ${iface}: активен (юнит + nft)"
+                    D_SVC_TABLE+=("zapret2 ${iface}|активен")
+                elif [[ "$up" == "да" ]]; then
+                    print_warn "zapret2 ${iface}: юнит активен, nft zeli_${iface} нет"
+                    _dg_yellow "zapret2 ${iface}: нет nft-таблицы zeli_${iface}|systemctl restart zapret2-eli@${iface}"
+                    D_SVC_TABLE+=("zapret2 ${iface}|активен")
+                else
+                    print_err "zapret2 ${iface}: остановлен"
+                    _dg_red "zapret2 ${iface} остановлен|systemctl start zapret2-eli@${iface}"
+                    D_SVC_TABLE+=("zapret2 ${iface}|остановлен")
+                fi
+            done
+        fi
+        if [[ $total -eq 0 ]]; then
+            print_info "zapret2: движок установлен, привязок нет"
+            D_SVC_TABLE+=("zapret2|установлен, привязок нет")
+        else
+            print_info "zapret2: активно ${active}/${total}"
+            [[ $active -gt 0 ]] && _dg_green "zapret2: активно ${active}/${total} инстансов"
+        fi
+    }
+
+    # --> WG-OBFUSCATOR (маскировка WG) <--
+    # - только читаем: юниты wgobfs-eli@<iface>, ключ инстанса не печатаем -
+    _dg_wgobfs() {
+        local bin="/opt/wg-obfuscator/wg-obfuscator" dir="/etc/vps-eli-stack/wgobfs"
+        if [[ ! -x "$bin" ]]; then
+            print_info "wg-obfuscator: не установлен"; D_SVC_TABLE+=("wg-obfuscator|н/у"); return 0
+        fi
+        local total=0 active=0 wf iface
+        if compgen -G "${dir}/*.conf" >/dev/null 2>&1; then
+            for wf in "${dir}"/*.conf; do
+                [[ -f "$wf" ]] || continue
+                iface=$(basename "$wf" .conf); total=$(( total + 1 ))
+                if systemctl is-active --quiet "wgobfs-eli@${iface}.service" 2>/dev/null; then
+                    print_ok "wg-obfuscator ${iface}: активен"; active=$(( active + 1 ))
+                    D_SVC_TABLE+=("wg-obfuscator ${iface}|активен")
+                else
+                    print_err "wg-obfuscator ${iface}: остановлен"
+                    _dg_red "wg-obfuscator ${iface} остановлен|systemctl start wgobfs-eli@${iface}"
+                    D_SVC_TABLE+=("wg-obfuscator ${iface}|остановлен")
+                fi
+            done
+        fi
+        if [[ $total -eq 0 ]]; then
+            print_info "wg-obfuscator: движок установлен, привязок нет"
+            D_SVC_TABLE+=("wg-obfuscator|установлен, привязок нет")
+        else
+            print_info "wg-obfuscator: активно ${active}/${total}"
+            [[ $active -gt 0 ]] && _dg_green "wg-obfuscator: активно ${active}/${total} инстансов"
+        fi
+    }
+
+    # --> MIMIC (UDP -> TCP) <--
+    # - инстанс один на WAN; модуль ядра читаем через /sys (без пайп-ловушки) -
+    _dg_mimic() {
+        local bin="/usr/sbin/mimic"
+        if [[ ! -x "$bin" ]]; then
+            print_info "mimic: не установлен"; D_SVC_TABLE+=("mimic|н/у"); return 0
+        fi
+        if [[ -d /sys/module/mimic ]]; then
+            print_ok "mimic: модуль ядра загружен"
+        else
+            print_warn "mimic: модуль ядра не загружен"
+            _dg_yellow "mimic: модуль не загружен|modprobe mimic; dkms status mimic"
+        fi
+        local wan; wan=$(book_read '.mimic.wan_iface' 2>/dev/null)
+        [[ -z "$wan" ]] && wan=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
+        local unit="mimic@${wan}.service" conf="/etc/mimic/${wan}.conf" filters=0
+        if [[ -f "$conf" ]]; then
+            filters=$(grep -c '^filter = ' "$conf" 2>/dev/null); [[ "$filters" =~ ^[0-9]+$ ]] || filters=0
+        fi
+        if [[ $filters -eq 0 ]]; then
+            print_info "mimic: движок установлен, привязок нет"
+            D_SVC_TABLE+=("mimic|установлен, привязок нет")
+            systemctl is-active --quiet "$unit" 2>/dev/null && _dg_yellow "mimic: привязок нет, а ${unit} активен|systemctl stop ${unit}"
+        elif systemctl is-active --quiet "$unit" 2>/dev/null; then
+            print_ok "mimic: активен на ${wan} (${filters} привязок)"
+            _dg_green "mimic активен (${filters} привязок на ${wan})"
+            D_SVC_TABLE+=("mimic ${wan}|активен")
+        else
+            print_err "mimic: ${filters} привязок, ${unit} не активен"
+            _dg_red "mimic ${unit} не активен|systemctl start ${unit}"
+            D_SVC_TABLE+=("mimic ${wan}|остановлен")
+        fi
+    }
+
     # --> ЗАПУСК <--
     _diag_section "1. Железо и система" _dg_hardware
     _diag_section "2. CPU (шифрование)" _dg_cpu
@@ -553,14 +723,17 @@ diag_run() {
     _diag_section "8. Outline" _dg_outline
     _diag_section "9. 3X-UI" _dg_xui
     _diag_section "10. TeamSpeak" _dg_teamspeak
-    _diag_section "11. Прокси (MTProto, SOCKS5, Hysteria 2)" _dg_proxy
-    _diag_section "12. Telegram мониторинг" _dg_tgmon
-    _diag_section "13. Сетевые настройки ядра" _dg_kernel
-    _diag_section "14. iptables" _dg_iptables
-    _diag_section "15. Порты" _dg_ports
-    _diag_section "16. Диск" _dg_disk
-    _diag_section "17. Сервисы" _dg_services
-    _diag_section "18. Обслуживание" _dg_maintenance
+    _diag_section "11. Прокси (MTProto, SOCKS5, Hysteria 2, Signal)" _dg_proxy
+    _diag_section "12. zapret2 (обход DPI)" _dg_zapret
+    _diag_section "13. wg-obfuscator (маскировка WG)" _dg_wgobfs
+    _diag_section "14. mimic (UDP -> TCP)" _dg_mimic
+    _diag_section "15. Telegram мониторинг" _dg_tgmon
+    _diag_section "16. Сетевые настройки ядра" _dg_kernel
+    _diag_section "17. iptables" _dg_iptables
+    _diag_section "18. Порты" _dg_ports
+    _diag_section "19. Диск" _dg_disk
+    _diag_section "20. Сервисы" _dg_services
+    _diag_section "21. Обслуживание" _dg_maintenance
 
     # --> ПРОГНОЗ ЁМКОСТИ <--
     print_section "Прогноз ёмкости"
@@ -656,7 +829,7 @@ CSS
         echo "<li>${i%%|*}"; [[ "$i" == *"|"* ]] && echo "<span class='fix'>-> ${i##*|}</span>"; echo "</li>"
     done
     echo "</ul></div>"
-    echo "<div class='tl-block tl-yellow'><h3>🟡 Внимание (${#_DG_YELLOW[@]})</h3><ul>"
+    echo "<div class='tl-block tl-yellow'><h3>[WARN] Внимание (${#_DG_YELLOW[@]})</h3><ul>"
     [[ ${#_DG_YELLOW[@]} -eq 0 ]] && echo "<li style='color:var(--mut)'>Нет предупреждений</li>"
     for i in "${_DG_YELLOW[@]}"; do
         echo "<li>${i%%|*}"; [[ "$i" == *"|"* ]] && echo "<span class='fix'>-> ${i##*|}</span>"; echo "</li>"
@@ -686,11 +859,15 @@ CSS
     echo "</table></div></div>"
 
     # Канал с регионами
-    echo "<div class='card'><div class='card-header'><span class='icon'>[NET]</span> Скорость канала<div class='card-sub'>Загрузка 100 МБ до 10 точек по миру</div></div><div class='card-body'><table>"
+    echo "<div class='card'><div class='card-header'><span class='icon'>[NET]</span> Скорость канала<div class='card-sub'>Загрузка до живых точек по регионам (СНГ, Азия, ЕС, США)</div></div><div class='card-body'><table>"
     for sr in "${D_SPEED_RESULTS[@]}"; do
         local sh="${sr%%|*}" sv="${sr##*|}"
         if [[ "$sh" == "__region__" ]]; then
             echo "<tr><td colspan='2' style='padding:14px 6px 5px;font-size:13px;font-weight:700;color:var(--cyn);letter-spacing:0.04em;border-bottom:1px solid var(--brd)'>${sv}</td></tr>"
+        elif [[ "$sh" == "__skipped__" ]]; then
+            _hr "Тест канала" "пропущен" "info"
+        elif [[ "$sv" == "n/a" ]]; then
+            _hr "$sh" "точка недоступна" "warn"
         else
             local bt="ok"; awk "BEGIN{exit !(${sv}+0 < 1)}" 2>/dev/null && bt="warn"
             _hr "$sh" "${sv} Мбит/с" "$bt"
