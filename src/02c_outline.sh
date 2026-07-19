@@ -4,7 +4,7 @@
 OTL_DIR="/etc/outline"
 OTL_ENV="${OTL_DIR}/outline.env"
 OTL_KEY="${OTL_DIR}/manager_key.json"
-OTL_INSTALL_URL="https://raw.githubusercontent.com/Jigsaw-Code/outline-apps/master/server_manager/install_scripts/install_server.sh"
+OTL_INSTALL_URL="https://raw.githubusercontent.com/OutlineFoundation/outline-apps/master/server_manager/install_scripts/install_server.sh"
 OTL_HEALTHCHECK="/usr/local/bin/outline-healthcheck.sh"
 
 otl_installed() {
@@ -48,7 +48,7 @@ otl_install() {
     # - уникальный лог на каждый запуск, иначЕ tail -1 может вытащить apiUrl прошлой битой установки -
     local install_log
     install_log=$(mktemp /tmp/outline-install-XXXXXX.log)
-    print_info "Запуск установщика Jigsaw... (лог: ${install_log})"
+    print_info "Запуск установщика OutlineFoundation... (лог: ${install_log})"
 
     # - синхронный pipe: tee в одну ветку, stderr слит в stdout -
     # - старый вариант ">(tee) 2>(tee)" запускал tee в фоне, и grep ниже мог отработать -
@@ -264,6 +264,11 @@ otl_delete() {
     systemctl disable outline-healthcheck.timer 2>/dev/null || true
     rm -f /etc/systemd/system/outline-healthcheck.* 2>/dev/null || true
     book_write ".outline.installed" "false" bool
+    book_write ".outline.server_ip" ""
+    book_write ".outline.api_url" ""
+    book_write ".outline.api_port" "0" number
+    book_write ".outline.mgmt_port" "0" number
+    book_write ".outline.keys_port" "0" number
     print_ok "Outline удалён"
     return 0
 }
