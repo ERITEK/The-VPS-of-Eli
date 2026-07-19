@@ -205,7 +205,7 @@ os="$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'"' -f2 || echo 'unkn
 kernel="$(uname -r)"
 debian_version="${_deb_ver}"
 version_id="${_version_id}"
-eli_version="4.508"
+eli_version="5.780 dev"
 components=${collected}
 METAEOF
 
