@@ -28,6 +28,9 @@ menu_vpn() {
         echo -e "  ${GREEN}2)${NC} 3X-UI"
         echo -e "  ${GREEN}3)${NC} Outline"
         echo -e "  ${GREEN}4)${NC} Прокси мессенджеров"
+        echo -e "  ${GREEN}5)${NC} zapret2 (обход DPI)"
+        echo -e "  ${GREEN}6)${NC} wg-obfuscator (маскировка WG)"
+        echo -e "  ${GREEN}7)${NC} mimic (UDP -> TCP)"
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
@@ -38,8 +41,11 @@ menu_vpn() {
             2) menu_xui       || { print_warn "Ошибка в разделе 3X-UI"; eli_pause; } ;;
             3) menu_otl       || { print_warn "Ошибка в разделе Outline"; eli_pause; } ;;
             4) menu_proxy     || { print_warn "Ошибка в разделе Прокси"; eli_pause; } ;;
+            5) menu_zapret    || { print_warn "Ошибка в разделе zapret2"; eli_pause; } ;;
+            6) menu_wgobfs    || { print_warn "Ошибка в разделе wg-obfuscator"; eli_pause; } ;;
+            7) menu_mimic     || { print_warn "Ошибка в разделе mimic"; eli_pause; } ;;
             0) return 0 ;;
-            *) print_warn "Введите число от 0 до 4"; eli_pause ;;
+            *) print_warn "Введите число от 0 до 7"; eli_pause ;;
         esac
     done
 }
@@ -52,7 +58,7 @@ menu_awg() {
         eli_banner "AmneziaWG" \
             "VPN-туннель на базе WireGuard с маскировкой трафика.
 
-  Что делает: шифрует весь интернет-трафик между твоим устройством и этим
+  Что делает: шифрует весь интернет трафик между твоим устройством и этим
     сервером. Провайдер видит только непонятный шум, а не сайты и приложения.
 
   Установка создаёт первый туннель (интерфейс) и конфиг для подключения.
@@ -79,6 +85,119 @@ menu_awg() {
             3) awg_test_obf   || { print_warn "Ошибка в тесте обфускации"; }; eli_pause ;;
             0) return 0 ;;
             *) print_warn "Введите число от 0 до 3"; eli_pause ;;
+        esac
+    done
+}
+
+# --> МЕНЮ: ZAPRET2 <--
+# - подменю zapret2: установка движка и управление привязками -
+menu_zapret() {
+    while true; do
+        eli_header
+        eli_banner "zapret2 (обход DPI)" \
+            "Десинхронизация DPI для трафика awg клиентов через nfqws2 (nfqueue).
+
+  Что делает: применяет обход глубокой инспекции пакетов (DPI) к форвард трафику
+    выбранного awg интерфейса. Полезно, когда сам VPS стоит за DPI
+    (например ТСПУ на аплинке) и режет YouTube, Discord и прочее.
+
+  Требует KVM или bare-metal и nftables. На OpenVZ/LXC не работает.
+  Привязка выборочная: десинк идёт только к трафику указанного интерфейса,
+    SSH и админ трафик не затрагиваются.
+
+  Сообщения Telegram уже решаются туннелем и MTProto прокси;
+    zapret помогает в первую очередь звонкам (WebRTC/STUN)."
+
+        echo -e "  ${GREEN}1)${NC} Установка zapret2"
+        echo -e "  ${GREEN}2)${NC} Управление zapret2"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) zapret_install || { print_warn "Ошибка при установке zapret2"; }; eli_pause ;;
+            2) zapret_manage  || { print_warn "Ошибка в управлении zapret2"; eli_pause; } ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 2"; eli_pause ;;
+        esac
+    done
+}
+
+# --> МЕНЮ: WG-OBFUSCATOR <--
+# - подменю обфускатора: установка движка и управление привязками -
+menu_wgobfs() {
+    while true; do
+        eli_header
+        eli_banner "wg-obfuscator (маскировка WG)" \
+            "Прячет WireGuard: провайдер видит не VPN, а поток случайных данных
+  или обычный STUN (трафик видеозвонков, его почти нигде не режут).
+  
+  ! - wg-obfuscator прячет сам туннель (WG) от провайдера КЛИЕНТА - !
+  
+  Зачем: когда DPI детектит и режет сам протокол WireGuard, и AmneziaWG уже не спасает.
+
+  Как работает: маленький прокси на сервере и такой же на стороне клиента.
+    Клиентский WireGuard стучится к себе на 127.0.0.1, обфускатор клиента
+    шифрует поток ключом и шлёт на наш публичный порт. Порт самого туннеля
+    наружу закрыт: снаружи виден только обфускатор.
+
+  Требует: отдельный vanilla-WG интерфейс (заголовки AmneziaWG обфускатор
+    ломает). Если такого нет, модуль создаст его сам.
+    Клиенту обязателен свой wg-obfuscator: OpenWrt, Windows, macOS, Android,
+    MikroTik. IPv6 в этой связке не поддерживается вообще."
+
+        echo -e "  ${GREEN}1)${NC} Установка wg-obfuscator"
+        echo -e "  ${GREEN}2)${NC} Управление wg-obfuscator"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) wgo_install || { print_warn "Ошибка при установке wg-obfuscator"; }; eli_pause ;;
+            2) wgo_manage  || { print_warn "Ошибка в управлении wg-obfuscator"; eli_pause; } ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 2"; eli_pause ;;
+        esac
+    done
+}
+
+# --> МЕНЮ: MIMIC <--
+# - подменю mimic: установка движка и управление привязками -
+menu_mimic() {
+    while true; do
+        eli_header
+        eli_banner "mimic (UDP -> TCP)" \
+            "Прячет не сигнатуру WireGuard, а сам факт UDP: провайдер видит TCP-сессию.
+
+  ! - mimic нужен там, где UDP режут как класс или душат по QoS - !
+
+  Зачем: когда туннель не блокируют прицельно, а просто давят весь UDP.
+    Мобильный интернет с QoS на UDP, корпоративные сети, отели.
+
+  Как работает: eBPF в ядре. На выходе UDP-пакет превращается в TCP,
+    на входе возвращается обратно. Каждый пакет пухнет на 12 байт.
+    Скорость почти нативная: 2.23 против 2.38 Гбит у чистого WireGuard.
+    Обфускация AmneziaWG остаётся на месте, конфиги клиентов не меняются.
+
+  Требует: выделенный AWG-интерфейс. Клиенты БЕЗ mimic на нём работать
+    перестанут: их ответный трафик съедается в ядре, это принцип работы.
+    Клиенту нужен Linux с ядром 6.1+ и DKMS. Windows, macOS, Android
+    не поддерживаются вообще."
+
+        echo -e "  ${GREEN}1)${NC} Установка mimic"
+        echo -e "  ${GREEN}2)${NC} Управление mimic"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) mim_install || { print_warn "Ошибка при установке mimic"; }; eli_pause ;;
+            2) mim_manage  || { print_warn "Ошибка в управлении mimic"; eli_pause; } ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 2"; eli_pause ;;
         esac
     done
 }
@@ -754,8 +873,8 @@ awg_manage() {
         echo -e "  ${GREEN}6)${NC} Удалить интерфейс"
         echo -e "  ${GREEN}7)${NC} Добавить клиента"
         echo -e "  ${GREEN}8)${NC} Показать конфиг клиента"
-        echo -e "  ${GREEN}9)${NC} Удалить клиента"
-        echo -e "  ${GREEN}10)${NC} Экспорт клиента под Keenetic"
+        echo -e "  ${GREEN}9)${NC} Редактировать клиента"
+        echo -e "  ${GREEN}10)${NC} Удалить клиента"
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
@@ -770,8 +889,8 @@ awg_manage() {
             6) awg_delete_iface   || print_warn "Ошибка при удалении интерфейса" ;;
             7) awg_add_client     || print_warn "Ошибка при добавлении клиента" ;;
             8) awg_show_client    || print_warn "Ошибка при показе конфига" ;;
-            9) awg_delete_client  || print_warn "Ошибка при удалении клиента" ;;
-            10) awg_export_keenetic || print_warn "Ошибка при экспорте под Keenetic" ;;
+            9) awg_edit_client    || print_warn "Ошибка при редактировании клиента" ;;
+            10) awg_delete_client || print_warn "Ошибка при удалении клиента" ;;
             0) return 0 ;;
             *) print_warn "Введите число от 0 до 10" ;;
         esac
