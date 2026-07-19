@@ -1,5 +1,5 @@
 # --> МОДУЛЬ: ПРОКСИ <--
-# - MTProto (Telegram) на mtg v2, мультиинстанс (один секрет на инстанс) -
+# - MTProto (Telegram) на mtg, мультиинстанс (один секрет на инстанс) -
 # - SOCKS5 мультиинстанс -
 # - Hysteria 2 мультиинстанс + мультиюзер (userpass) -
 # - Signal TLS Proxy -
@@ -13,13 +13,13 @@ SIG_ENV="/etc/signal-proxy/signal.env"
 SIG_DIR="/opt/signal-proxy"
 
 # ==========================================================================
-# --> MTPROTO PROXY (TELEGRAM) - МУЛЬТИИНСТАНС НА mtg v2 <--
+# --> MTPROTO PROXY (TELEGRAM) - МУЛЬТИИНСТАНС <--
 # ==========================================================================
-# - образ: nineseconds/mtg:2.1.13 (актуальный стабильный mtg v2) -
-# - один инстанс = один секрет (mtg v2 by design без мультисекрета) -
+# - образ: nineseconds/mtg:2 (актуальный mtg) -
+# - один инстанс = один секрет (mtg без мультисекрета) -
 # - секрет содержит в себе домен (генерится mtg generate-secret --hex DOMAIN) -
 
-MTG_IMAGE="nineseconds/mtg:2.1.13"
+MTG_IMAGE="nineseconds/mtg:2"
 
 _mtp_next_id() {
     local i=1
@@ -165,6 +165,7 @@ TOMLEOF
     fi
 
     # - book -
+    book_write ".mtproto.installed" "true" bool
     book_write ".mtproto.instances.${inst_id}.port" "$port"
     book_write ".mtproto.instances.${inst_id}.tls_domain" "$tls_domain"
     book_write ".mtproto.instances.${inst_id}.container" "$container"
@@ -232,7 +233,10 @@ mtp_remove() {
     fi
 
     rm -f "$envf" "$(_mtp_config_path "$inst_id")"
-    book_write ".mtproto.instances.${inst_id}" "null" bool
+    book_del ".mtproto.instances.${inst_id}"
+    if ! compgen -G "${MTP_DIR}/instance_*.env" >/dev/null 2>&1; then
+        book_write ".mtproto.installed" "false" bool
+    fi
     print_ok "MTProto #${inst_id} удалён"
     return 0
 }
@@ -328,6 +332,7 @@ S5EOF
     chmod 600 "${S5_DIR}/instance_${inst_id}.env"
 
     # - book -
+    book_write ".socks5.installed" "true" bool
     book_write ".socks5.instances.${inst_id}.port" "$port"
     book_write ".socks5.instances.${inst_id}.container" "$container"
 
@@ -407,7 +412,10 @@ s5_remove() {
     fi
 
     rm -f "$envf"
-    book_write ".socks5.instances.${inst_id}" "null" bool
+    book_del ".socks5.instances.${inst_id}"
+    if ! compgen -G "${S5_DIR}/instance_*.env" >/dev/null 2>&1; then
+        book_write ".socks5.installed" "false" bool
+    fi
     print_ok "SOCKS5 #${inst_id} удалён"
     return 0
 }
@@ -799,8 +807,7 @@ hy2_remove() {
     fi
     rm -rf "${idir:?}"
 
-    _book_ok && jq --arg i "$inst_id" 'del(.hysteria2.instances[$i])' "$_BOOK" > "${_BOOK}.tmp" 2>/dev/null \
-        && mv "${_BOOK}.tmp" "$_BOOK" 2>/dev/null || rm -f "${_BOOK}.tmp"
+    book_del ".hysteria2.instances.${inst_id}"
 
     local remaining=0
     for dd in "${HY2_DIR}"/instance_*/; do [[ -d "$dd" ]] && remaining=$(( remaining + 1 )); done
