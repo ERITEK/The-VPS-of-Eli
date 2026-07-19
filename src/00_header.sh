@@ -19,7 +19,7 @@ if ! flock -n 200; then
     exit 1
 fi
 
-ELI_VERSION="4.508"
+ELI_VERSION="5.780 dev"
 # shellcheck disable=SC2034
 ELI_CODENAME="The VPS of Eli" # - используется в баннере и book -
 
@@ -48,7 +48,7 @@ eli_header() {
     echo "|     The VPS of Eli      |"
     echo "|  scrp by ERITEK & Loo1  |"
     echo "|    Claude (Anthropic)   |"
-    echo "|         v${ELI_VERSION}          |"
+    echo "|         v${ELI_VERSION}      |"
     echo "+=========================+"
     echo -e "${NC}"
 }
@@ -406,6 +406,22 @@ book_write_obj() {
     return 1
 }
 
+# - удаление ключа/пути из книги, симметрично book_write, с сохранением прав 600 -
+book_del() {
+    _book_ok || return 0
+    local raw="$1" tmp p
+    p=$(_book_path "$raw") || return 1
+    tmp=$(mktemp) || { print_warn "book_del: mktemp failed for ${raw}"; return 1; }
+    jq "del(${p})" "$_BOOK" > "$tmp" 2>/dev/null
+    if [[ -s "$tmp" ]] && jq empty "$tmp" 2>/dev/null; then
+        mv "$tmp" "$_BOOK"; chmod 600 "$_BOOK"
+        return 0
+    fi
+    rm -f "$tmp"
+    print_warn "book_del failed: ${raw}"
+    return 1
+}
+
 book_init() {
     command -v jq &>/dev/null || return 0
     mkdir -p /etc/vps-eli-stack; chmod 700 /etc/vps-eli-stack
@@ -423,7 +439,7 @@ book_init() {
             "awg":{"installed":false,"version":"","setup_dir":"/etc/awg-setup","conf_dir":"/etc/amnezia/amneziawg","interfaces":{}},
             "outline":{"installed":false,"server_ip":"","api_port":0,"mgmt_port":0,"keys_port":0,"manager_key_path":"/etc/outline/manager_key.json","api_url":"","installed_at":""},
             "3xui":{"installed":false,"version":"","server_ip":"","panel_port":0,"panel_path":"","panel_user":"","panel_pass":"","db_path":"","installed_at":""},
-            "teamspeak":{"installed":false,"version":"","server_ip":"","voice_port":9987,"ft_port":30033,"threads":2,"priv_key":"","db_path":"/opt/teamspeak/tsserver.sqlitedb","installed_at":""},
+            "teamspeak":{"installed":false,"version":"","server_ip":"","voice_port":9987,"ft_port":30033,"priv_key":"","db_path":"/opt/teamspeak/tsserver.sqlitedb","installed_at":""},
             "mumble":{"installed":false,"version":"","server_ip":"","port":64738,"superuser_set":false,"superuser_pass":"","installed_at":""},
             "unbound":{"installed":false,"listen_ips":[]},
             "ufw":{"active":false},
