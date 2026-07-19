@@ -12,6 +12,13 @@ AWG_VER=""
 # - Keenetic: 1.0 работает на KeeneticOS 4.2+, 1.5/2.0 требуют 5.1+ dev-канал -
 # - P/S хелпа AWG написана идиотом. я АтупеL пока читал -
 _awg_ask_version() {
+    # - AWG_FORCE_VER: версия задана вызывающим модулем, диалога нет -
+    # - используется 02e_wgobfs: обфускатору нужен строго vanilla-WG -
+    if [[ -n "${AWG_FORCE_VER:-}" ]]; then
+        AWG_VER="$AWG_FORCE_VER"
+        print_info "Версия протокола задана вызывающим модулем: ${AWG_VER}"
+        return 0
+    fi
     echo ""
     echo -e "  ${BOLD}Версия протокола:${NC}"
     echo -e "  ${GREEN}1)${NC} AWG 1.0 (classic) - H1-H4 + S1/S2 + Jc/Jmin/Jmax"
@@ -288,6 +295,24 @@ AWG_CPS_STUN_POOL_NOFP=(
     "<b 0x0001000c2112a442><r 12><b 0x80220008417374657269736b>"
     "<b 0x000100102112a442><r 12><b 0x80220009706a70726f6a656374000000>"
     "<b 0x0001000c2112a442><r 12><b 0x802200074a697473692d5800>"
+    "<b 0x000100102112a442><r 12><b 0x802200096d65646961736f7570000000>"
+    "<b 0x000100082112a442><r 12><b 0x8022000470696f6e>"
+    "<b 0x0001000c2112a442><r 12><b 0x8022000661696f7274630000>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200076261726573697000>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200086c696e70686f6e65>"
+    "<b 0x0001000c2112a442><r 12><b 0x8022000772657374756e6400>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200067765627274630000>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200074b7572656e746f00>"
+    "<b 0x0001000c2112a442><r 12><b 0x80220007696f6e2d73667500>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200065477696c696f0000>"
+    "<b 0x0001000c2112a442><r 12><b 0x80220006566f6e6167650000>"
+    "<b 0x000100102112a442><r 12><b 0x8022000a467265655357495443480000>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200075369707769736500>"
+    "<b 0x000100102112a442><r 12><b 0x802200094753747265616d6572000000>"
+    "<b 0x0001000c2112a442><r 12><b 0x80220007657475726e616c00>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200087374756e73657276>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200084d65746173776974>"
+    "<b 0x0001000c2112a442><r 12><b 0x802200076564756d65657400>"
 )
 
 AWG_CPS_STUN_POOL_FP=(
@@ -301,6 +326,24 @@ AWG_CPS_STUN_POOL_FP=(
     "<b 0x000100142112a442><r 12><b 0x80220008417374657269736b80280004><r 4>"
     "<b 0x000100182112a442><r 12><b 0x80220009706a70726f6a65637400000080280004><r 4>"
     "<b 0x000100142112a442><r 12><b 0x802200074a697473692d580080280004><r 4>"
+    "<b 0x000100182112a442><r 12><b 0x802200096d65646961736f757000000080280004><r 4>"
+    "<b 0x000100102112a442><r 12><b 0x8022000470696f6e80280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x8022000661696f727463000080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x80220007626172657369700080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200086c696e70686f6e6580280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x8022000772657374756e640080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x80220006776562727463000080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200074b7572656e746f0080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x80220007696f6e2d7366750080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200065477696c696f000080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x80220006566f6e616765000080280004><r 4>"
+    "<b 0x000100182112a442><r 12><b 0x8022000a46726565535749544348000080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x80220007536970776973650080280004><r 4>"
+    "<b 0x000100182112a442><r 12><b 0x802200094753747265616d657200000080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x80220007657475726e616c0080280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200087374756e7365727680280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200084d6574617377697480280004><r 4>"
+    "<b 0x000100142112a442><r 12><b 0x802200076564756d6565740080280004><r 4>"
 )
 
 # --> AWG: ПУЛ ШАБЛОНОВ SIP <--
@@ -315,6 +358,14 @@ AWG_CPS_SIP_POOL=(
     "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b72706f72743b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a7573657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a204d6963726f5349502f332e32312e330d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
     "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a7573657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a2033435850686f6e652f31382e302e300d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
     "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a7573657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a206579654265616d2072656c656173652033303033660d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a63616c6c657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x40><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a204272696120352e362e300d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a63616c6c657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x40><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a20426c696e6b20332e342e300d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a63616c6c657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x40><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a205477696e6b6c652f312e31302e310d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a63616c6c657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x40><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a20596174652f362e342e300d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a63616c6c657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x40><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a204772616e6473747265616d20485438303220312e302e32392e380d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a63616c6c657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x40><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a205965616c696e6b205349502d543436472036362e38360d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a63616c6c657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x40><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a20736e6f6d3337302f382e372e352e34340d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
+    "<b 0x494e56495445207369703a><rc 8><b 0x40><rc 12><b 0x205349502f322e300d0a5669613a205349502f322e302f55445020><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x3a353036303b6272616e63683d7a39684734624b><rd 10><b 0x0d0a46726f6d3a203c7369703a63616c6c657240><rc 12><b 0x3e3b7461673d><rd 8><b 0x0d0a546f3a203c7369703a><rc 8><b 0x40><rc 12><b 0x3e0d0a43616c6c2d49443a20><rc 16><b 0x40><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x2e><rd 2><b 0x0d0a435365713a203120494e564954450d0a557365722d4167656e743a20504a5355412076322e31330d0a4d61782d466f7277617264733a2037300d0a436f6e74656e742d4c656e6774683a20300d0a0d0a>"
 )
 
 _awg_cps_preset_stun() {
@@ -950,20 +1001,16 @@ _awg_client_header_comment() {
             echo "# AWG 1.0"
             echo "# Совместимость: AmneziaVPN, AmneziaWG native, Keenetic NDMS 5.1 Alpha 3+"
             echo "# Как подключить: импортируй этот .conf в клиент (файл или QR-код)"
-            echo "# Keenetic: отдельный файл .keenetic.conf / .keenetic.cli (если сгенерирован)"
             ;;
         1.5)
             echo "# AWG 1.5 (Jc/Jmin/Jmax/S1/S2/H1-H4 + I1-I5 signature chain)"
             echo "# Совместимость: AmneziaVPN 4.x+, AmneziaWG 1.5+, Keenetic NDMS 5.1 Alpha 3+"
             echo "# Как подключить: импортируй этот .conf в клиент (файл или QR-код)"
-            echo "# Keenetic: отдельный файл .keenetic.conf / .keenetic.cli (если сгенерирован)"
             ;;
         2.0)
             echo "# AWG 2.0 (S3/S4 + ranged H1-H4 + I1-I5)"
-            echo "# Совместимость: AmneziaVPN 4.8.12.9+, AmneziaWG 2.0.0+"
-            echo "# Keenetic: NDMS 5.1 Alpha 3+ поддерживает ASC 2.0, стабильный импорт с 5.1 Alpha 5+"
+            echo "# Совместимость: AmneziaVPN 4.8.12.9+, AmneziaWG 2.0.0+, Keenetic NDMS 5.1 Alpha 5+ (ASC 2.0)"
             echo "# Как подключить: импортируй этот .conf в клиент (файл или QR-код)"
-            echo "# Keenetic: только .keenetic.conf (CLI не генерится для 2.0, ranged H неудобны)"
             ;;
         wg)
             echo "# WireGuard vanilla (без обфускации)"
@@ -992,209 +1039,96 @@ _awg_show_qr() {
     echo ""
 }
 
-# --> AWG: ЭКСПОРТ КОНФИГА ПОД KEENETIC <--
-# - для поддержки ASC нужен NDMS 5.1 Alpha 3+, для AWG 2.0 стабильно с 5.1 Alpha 5+ -
-# - .keenetic.conf: импорт через веб-морду (WireGuard, Импорт из файла) -
-# - .keenetic.cli: CLI-команды для терминала роутера, только для 1.0/1.5 (в 2.0 H как диапазоны) -
-# - аргументы: conf_file (путь к client.conf), AWG_VER и OBF_* должны быть выставлены -
-_awg_keenetic_header() {
-    local ver="$1"
-    echo "# ========================================================"
-    echo "# ПОРТИРОВАН ПОД KEENETIC / NDMS"
-    echo "# ========================================================"
-    case "$ver" in
-        1.0)
-            echo "# Версия AWG: 1.0"
-            echo "# Минимальная прошивка: NDMS 5.1 Alpha 3"
-            echo "# Поддержка ASC: да (Jc Jmin Jmax S1 S2 H1 H2 H3 H4)"
-            ;;
-        1.5)
-            echo "# Версия AWG: 1.5"
-            echo "# Минимальная прошивка: NDMS 5.1 Alpha 3"
-            echo "# Поддержка ASC: да (с I1 signature chain)"
-            ;;
-        2.0)
-            echo "# Версия AWG: 2.0"
-            echo "# Минимальная прошивка: NDMS 5.1 Alpha 3"
-            echo "# Рекомендовано: NDMS 5.1 Alpha 5+ (стабильный импорт ASC)"
-            echo "# Поддержка ASC: да (S3 S4 + ranged H1-H4 + I1-I5)"
-            echo "# CLI-вариант для 2.0 НЕ генерится: диапазоны H не ложатся на CLI-формат"
-            ;;
-        wg)
-            echo "# Версия AWG: WireGuard vanilla (без обфускации)"
-            echo "# Минимальная прошивка: любая с поддержкой WireGuard"
-            ;;
-    esac
-    echo "# ========================================================"
-    echo ""
-}
-
-# - .keenetic.conf: тот же клиентский конфиг, но с шапкой для Keenetic -
-# - аргументы: клиентский .conf источник, целевой .keenetic.conf -
-_awg_keenetic_conf() {
-    local src="$1" dst="$2" ver="$3"
-    {
-        _awg_keenetic_header "$ver"
-        echo "# Импорт: Веб-интерфейс → WireGuard → Добавить подключение → Импорт из файла"
-        echo "# После импорта: проверь в Системный монитор что интерфейс поднялся (RX/TX)"
-        echo ""
-        # - вырезаем только [Interface]/[Peer] и обфускацию, без нашего заголовка -
-        sed -n '/^\[Interface\]/,$ p' "$src"
-    } > "$dst"
-    chmod 600 "$dst"
-}
-
-# - .keenetic.cli: набор CLI-команд для терминала роутера -
-# - работает для AWG 1.0 и 1.5. Для 2.0 не вызывается. Для wg генерит базовый WG без ASC -
-# - аргументы: целевой .keenetic.cli, peer_ip, peer_priv, peer_allowed, srv_pub, srv_ip, srv_port, mtu -
-_awg_keenetic_cli() {
-    local dst="$1" peer_ip="$2" peer_priv="$3" peer_allowed="$4"
-    local srv_pub="$5" srv_ip="$6" srv_port="$7" mtu="$8"
-    local ver="$AWG_VER"
-    local iface_name="Wireguard0"
-
-    {
-        _awg_keenetic_header "$ver"
-        echo "# Интерфейс на роутере: ${iface_name} (большинство установок используют это имя)"
-        echo "# Если у тебя другой номер - замени ${iface_name} на свой (Wireguard1, Wireguard2...)"
-        echo "# Узнать: в веб-морде на странице WireGuard смотри имя существующего подключения"
-        echo "#"
-        echo "# Как применить: Веб-интерфейс → Меню → Командная строка (CLI)"
-        echo "# Скопируй и вставь команды блоком. Не забудь последнюю - сохранение конфига."
-        echo ""
-
-        # - базовая настройка интерфейса -
-        echo "interface ${iface_name} no shutdown"
-        echo "interface ${iface_name} ip address ${peer_ip}/32"
-        [[ -n "$mtu" && "$mtu" != "1320" ]] && echo "interface ${iface_name} ip mtu ${mtu}"
-        echo "interface ${iface_name} wireguard listen-port ${srv_port}"
-        echo "interface ${iface_name} wireguard private-key ${peer_priv}"
-        echo ""
-
-        # - ASC параметры для 1.0/1.5 -
-        if [[ "$ver" == "1.0" || "$ver" == "1.5" ]]; then
-            echo "# ASC параметры (обфускация AmneziaWG)"
-            if [[ "$ver" == "1.5" && -n "$OBF_I1" ]]; then
-                # - формат 1.5 с I1 (I2-I5 опционально) -
-                local asc_cmd="interface ${iface_name} wireguard asc ${OBF_JC} ${OBF_JMIN} ${OBF_JMAX} ${OBF_S1} ${OBF_S2} ${OBF_H1} ${OBF_H2} ${OBF_H3} ${OBF_H4}"
-                # - I-параметры в кавычках т.к. содержат угловые скобки -
-                asc_cmd+=" 0 0 \"${OBF_I1}\""
-                [[ -n "$OBF_I2" ]] && asc_cmd+=" \"${OBF_I2}\"" || asc_cmd+=" \"\""
-                [[ -n "$OBF_I3" ]] && asc_cmd+=" \"${OBF_I3}\"" || asc_cmd+=" \"\""
-                [[ -n "$OBF_I4" ]] && asc_cmd+=" \"${OBF_I4}\"" || asc_cmd+=" \"\""
-                [[ -n "$OBF_I5" ]] && asc_cmd+=" \"${OBF_I5}\"" || asc_cmd+=" \"\""
-                echo "$asc_cmd"
-                echo "# ВНИМАНИЕ: строки I1-I5 могут быть длинными. Если CLI отклонит команду -"
-                echo "# используй импорт .keenetic.conf через веб-интерфейс."
-            else
-                # - 1.0: только базовые 9 параметров без S3/S4/I -
-                echo "interface ${iface_name} wireguard asc ${OBF_JC} ${OBF_JMIN} ${OBF_JMAX} ${OBF_S1} ${OBF_S2} ${OBF_H1} ${OBF_H2} ${OBF_H3} ${OBF_H4}"
-            fi
-            echo ""
-        fi
-
-        # - peer -
-        echo "# Peer (сервер)"
-        echo "interface ${iface_name} wireguard peer ${srv_pub}"
-        echo "  endpoint ${srv_ip}:${srv_port}"
-        echo "  allow-ips ${peer_allowed}"
-        echo "  keepalive-interval 25"
-        echo "  exit"
-        echo ""
-        echo "# Сохранение конфигурации (обязательно!)"
-        echo "system configuration save"
-    } > "$dst"
-    chmod 600 "$dst"
-}
-
-# - координатор экспорта: для существующего клиента генерит .keenetic.conf и .keenetic.cli -
-# - env интерфейса должен быть загружен заранее, OBF_* выставлены -
-# - аргументы: iface, client_name -
-_awg_do_keenetic_export() {
-    local iface="$1" cname="$2"
-    local cdir
-    cdir="$(awg_iface_clients "$iface")/${cname}"
-    local src_conf="${cdir}/client.conf"
-    if [[ ! -f "$src_conf" ]]; then
-        print_err "Клиентский .conf не найден: ${src_conf}"
+# --> AWG: РАЗДАЧА КЛИЕНТСКОГО КОНФИГА ПО ССЫЛКЕ <--
+# - временный одноразовый HTTP-сервер: ссылка живёт 10 минут либо -
+# - закрывается сразу после первого скачивания. Путь неугадываемый (32 симв). -
+# - на время раздачи добавляется временное UFW-правило, снимается после. -
+# - конфиг содержит приватный ключ: короткое окно + случайный путь + автозакрытие -
+_awg_serve_conf() {
+    local conf_file="$1"
+    [[ -f "$conf_file" ]] || { print_err "Конфиг не найден: ${conf_file}"; return 1; }
+    if ! command -v python3 &>/dev/null; then
+        print_warn "python3 не найден, скачивание по ссылке недоступно"
+        print_info "Забери файл вручную: ${conf_file}"
         return 1
     fi
 
-    local ver="${AWG_VER:-1.0}"
-    # - .keenetic.conf всегда -
-    local dst_conf="${cdir}/${cname}.keenetic.conf"
-    _awg_keenetic_conf "$src_conf" "$dst_conf" "$ver"
-    print_ok "Keenetic CONF: ${dst_conf}"
+    local ip port token fname
+    ip=$(book_read ".system.server_ip")
+    [[ -z "$ip" ]] && ip=$(curl -4 -fsSL --connect-timeout 5 ifconfig.me 2>/dev/null || echo "")
+    [[ -z "$ip" ]] && ip="IP_СЕРВЕРА"
+    port=$(rand_port 20000 60000) || { print_err "Не удалось выбрать свободный порт"; return 1; }
+    token=$(rand_str 32)
+    fname=$(basename "$conf_file")
 
-    # - .keenetic.cli только для 1.0/1.5/wg -
-    if [[ "$ver" == "2.0" ]]; then
-        print_info "CLI-вариант для AWG 2.0 не генерится (ranged H неудобны в CLI)"
-        print_info "Используй .keenetic.conf через веб-интерфейс"
+    # - временное UFW-правило только на время раздачи (если UFW активен) -
+    local ufw_added="no"
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "^Status: active"; then
+        ufw allow "${port}/tcp" comment "AWG conf dl temp" >/dev/null 2>&1 && ufw_added="yes"
+    fi
+
+    echo ""
+    print_info "Ссылка на скачивание зажми CTRL и кликли на ссылку (10 минут или до первого скачивания):"
+    echo ""
+    echo -e "  ${BOLD}${CYAN}http://${ip}:${port}/${token}/${fname}${NC}"
+    echo ""
+    print_info "В браузере кликни ссылку; в терминале клиента зажми CTRL и кликли на ссылку:"
+    echo -e "  ${CYAN}curl -O http://${ip}:${port}/${token}/${fname}${NC}"
+    echo ""
+    print_info "Ctrl-C чтобы прервать раздачу досрочно"
+
+    # - одноразовый сервер: отдаёт только правильный путь, стоп после первого GET или через 600с -
+    python3 - "$conf_file" "$port" "$token" "$fname" << 'PYEOF'
+import sys, time, http.server, socketserver
+conf, port, token, fname = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+want = "/%s/%s" % (token, fname)
+data = open(conf, "rb").read()
+state = {"done": False}
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_GET(self):
+        if self.path == want and not state["done"]:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", 'attachment; filename="%s"' % fname)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            state["done"] = True
+        else:
+            self.send_response(404)
+            self.end_headers()
+class S(socketserver.TCPServer):
+    allow_reuse_address = True
+try:
+    srv = S(("0.0.0.0", port), H)
+except OSError as e:
+    sys.stderr.write("bind failed: %s\n" % e)
+    sys.exit(2)
+srv.timeout = 1
+deadline = time.time() + 600
+try:
+    while time.time() < deadline and not state["done"]:
+        srv.handle_request()
+except KeyboardInterrupt:
+    pass
+finally:
+    srv.server_close()
+sys.exit(0 if state["done"] else 1)
+PYEOF
+    local rc=$?
+
+    # - снять временное UFW-правило -
+    if [[ "$ufw_added" == "yes" ]]; then
+        ufw delete allow "${port}/tcp" >/dev/null 2>&1 || true
+    fi
+
+    if [[ $rc -eq 0 ]]; then
+        print_ok "Конфиг скачан, раздача закрыта"
     else
-        local dst_cli="${cdir}/${cname}.keenetic.cli"
-        local peer_ip peer_priv peer_allowed
-        peer_ip=$(grep -E "^Address" "$src_conf" | head -1 | awk -F'= *' '{print $2}' | cut -d'/' -f1)
-        peer_priv=$(cat "${cdir}/private.key")
-        peer_allowed=$(grep -E "^AllowedIPs" "$src_conf" | tail -1 | awk -F'= *' '{print $2}')
-        local mtu_val
-        mtu_val=$(grep -E "^MTU" "$src_conf" | head -1 | awk -F'= *' '{print $2}')
-        [[ -z "$mtu_val" ]] && mtu_val="${TUNNEL_MTU:-1320}"
-        _awg_keenetic_cli "$dst_cli" "$peer_ip" "$peer_priv" "$peer_allowed" \
-            "$(cat "$(awg_iface_keys "$iface")/server.pub")" \
-            "${SERVER_ENDPOINT_IP}" "${SERVER_PORT}" "$mtu_val"
-        print_ok "Keenetic CLI:  ${dst_cli}"
+        print_info "Раздача завершена (таймаут или прервано), порт закрыт"
     fi
-
-    echo ""
-    print_warn "Keenetic требует NDMS 5.1 Alpha 3+ для поддержки ASC (обфускация AWG)"
-    [[ "$ver" == "2.0" ]] && print_warn "Для AWG 2.0 рекомендуется NDMS 5.1 Alpha 5+ (стабильный импорт)"
     return 0
-}
-
-# --> AWG: МЕНЮ - ЭКСПОРТ КЛИЕНТА ПОД KEENETIC <--
-# - отдельный пункт меню для уже существующих клиентов -
-awg_export_keenetic() {
-    print_section "Экспорт клиента под Keenetic"
-    awg_select_iface
-    [[ -z "$AWG_ACTIVE_IFACE" ]] && return 0
-    local iface="$AWG_ACTIVE_IFACE"
-    local env_file
-    env_file=$(awg_iface_env "$iface")
-    # shellcheck disable=SC1090
-    source "$env_file"
-    AWG_VER="${AWG_VERSION:-1.0}"
-    OBF_JC="$JC"; OBF_JMIN="$JMIN"; OBF_JMAX="$JMAX"
-    OBF_S1="$S1"; OBF_S2="$S2"; OBF_S3="${S3:-}"; OBF_S4="${S4:-}"
-    OBF_H1="$H1"; OBF_H2="$H2"; OBF_H3="$H3"; OBF_H4="$H4"
-    OBF_I1="${I1:-}"; OBF_I2="${I2:-}"; OBF_I3="${I3:-}"
-    OBF_I4="${I4:-}"; OBF_I5="${I5:-}"
-
-    local clients
-    clients=$(awg_get_client_list "$iface")
-    if [[ -z "$clients" ]]; then
-        print_warn "На ${iface} нет клиентов"
-        return 0
-    fi
-
-    echo ""
-    echo -e "  ${BOLD}Клиенты на ${iface}:${NC}"
-    local -a arr=()
-    local i=0 c
-    for c in $clients; do
-        i=$(( i + 1 ))
-        arr+=("$c")
-        printf "  ${GREEN}%2d)${NC} %s\n" "$i" "$c"
-    done
-    echo ""
-    local sel=""
-    while true; do
-        ask_raw "$(printf '  \033[1mНомер клиента (1-%s)?\033[0m: ' "$i")" sel
-        [[ "$sel" =~ ^[0-9]+$ ]] && [[ "$sel" -ge 1 && "$sel" -le "$i" ]] && break
-        print_warn "1-${i}"
-    done
-    local cname="${arr[$(( sel - 1 ))]}"
-    echo ""
-    _awg_do_keenetic_export "$iface" "$cname"
 }
 
 # --> AWG: ПУТИ ПО ИМЕНИ ИНТЕРФЕЙСА <--
@@ -1512,7 +1446,7 @@ SERVER_TUNNEL_IP="${SERVER_TUNNEL_IP:-10.8.0.1}"
 TUNNEL_SUBNET="${TUNNEL_SUBNET:-10.8.0.0/24}"
 TUNNEL_BASE="${TUNNEL_BASE:-10.8.0}"
 CLIENT_DNS="${CLIENT_DNS:-8.8.8.8, 1.1.1.1, 9.9.9.9}"
-CLIENT_ALLOWED_IPS="${CLIENT_ALLOWED_IPS:-0.0.0.0/0}"
+CLIENT_ALLOWED_IPS="${CLIENT_ALLOWED_IPS:-0.0.0.0/0, ::/0}"
 JC="${JC:-5}"
 JMIN="${JMIN:-50}"
 JMAX="${JMAX:-1000}"
@@ -1711,7 +1645,7 @@ _awg_ensure_module() {
     kver=$(uname -r)
 
     # - уже загружен? -
-    if lsmod 2>/dev/null | grep -q "^amneziawg"; then
+    if [[ -d /sys/module/amneziawg ]]; then
         print_ok "Модуль amneziawg уже загружен"
         return 0
     fi
@@ -1771,7 +1705,7 @@ awg_install() {
         _has_conf="yes"
     fi
     _has_mod="no"
-    lsmod 2>/dev/null | grep -q "^amneziawg" && _has_mod="yes"
+    [[ -d /sys/module/amneziawg ]] && _has_mod="yes"
     if [[ "$_already_flag" == "true" && ( "$_has_conf" == "yes" || "$_has_mod" == "yes" ) ]]; then
         print_section "AmneziaWG уже установлен"
         print_warn "Повторная установка затрёт существующие ключи и конфиги."
@@ -1836,7 +1770,7 @@ SYSEOF
 
     # - проверяем: может модуль уже есть -
     local already_installed="no"
-    if lsmod 2>/dev/null | grep -q "^amneziawg" || \
+    if [[ -d /sys/module/amneziawg ]] || \
        [[ -f "/lib/modules/${kver}/extra/amneziawg.ko" ]] || \
        [[ -f "/lib/modules/${kver}/updates/dkms/amneziawg.ko" ]]; then
         already_installed="yes"
@@ -1873,7 +1807,7 @@ SYSEOF
         fi
     else
         # - модуль есть, но может быть не загружен -
-        if ! lsmod 2>/dev/null | grep -q "^amneziawg"; then
+        if [[ ! -d /sys/module/amneziawg ]]; then
             modprobe amneziawg 2>/dev/null || {
                 print_err "Модуль amneziawg не загружается"
                 return 1
@@ -1976,17 +1910,17 @@ SYSEOF
     # - AllowedIPs -
     echo ""
     echo -e "  ${BOLD}Маршрутизация трафика:${NC}"
-    echo -e "  ${GREEN}1)${NC} 0.0.0.0/0 (весь трафик через VPN)"
+    echo -e "  ${GREEN}1)${NC} 0.0.0.0/0, ::/0 (весь трафик через VPN)"
     echo -e "  ${GREEN}2)${NC} ${tunnel_subnet} (только туннель)"
     echo -e "  ${GREEN}3)${NC} Ввести вручную"
     echo ""
-    local allowed="0.0.0.0/0"
+    local allowed="0.0.0.0/0, ::/0"
     while true; do
         ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" rt_ch
         case "$rt_ch" in
-            1) allowed="0.0.0.0/0"; break ;;
+            1) allowed="0.0.0.0/0, ::/0"; break ;;
             2) allowed="$tunnel_subnet"; break ;;
-            3) ask "AllowedIPs" "0.0.0.0/0" allowed; break ;;
+            3) ask "AllowedIPs" "0.0.0.0/0, ::/0" allowed; break ;;
             *) print_warn "1, 2 или 3" ;;
         esac
     done
@@ -2162,11 +2096,6 @@ $(_awg_obf_env_lines)
 LEGEOF
     chmod 600 "${AWG_SETUP_DIR}/server.env"
 
-    # - выставляем глобально для последующего Keenetic export в текущем shell -
-    SERVER_ENDPOINT_IP="$endpoint_ip"
-    SERVER_PORT="$srv_port"
-    TUNNEL_MTU="$tunnel_mtu"
-
     # - IP forwarding -
     if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.d/99-awg-forward.conf 2>/dev/null; then
         echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-awg-forward.conf
@@ -2221,9 +2150,9 @@ LEGEOF
         echo ""
     fi
 
-    # - QR-код и Keenetic per-client: отдельный вопрос для каждого клиента -
+    # - QR-код и ссылка для скачивания: отдельный вопрос для каждого клиента -
     local show_qr=""
-    ask_yn "Показать QR-коды клиентов?" "y" show_qr
+    ask_yn "Показать QR-коды клиентов?" "n" show_qr
     echo ""
     for cname in "${client_names[@]}"; do
         local _qcf="${clients_dir}/${cname}/client.conf"
@@ -2232,10 +2161,10 @@ LEGEOF
         if [[ "$show_qr" == "yes" ]]; then
             _awg_show_qr "$_qcf" || true
         fi
-        local do_keenetic=""
-        ask_yn "Сгенерировать конфиг под Keenetic для ${cname} (.keenetic.conf/.cli)?" "n" do_keenetic
-        if [[ "$do_keenetic" == "yes" ]]; then
-            _awg_do_keenetic_export "$iface" "$cname"
+        local do_dl=""
+        ask_yn "Выдать ссылку для скачивания конфига ${cname}?" "y" do_dl
+        if [[ "$do_dl" == "yes" ]]; then
+            _awg_serve_conf "$_qcf"
         fi
         echo ""
     done
@@ -2444,16 +2373,16 @@ awg_create_iface() {
     fi
 
     # - AllowedIPs -
-    local allowed_ips="0.0.0.0/0"
+    local allowed_ips="0.0.0.0/0, ::/0"
     echo ""
-    echo -e "  ${GREEN}1)${NC} 0.0.0.0/0 (весь трафик)"
+    echo -e "  ${GREEN}1)${NC} 0.0.0.0/0, ::/0 (весь трафик)"
     echo -e "  ${GREEN}2)${NC} ${tunnel_subnet} (только туннель)"
     echo -e "  ${GREEN}3)${NC} Вручную"
     while true; do
         ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" rt_ch
         case "$rt_ch" in
-            1) allowed_ips="0.0.0.0/0"; break ;; 2) allowed_ips="$tunnel_subnet"; break ;;
-            3) ask "AllowedIPs" "0.0.0.0/0" allowed_ips; break ;; *) print_warn "1, 2 или 3" ;;
+            1) allowed_ips="0.0.0.0/0, ::/0"; break ;; 2) allowed_ips="$tunnel_subnet"; break ;;
+            3) ask "AllowedIPs" "0.0.0.0/0, ::/0" allowed_ips; break ;; *) print_warn "1, 2 или 3" ;;
         esac
     done
 
@@ -2549,24 +2478,41 @@ ENVEOF
     fi
 
     # - UFW -
-    if command -v ufw &>/dev/null; then
+    # - AWG_NO_UFW: интерфейс живёт за обфускатором (02e), наружу его порт не выставляем -
+    if [[ -n "${AWG_NO_UFW:-}" ]]; then
+        print_info "Порт ${port}/udp наружу не открывается: интерфейс за обфускатором"
+    elif command -v ufw &>/dev/null; then
         ufw allow "${port}/udp" comment "AWG ${iface}" 2>/dev/null || true
     fi
 
     # - book -
+    # - схема obfuscation едина с prayer_run (jc/jmin/jmax/s1-s4/h1-h4/i1-i5) -
+    # - валидация числовых полей: битый --argjson уронит jq и затрёт интерфейс в {} -
+    local _o_port="${port:-0}";        [[ "$_o_port" =~ ^[0-9]+$ ]] || _o_port=0
+    local _o_jc="${OBF_JC:-5}";        [[ "$_o_jc"   =~ ^[0-9]+$ ]] || _o_jc=5
+    local _o_jmin="${OBF_JMIN:-50}";   [[ "$_o_jmin" =~ ^[0-9]+$ ]] || _o_jmin=50
+    local _o_jmax="${OBF_JMAX:-1000}"; [[ "$_o_jmax" =~ ^[0-9]+$ ]] || _o_jmax=1000
+    local _o_s1="${OBF_S1:-0}";        [[ "$_o_s1"   =~ ^[0-9]+$ ]] || _o_s1=0
+    local _o_s2="${OBF_S2:-0}";        [[ "$_o_s2"   =~ ^[0-9]+$ ]] || _o_s2=0
     local _iface_obj
     _iface_obj=$(jq -n \
         --arg desc "$desc" --arg ep "$endpoint_ip" \
-        --argjson port "${port}" --arg tip "$srv_tunnel_ip" \
+        --argjson port "$_o_port" --arg tip "$srv_tunnel_ip" \
         --arg snet "$tunnel_subnet" --arg dns "$dns" --arg allowed "$allowed_ips" \
         --arg ver "$AWG_VER" \
-        --arg s1 "${OBF_S1}" --arg s2 "${OBF_S2}" \
+        --argjson jc "$_o_jc" --argjson jmin "$_o_jmin" --argjson jmax "$_o_jmax" \
+        --argjson s1 "$_o_s1" --argjson s2 "$_o_s2" \
         --arg s3 "${OBF_S3:-}" --arg s4 "${OBF_S4:-}" \
-        --arg h1 "${OBF_H1}" --arg h2 "${OBF_H2}" --arg h3 "${OBF_H3}" --arg h4 "${OBF_H4}" \
+        --arg h1 "${OBF_H1:-1}" --arg h2 "${OBF_H2:-2}" --arg h3 "${OBF_H3:-3}" --arg h4 "${OBF_H4:-4}" \
+        --arg i1 "${OBF_I1:-}" --arg i2 "${OBF_I2:-}" --arg i3 "${OBF_I3:-}" \
+        --arg i4 "${OBF_I4:-}" --arg i5 "${OBF_I5:-}" \
         '{"desc":$desc,"endpoint_ip":$ep,"port":$port,"server_tunnel_ip":$tip,
           "tunnel_subnet":$snet,"client_dns":$dns,"client_allowed_ips":$allowed,
           "awg_version":$ver,
-          "obfuscation":{"s1":$s1,"s2":$s2,"s3":$s3,"s4":$s4,"h1":$h1,"h2":$h2,"h3":$h3,"h4":$h4}}' 2>/dev/null || echo "{}")
+          "obfuscation":{"jc":$jc,"jmin":$jmin,"jmax":$jmax,
+            "s1":$s1,"s2":$s2,"s3":$s3,"s4":$s4,
+            "h1":$h1,"h2":$h2,"h3":$h3,"h4":$h4,
+            "i1":$i1,"i2":$i2,"i3":$i3,"i4":$i4,"i5":$i5}}' 2>/dev/null || echo "{}")
     book_write ".awg.installed" "true" bool
     book_write_obj ".awg.interfaces.${iface}" "$_iface_obj"
 
@@ -2724,7 +2670,14 @@ awg_delete_iface() {
 
 awg_add_client() {
     print_section "Добавить клиента"
-    awg_select_iface
+    # - опциональный аргумент: интерфейс задан вызывающим (client kit из 02e/02g) -
+    # - тогда не переспрашиваем интерфейс через awg_select_iface -
+    if [[ -n "$1" ]] && [[ -f "$(awg_iface_env "$1")" ]]; then
+        AWG_ACTIVE_IFACE="$1"
+        print_info "Интерфейс: $1"
+    else
+        awg_select_iface
+    fi
     [[ -z "$AWG_ACTIVE_IFACE" ]] && return 0
     local iface="$AWG_ACTIVE_IFACE"
     local env_file
@@ -2761,13 +2714,13 @@ awg_add_client() {
     local change_allowed=""
     ask_yn "Изменить AllowedIPs для этого клиента?" "n" change_allowed
     if [[ "$change_allowed" == "yes" ]]; then
-        echo -e "  ${GREEN}1)${NC} 0.0.0.0/0"
+        echo -e "  ${GREEN}1)${NC} 0.0.0.0/0, ::/0"
         echo -e "  ${GREEN}2)${NC} ${TUNNEL_SUBNET}"
         echo -e "  ${GREEN}3)${NC} Вручную"
         while true; do
             ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" rc
             case "$rc" in
-                1) client_allowed="0.0.0.0/0"; break ;;
+                1) client_allowed="0.0.0.0/0, ::/0"; break ;;
                 2) client_allowed="$TUNNEL_SUBNET"; break ;;
                 3) ask "AllowedIPs" "$client_allowed" client_allowed; break ;;
                 *) print_warn "1, 2 или 3" ;;
@@ -2810,20 +2763,27 @@ AllowedIPs = ${client_allowed}
 PersistentKeepalive = 25
 CLIEOF
     chmod 600 "${cdir}/client.conf"
+
+    # - хук 02e_wgobfs: если интерфейс за обфускатором, Endpoint переезжает на 127.0.0.1 -
+    # - и рядом с client.conf ложится конфиг обфускатора. Нет модуля - нет хука -
+    if declare -f _wgo_fix_client >/dev/null 2>&1; then
+        _wgo_fix_client "$iface" "${cdir}/client.conf"
+    fi
+
     print_ok "Клиент ${name} добавлен: IP ${client_ip}"
     print_info "Конфиг: ${cdir}/client.conf"
 
     # - QR-код для мобильного клиента -
     local show_qr=""
-    ask_yn "Показать QR-код?" "y" show_qr
+    ask_yn "Показать QR-код?" "n" show_qr
     [[ "$show_qr" == "yes" ]] && _awg_show_qr "${cdir}/client.conf"
 
-    # - экспорт конфига под Keenetic (опционально, по запросу) -
+    # - ссылка для скачивания конфига (опционально) -
     echo ""
-    local do_keenetic=""
-    ask_yn "Сгенерировать конфиг под Keenetic (.keenetic.conf/.cli)?" "n" do_keenetic
-    if [[ "$do_keenetic" == "yes" ]]; then
-        _awg_do_keenetic_export "$iface" "$name"
+    local do_dl=""
+    ask_yn "Выдать ссылку для скачивания конфига?" "y" do_dl
+    if [[ "$do_dl" == "yes" ]]; then
+        _awg_serve_conf "${cdir}/client.conf"
     fi
 
     echo ""
@@ -2861,6 +2821,135 @@ awg_show_client() {
     ask_yn "Показать QR-код?" "n" show_qr
     [[ "$show_qr" == "yes" ]] && _awg_show_qr "$cfg"
 
+    # - ссылка для скачивания конфига -
+    local do_dl=""
+    ask_yn "Выдать ссылку для скачивания конфига?" "y" do_dl
+    [[ "$do_dl" == "yes" ]] && _awg_serve_conf "$cfg"
+
+    return 0
+}
+
+awg_edit_client() {
+    print_section "Редактировать клиента"
+    awg_select_iface
+    [[ -z "$AWG_ACTIVE_IFACE" ]] && return 0
+    local iface="$AWG_ACTIVE_IFACE"
+    local clients
+    clients=$(awg_get_client_list "$iface")
+    [[ -z "$clients" ]] && { print_warn "Нет клиентов на ${iface}"; return 0; }
+    echo ""
+    for n in $clients; do echo -e "  ${CYAN}*${NC} ${n}"; done
+    echo ""
+    local name=""
+    ask "Имя клиента" "" name
+    [[ -z "$name" ]] && { print_warn "Имя не введено"; return 0; }
+    if ! awg_client_exists "$iface" "$name"; then
+        print_err "Клиент '${name}' не найден"; return 0
+    fi
+    local cfg
+    cfg="$(awg_iface_clients "$iface")/${name}/client.conf"
+    [[ ! -f "$cfg" ]] && { print_err "Конфиг не найден: ${cfg}"; return 0; }
+
+    # - правки только в клиентском .conf: endpoint/DNS/AllowedIPs/MTU задают -
+    # - поведение устройства. серверный peer (PublicKey + IP/32) не меняется, -
+    # - reload интерфейса не требуется -
+    local changed=0
+    while true; do
+        # - текущие значения читаем из самого .conf, не из env -
+        local cur_ep cur_dns cur_allowed cur_mtu
+        cur_ep=$(grep "^Endpoint = " "$cfg" | head -1 | cut -d' ' -f3-)
+        cur_dns=$(grep "^DNS = " "$cfg" | head -1 | cut -d' ' -f3-)
+        cur_allowed=$(grep "^AllowedIPs = " "$cfg" | head -1 | cut -d' ' -f3-)
+        cur_mtu=$(grep "^MTU = " "$cfg" | head -1 | cut -d' ' -f3-)
+        echo ""
+        echo -e "  ${BOLD}${iface}/${name}${NC}"
+        echo -e "  ${GREEN}1)${NC} Endpoint    ${CYAN}(${cur_ep:-?})${NC}"
+        echo -e "  ${GREEN}2)${NC} DNS         ${CYAN}(${cur_dns:-?})${NC}"
+        echo -e "  ${GREEN}3)${NC} AllowedIPs  ${CYAN}(${cur_allowed:-?})${NC}"
+        echo -e "  ${GREEN}4)${NC} MTU         ${CYAN}(${cur_mtu:-?})${NC}"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Готово"
+        echo ""
+        local ch=""
+        ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" ch
+        case "$ch" in
+            1)
+                local new_ep=""
+                ask "Новый Endpoint (host:port)" "$cur_ep" new_ep
+                local _host="${new_ep%:*}" _port="${new_ep##*:}"
+                if [[ -z "$_host" || -z "$_port" || "$_host" == "$new_ep" ]]; then
+                    print_err "Формат host:port"; continue
+                fi
+                if ! validate_port "$_port"; then print_err "Порт 1-65535"; continue; fi
+                if ! validate_ip "$_host" && ! validate_domain "$_host"; then
+                    print_err "Host: IP или домен"; continue
+                fi
+                sed -i "s|^Endpoint = .*|Endpoint = ${new_ep}|" "$cfg"
+                print_ok "Endpoint: ${new_ep}"; changed=1
+                ;;
+            2)
+                local new_dns=""
+                ask "Новый DNS (через запятую)" "$cur_dns" new_dns
+                [[ -z "$new_dns" ]] && { print_warn "Пусто, пропуск"; continue; }
+                local _bad=0 _tok _oldifs="$IFS"
+                IFS=','
+                for _tok in $new_dns; do
+                    _tok="${_tok// /}"
+                    [[ -z "$_tok" ]] && continue
+                    validate_ip "$_tok" || _bad=1
+                done
+                IFS="$_oldifs"
+                [[ $_bad -eq 1 ]] && { print_err "DNS: только IP через запятую"; continue; }
+                sed -i "s|^DNS = .*|DNS = ${new_dns}|" "$cfg"
+                print_ok "DNS: ${new_dns}"; changed=1
+                ;;
+            3)
+                echo -e "  ${GREEN}1)${NC} 0.0.0.0/0, ::/0 (весь трафик)"
+                echo -e "  ${GREEN}2)${NC} Вручную"
+                local ac=""
+                ask_raw "$(printf '  \033[1mВыбор?\033[0m ')" ac
+                local new_allowed=""
+                case "$ac" in
+                    1) new_allowed="0.0.0.0/0, ::/0" ;;
+                    2) ask "AllowedIPs" "$cur_allowed" new_allowed ;;
+                    *) print_warn "1 или 2"; continue ;;
+                esac
+                [[ -z "$new_allowed" ]] && { print_warn "Пусто, пропуск"; continue; }
+                sed -i "s|^AllowedIPs = .*|AllowedIPs = ${new_allowed}|" "$cfg"
+                print_ok "AllowedIPs: ${new_allowed}"; changed=1
+                ;;
+            4)
+                local new_mtu=""
+                ask "MTU (1000-1500)" "$cur_mtu" new_mtu
+                if ! [[ "$new_mtu" =~ ^[0-9]+$ ]] || (( new_mtu < 1000 || new_mtu > 1500 )); then
+                    print_err "MTU 1000-1500"; continue
+                fi
+                sed -i "s|^MTU = .*|MTU = ${new_mtu}|" "$cfg"
+                print_ok "MTU: ${new_mtu}"
+                print_info "Для YouTube/QUIC при обрывах видео пробуй MTU 1280 или ниже"
+                changed=1
+                ;;
+            0) break ;;
+            *) print_warn "0-4" ;;
+        esac
+    done
+
+    if [[ $changed -eq 1 ]]; then
+        echo ""
+        print_ok "Конфиг ${name} обновлён: ${cfg}"
+        print_info "Правки касаются только клиента. Переимпортируй .conf на устройстве."
+        # - book не хранит per-client поля (как add_client/delete_client), синк не нужен -
+        local rq=""
+        ask_yn "Показать обновлённый конфиг?" "n" rq
+        if [[ "$rq" == "yes" ]]; then
+            echo ""
+            echo -e "${BOLD}-- ${iface}/${name}/client.conf --${NC}"
+            cat "$cfg"
+            echo -e "${BOLD}--------------------------------------${NC}"
+        fi
+    else
+        print_info "Изменений нет"
+    fi
     return 0
 }
 
