@@ -262,6 +262,9 @@ mbl_delete() {
         ufw delete allow "${port}/udp" 2>/dev/null || true
     fi
     book_write ".mumble.installed" "false" bool
+    book_write ".mumble.server_ip" ""
+    book_write ".mumble.superuser_pass" ""
+    book_write ".mumble.superuser_set" "false" bool
     print_ok "Mumble удалён"
     return 0
 }
