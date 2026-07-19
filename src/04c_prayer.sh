@@ -345,7 +345,6 @@ EOF
 SERVER_IP="$(book_read '.teamspeak.server_ip')"
 TS_VOICE_PORT="$(book_read '.teamspeak.voice_port')"
 TS_FT_PORT="$(book_read '.teamspeak.ft_port')"
-TS_THREADS="$(book_read '.teamspeak.threads')"
 TS_PRIV_KEY="$(book_read '.teamspeak.priv_key')"
 TS_VERSION="$(book_read '.teamspeak.version')"
 TS_DB_PATH="${tdb}"
@@ -425,6 +424,332 @@ EOF
     else
         _pr_check "Mumble не установлен"
         book_write ".mumble.installed" "false" bool
+    fi
+
+    # --> 8. ПРОКСИ <--
+    # - мультиинстансные сервисы: диск (env/инстанс-дир) = истина, книга self-heal -
+    # - контейнер/юнит не поднимаем сами: только сверка и восстановление книги -
+    print_section "8. Прокси (MTProto / SOCKS5 / Hysteria2 / Signal)"
+
+    # - MTProto: /etc/mtproto/instance_*.env, docker mtproto-<id> -
+    local mtp_dir="/etc/mtproto" mtp_disk=0
+    if compgen -G "${mtp_dir}/instance_*.env" >/dev/null 2>&1; then
+        for envf in "${mtp_dir}"/instance_*.env; do
+            [[ -f "$envf" ]] || continue
+            local iid port tls cont
+            iid=$(basename "$envf" | sed 's/instance_//;s/\.env//')
+            port=$(grep '^PORT=' "$envf" | head -1 | cut -d'"' -f2)
+            tls=$(grep '^TLS_DOMAIN=' "$envf" | head -1 | cut -d'"' -f2)
+            cont=$(grep '^CONTAINER=' "$envf" | head -1 | cut -d'"' -f2)
+            mtp_disk=$(( mtp_disk + 1 ))
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$cont"; then
+                _pr_found "MTProto #${iid}: ${cont} запущен (порт ${port})"
+            else
+                _pr_warn "MTProto #${iid}: env есть, контейнер ${cont} не запущен"
+            fi
+            [[ -n "$port" && "$(book_read ".mtproto.instances.${iid}.port")" != "$port" ]] && { book_write ".mtproto.instances.${iid}.port" "$port"; _pr_fixed "book: mtproto #${iid} port=${port}"; }
+            [[ -n "$tls"  && "$(book_read ".mtproto.instances.${iid}.tls_domain")" != "$tls" ]] && book_write ".mtproto.instances.${iid}.tls_domain" "$tls"
+            [[ -n "$cont" && "$(book_read ".mtproto.instances.${iid}.container")" != "$cont" ]] && book_write ".mtproto.instances.${iid}.container" "$cont"
+        done
+    fi
+    for bid in $(jq -r '.mtproto.instances | keys[]?' "$_BOOK" 2>/dev/null); do
+        [[ -f "${mtp_dir}/instance_${bid}.env" ]] || { book_del ".mtproto.instances.${bid}"; _pr_fixed "book: убран призрак mtproto #${bid}"; }
+    done
+    if [[ $mtp_disk -gt 0 ]]; then
+        [[ "$(book_read '.mtproto.installed')" != "true" ]] && { book_write ".mtproto.installed" "true" bool; _pr_updated "book: .mtproto.installed=true"; }
+    else
+        [[ "$(book_read '.mtproto.installed')" == "true" ]] && { book_write ".mtproto.installed" "false" bool; _pr_updated "book: .mtproto.installed=false"; }
+        _pr_check "MTProto не установлен"
+    fi
+
+    # - SOCKS5: /etc/socks5/instance_*.env, docker socks5-<id> -
+    local s5_dir="/etc/socks5" s5_disk=0
+    if compgen -G "${s5_dir}/instance_*.env" >/dev/null 2>&1; then
+        for envf in "${s5_dir}"/instance_*.env; do
+            [[ -f "$envf" ]] || continue
+            local iid port cont
+            iid=$(basename "$envf" | sed 's/instance_//;s/\.env//')
+            port=$(grep '^PORT=' "$envf" | head -1 | cut -d'"' -f2)
+            cont=$(grep '^CONTAINER=' "$envf" | head -1 | cut -d'"' -f2)
+            s5_disk=$(( s5_disk + 1 ))
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$cont"; then
+                _pr_found "SOCKS5 #${iid}: ${cont} запущен (порт ${port})"
+            else
+                _pr_warn "SOCKS5 #${iid}: env есть, контейнер ${cont} не запущен"
+            fi
+            [[ -n "$port" && "$(book_read ".socks5.instances.${iid}.port")" != "$port" ]] && { book_write ".socks5.instances.${iid}.port" "$port"; _pr_fixed "book: socks5 #${iid} port=${port}"; }
+            [[ -n "$cont" && "$(book_read ".socks5.instances.${iid}.container")" != "$cont" ]] && book_write ".socks5.instances.${iid}.container" "$cont"
+        done
+    fi
+    for bid in $(jq -r '.socks5.instances | keys[]?' "$_BOOK" 2>/dev/null); do
+        [[ -f "${s5_dir}/instance_${bid}.env" ]] || { book_del ".socks5.instances.${bid}"; _pr_fixed "book: убран призрак socks5 #${bid}"; }
+    done
+    if [[ $s5_disk -gt 0 ]]; then
+        [[ "$(book_read '.socks5.installed')" != "true" ]] && { book_write ".socks5.installed" "true" bool; _pr_updated "book: .socks5.installed=true"; }
+    else
+        [[ "$(book_read '.socks5.installed')" == "true" ]] && { book_write ".socks5.installed" "false" bool; _pr_updated "book: .socks5.installed=false"; }
+        _pr_check "SOCKS5 не установлен"
+    fi
+
+    # - Hysteria2: /etc/hysteria/instance_<id>, systemd hysteria-<id> -
+    local hy2_dir="/etc/hysteria" hy2_disk=0
+    if compgen -G "${hy2_dir}/instance_*" >/dev/null 2>&1; then
+        for idir in "${hy2_dir}"/instance_*; do
+            [[ -d "$idir" ]] || continue
+            local iid port svc
+            iid=$(basename "$idir" | sed 's/instance_//')
+            [[ "$iid" =~ ^[0-9]+$ ]] || continue
+            port=$(grep '^PORT=' "${idir}/hysteria.env" 2>/dev/null | head -1 | cut -d'"' -f2)
+            svc="hysteria-${iid}"
+            hy2_disk=$(( hy2_disk + 1 ))
+            if systemctl is-active --quiet "$svc" 2>/dev/null; then
+                _pr_found "Hysteria2 #${iid}: ${svc} активен (порт ${port})"
+            else
+                _pr_warn "Hysteria2 #${iid}: инстанс есть, ${svc} не активен"
+            fi
+            [[ -n "$port" && "$(book_read ".hysteria2.instances.${iid}.port")" != "$port" ]] && book_write ".hysteria2.instances.${iid}.port" "$port" number
+        done
+    fi
+    for bid in $(jq -r '.hysteria2.instances | keys[]?' "$_BOOK" 2>/dev/null); do
+        [[ -d "${hy2_dir}/instance_${bid}" ]] || { book_del ".hysteria2.instances.${bid}"; _pr_fixed "book: убран призрак hysteria2 #${bid}"; }
+    done
+    if [[ $hy2_disk -gt 0 ]]; then
+        [[ "$(book_read '.hysteria2.installed')" != "true" ]] && { book_write ".hysteria2.installed" "true" bool; _pr_updated "book: .hysteria2.installed=true"; }
+    else
+        [[ "$(book_read '.hysteria2.installed')" == "true" ]] && { book_write ".hysteria2.installed" "false" bool; _pr_updated "book: .hysteria2.installed=false"; }
+        _pr_check "Hysteria2 не установлен"
+    fi
+
+    # - Signal TLS Proxy: /etc/signal-proxy/signal.env, docker signal/nginx-* -
+    if [[ -f "/etc/signal-proxy/signal.env" || -d "/opt/signal-proxy" ]]; then
+        local sig_dom
+        sig_dom=$(grep '^DOMAIN=' /etc/signal-proxy/signal.env 2>/dev/null | head -1 | cut -d'"' -f2)
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -Eq 'signal|nginx-terminate|nginx-relay'; then
+            _pr_found "Signal TLS Proxy: контейнеры запущены${sig_dom:+ (домен ${sig_dom})}"
+            [[ "$(book_read '.signal_proxy.installed')" != "true" ]] && { book_write ".signal_proxy.installed" "true" bool; _pr_updated "book: .signal_proxy.installed=true"; }
+        else
+            _pr_warn "Signal TLS Proxy: файлы есть, контейнеры не запущены"
+        fi
+        [[ -n "$sig_dom" && "$(book_read '.signal_proxy.domain')" != "$sig_dom" ]] && { book_write ".signal_proxy.domain" "$sig_dom"; _pr_fixed "book: signal domain=${sig_dom}"; }
+    else
+        [[ "$(book_read '.signal_proxy.installed')" == "true" ]] && { book_write ".signal_proxy.installed" "false" bool; _pr_updated "book: .signal_proxy.installed=false"; }
+        _pr_check "Signal TLS Proxy не установлен"
+    fi
+
+    # --> 9. TELEGRAM-БОТ <--
+    # - не контейнер и не юнит: скрипт + env + cron-задача -
+    print_section "9. Telegram-бот"
+    local tgbot_script="/usr/local/bin/eli-tgbot-monitor.sh"
+    local tgbot_env="/etc/vps-eli-stack/telegrambot.env"
+    local tgbot_cron="no"
+    crontab -l 2>/dev/null | grep -q 'eli-tgbot-monitor' && tgbot_cron="yes"
+    if [[ -f "$tgbot_script" && -f "$tgbot_env" && "$tgbot_cron" == "yes" ]]; then
+        _pr_found "Telegram-бот: скрипт, env и cron на месте"
+        [[ "$(book_read '.telegram_bot.enabled')" != "true" ]] && { book_write ".telegram_bot.enabled" "true" bool; _pr_updated "book: .telegram_bot.enabled=true"; }
+    elif [[ -f "$tgbot_script" || -f "$tgbot_env" || "$tgbot_cron" == "yes" ]]; then
+        _pr_warn "Telegram-бот: неполная конфигурация (script:$([[ -f "$tgbot_script" ]] && echo да || echo нет) env:$([[ -f "$tgbot_env" ]] && echo да || echo нет) cron:${tgbot_cron})"
+    else
+        _pr_check "Telegram-бот не настроен"
+        [[ "$(book_read '.telegram_bot.enabled')" == "true" ]] && { book_write ".telegram_bot.enabled" "false" bool; _pr_updated "book: .telegram_bot.enabled=false"; }
+    fi
+
+    # --> 10. ZAPRET2 <--
+    # - мультиинстанс по awg-интерфейсам: диск (<iface>.conf) = истина, книга self-heal -
+    # - юниты и nft сами не поднимаем: только сверка и восстановление книги -
+    print_section "10. Zapret2 (обход DPI)"
+    local zap_dir="/etc/vps-eli-stack/zapret2" zap_bin="/opt/zapret2/nfq2/nfqws2" zap_disk=0
+    if [[ -x "$zap_bin" ]] && compgen -G "${zap_dir}/*.conf" >/dev/null 2>&1; then
+        for cf in "${zap_dir}"/*.conf; do
+            [[ -f "$cf" ]] || continue
+            local ziface zunit zqnum
+            ziface=$(basename "$cf" | sed 's/\.conf$//')
+            zunit="zapret2-eli@${ziface}.service"
+            zap_disk=$(( zap_disk + 1 ))
+            if systemctl is-active --quiet "$zunit" 2>/dev/null; then
+                _pr_found "Zapret2 ${ziface}: инстанс активен"
+            else
+                _pr_warn "Zapret2 ${ziface}: конфиг есть, ${zunit} не активен"
+            fi
+            if nft list table inet "zeli_${ziface}" &>/dev/null; then
+                _pr_found "  nft zeli_${ziface}: загружены"
+            else
+                _pr_warn "  nft zeli_${ziface}: отсутствуют (загрузчик zeli-nft-${ziface})"
+            fi
+            zqnum=$(grep -m1 '^--qnum=' "$cf" 2>/dev/null | cut -d= -f2)
+            [[ -n "$zqnum" && "$(book_read ".zapret.interfaces.\"${ziface}\".qnum")" != "$zqnum" ]] && { book_write ".zapret.interfaces.\"${ziface}\".qnum" "$zqnum" number; _pr_fixed "book: zapret ${ziface} qnum=${zqnum}"; }
+        done
+    fi
+    # - призраки: интерфейс в книге есть, конфига на диске нет -
+    for zkey in $(jq -r '.zapret.interfaces | keys[]?' "$_BOOK" 2>/dev/null); do
+        [[ -f "${zap_dir}/${zkey}.conf" ]] || { book_del ".zapret.interfaces.\"${zkey}\""; _pr_fixed "book: убран призрак zapret ${zkey}"; }
+    done
+    if [[ -x "$zap_bin" ]]; then
+        [[ "$(book_read '.zapret.installed')" != "true" ]] && { book_write ".zapret.installed" "true" bool; _pr_updated "book: .zapret.installed=true"; }
+        [[ $zap_disk -eq 0 ]] && _pr_check "Zapret2: движок установлен, привязок нет"
+    else
+        [[ "$(book_read '.zapret.installed')" == "true" ]] && { book_write ".zapret.installed" "false" bool; _pr_updated "book: .zapret.installed=false"; }
+        _pr_check "Zapret2 не установлен"
+    fi
+    # - cron автообновления vs книга -
+    local zap_cron="no"
+    crontab -l 2>/dev/null | grep -q 'eli-zapret-autoupdate' && zap_cron="yes"
+    local zap_au; zap_au=$(book_read '.zapret.autoupdate_enabled')
+    if [[ "$zap_au" == "true" && "$zap_cron" == "no" ]]; then
+        _pr_warn "Zapret2: автообновление в книге включено, но cron отсутствует"
+    elif [[ "$zap_au" != "true" && "$zap_cron" == "yes" ]]; then
+        _pr_warn "Zapret2: cron автообновления есть, но в книге выключено"
+    fi
+
+    # --> 11. WG-OBFUSCATOR <--
+    # - мультиинстанс по vanilla-awg интерфейсам: диск (<iface>.conf) = истина, книга self-heal -
+    # - ключ инстанса в отчёт не печатаем ни при каких раскладах -
+    print_section "11. wg-obfuscator (маскировка WG)"
+    local wgo_dir="/etc/vps-eli-stack/wgobfs" wgo_bin="/opt/wg-obfuscator/wg-obfuscator" wgo_disk=0
+    if [[ -x "$wgo_bin" ]] && compgen -G "${wgo_dir}/*.conf" >/dev/null 2>&1; then
+        for wf in "${wgo_dir}"/*.conf; do
+            [[ -f "$wf" ]] || continue
+            local wiface wunit wlport wmask wenv wport
+            wiface=$(basename "$wf" | sed 's/\.conf$//')
+            wunit="wgobfs-eli@${wiface}.service"
+            wgo_disk=$(( wgo_disk + 1 ))
+            if systemctl is-active --quiet "$wunit" 2>/dev/null; then
+                _pr_found "wg-obfuscator ${wiface}: инстанс активен"
+            else
+                _pr_warn "wg-obfuscator ${wiface}: конфиг есть, ${wunit} не активен"
+            fi
+
+            # - интерфейс мог исчезнуть или сменить версию: не-vanilla обфускатор ломает -
+            wenv="/etc/awg-setup/iface_${wiface}.env"
+            if [[ ! -f "$wenv" ]]; then
+                _pr_warn "wg-obfuscator ${wiface}: awg-интерфейс отсутствует, привязка висит в пустоту"
+            else
+                if [[ "$(grep -m1 '^AWG_VERSION=' "$wenv" 2>/dev/null | cut -d'"' -f2)" != "wg" ]]; then
+                    _pr_warn "wg-obfuscator ${wiface}: интерфейс больше не vanilla-WG, обфускация портит пакеты"
+                fi
+                # - смысл модуля: порт туннеля не должен быть виден снаружи -
+                wport=$(grep -m1 '^SERVER_PORT=' "$wenv" 2>/dev/null | cut -d'"' -f2)
+                if [[ -n "$wport" ]] && ufw show added 2>/dev/null | grep -Eq "(^|[[:space:]])${wport}/udp([[:space:]]|$)"; then
+                    _pr_warn "wg-obfuscator ${wiface}: порт ${wport}/udp открыт в UFW, голый WireGuard виден снаружи"
+                fi
+            fi
+
+            # - конфиг на диске = истина, книга подтягивается -
+            wlport=$(grep -m1 '^source-lport' "$wf" 2>/dev/null | cut -d'=' -f2 | tr -d ' ')
+            if [[ "$wlport" =~ ^[0-9]+$ ]] && [[ "$(book_read ".wgobfs.instances.\"${wiface}\".lport")" != "$wlport" ]]; then
+                book_write ".wgobfs.instances.\"${wiface}\".lport" "$wlport" number
+                _pr_fixed "book: wgobfs ${wiface} lport=${wlport}"
+            fi
+            wmask=$(grep -m1 '^masking' "$wf" 2>/dev/null | cut -d'=' -f2 | tr -d ' ')
+            if [[ -n "$wmask" ]] && [[ "$(book_read ".wgobfs.instances.\"${wiface}\".masking")" != "$wmask" ]]; then
+                book_write ".wgobfs.instances.\"${wiface}\".masking" "$wmask"
+                _pr_fixed "book: wgobfs ${wiface} masking=${wmask}"
+            fi
+        done
+    fi
+
+    # - призраки: инстанс в книге есть, конфига на диске нет -
+    for wkey in $(jq -r '.wgobfs.instances | keys[]?' "$_BOOK" 2>/dev/null); do
+        [[ -f "${wgo_dir}/${wkey}.conf" ]] || { book_del ".wgobfs.instances.\"${wkey}\""; _pr_fixed "book: убран призрак wgobfs ${wkey}"; }
+    done
+
+    if [[ -x "$wgo_bin" ]]; then
+        [[ "$(book_read '.wgobfs.installed')" != "true" ]] && { book_write ".wgobfs.installed" "true" bool; _pr_updated "book: .wgobfs.installed=true"; }
+        # - у v1.5 нет --version, версия живёт только в первой строке --help -
+        local wgo_ver
+        wgo_ver=$("$wgo_bin" --help 2>&1 | head -1 | grep -oE 'v[0-9]+(\.[0-9]+)*' | head -1)
+        [[ -n "$wgo_ver" && "$(book_read '.wgobfs.version')" != "$wgo_ver" ]] && { book_write ".wgobfs.version" "$wgo_ver"; _pr_updated "book: .wgobfs.version=${wgo_ver}"; }
+        [[ ! -f "/etc/systemd/system/wgobfs-eli@.service" ]] && _pr_warn "wg-obfuscator: шаблон юнита wgobfs-eli@.service отсутствует"
+        [[ $wgo_disk -eq 0 ]] && _pr_check "wg-obfuscator: движок установлен, привязок нет"
+    else
+        [[ "$(book_read '.wgobfs.installed')" == "true" ]] && { book_write ".wgobfs.installed" "false" bool; _pr_updated "book: .wgobfs.installed=false"; }
+        _pr_check "wg-obfuscator не установлен"
+    fi
+
+    # --> 12. MIMIC <--
+    # - инстанс один на WAN, конфиг собирается целиком из книги: книга = истина, диск сверяется -
+    print_section "12. mimic (UDP -> TCP)"
+    local mim_bin="/usr/sbin/mimic"
+    if [[ -x "$mim_bin" ]]; then
+        [[ "$(book_read '.mimic.installed')" != "true" ]] && { book_write ".mimic.installed" "true" bool; _pr_updated "book: .mimic.installed=true"; }
+        local mim_ver
+        mim_ver=$("$mim_bin" --version 2>&1 | head -1 | grep -oE '[0-9]+(\.[0-9]+)+' | head -1)
+        [[ -n "$mim_ver" && "$(book_read '.mimic.version')" != "$mim_ver" ]] && { book_write ".mimic.version" "$mim_ver"; _pr_updated "book: .mimic.version=${mim_ver}"; }
+
+        # - без модуля ядра контрольные суммы не чинятся: трафик пойдёт мусором -
+        if ! lsmod 2>/dev/null | grep -q '^mimic[[:space:]]'; then
+            if modprobe mimic 2>/dev/null && lsmod 2>/dev/null | grep -q '^mimic[[:space:]]'; then
+                _pr_fixed "Модуль mimic: загружен через modprobe"
+            else
+                _pr_warn "Модуль mimic: НЕ загружен, проверь dkms status mimic"
+            fi
+        fi
+
+        local mim_wan mim_conf mim_unit mim_ip mim_n=0
+        mim_wan=$(book_read '.mimic.wan_iface')
+        [[ -z "$mim_wan" ]] && mim_wan=$(ip route show default 2>/dev/null | awk '/default/{print $5}' | head -1)
+        mim_conf="/etc/mimic/${mim_wan}.conf"
+        mim_unit="mimic@${mim_wan}.service"
+        # - адрес на проводе, а не публичный: при 1:1 NAT это разные вещи -
+        mim_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
+
+        for mkey in $(jq -r '.mimic.instances | keys[]?' "$_BOOK" 2>/dev/null); do
+            local menv mport mfip
+            menv="/etc/awg-setup/iface_${mkey}.env"
+            if [[ ! -f "$menv" ]]; then
+                book_del ".mimic.instances.\"${mkey}\""
+                _pr_fixed "book: убран призрак mimic ${mkey} (awg-интерфейс отсутствует)"
+                continue
+            fi
+            mim_n=$(( mim_n + 1 ))
+
+            # - порт интерфейса мог поменяться: книга подтягивается за env -
+            mport=$(grep -m1 '^SERVER_PORT=' "$menv" 2>/dev/null | cut -d'"' -f2)
+            if [[ "$mport" =~ ^[0-9]+$ ]] && [[ "$(book_read ".mimic.instances.\"${mkey}\".port")" != "$mport" ]]; then
+                book_write ".mimic.instances.\"${mkey}\".port" "$mport" number
+                _pr_fixed "book: mimic ${mkey} port=${mport}"
+            fi
+
+            # - фильтр с чужим адресом не сматчится никогда, туннель встанет молча -
+            mfip=$(book_read ".mimic.instances.\"${mkey}\".local_ip")
+            if [[ -n "$mim_ip" && -n "$mfip" && "$mfip" != "$mim_ip" ]]; then
+                book_write ".mimic.instances.\"${mkey}\".local_ip" "$mim_ip"
+                _pr_fixed "book: mimic ${mkey} local_ip=${mim_ip} (было ${mfip})"
+                _pr_warn "mimic ${mkey}: адрес в фильтре сменился, нужен рестарт ${mim_unit}"
+            fi
+
+            # - смысл модуля: на порт должны ходить и TCP, и UDP -
+            if [[ -n "$mport" ]] && command -v ufw &>/dev/null; then
+                ufw show added 2>/dev/null | grep -Eq "(^|[[:space:]])${mport}/tcp([[:space:]]|$)" \
+                    || _pr_warn "mimic ${mkey}: порт ${mport}/tcp закрыт в UFW, хендшейк mimic не дойдёт"
+                ufw show added 2>/dev/null | grep -Eq "(^|[[:space:]])${mport}/udp([[:space:]]|$)" \
+                    || _pr_warn "mimic ${mkey}: порт ${mport}/udp закрыт в UFW, восстановленный трафик не дойдёт"
+            fi
+        done
+
+        if [[ $mim_n -eq 0 ]]; then
+            _pr_check "mimic: движок установлен, привязок нет"
+            systemctl is-active --quiet "$mim_unit" 2>/dev/null && _pr_warn "mimic: привязок нет, а ${mim_unit} активен"
+        else
+            _pr_found "mimic: привязок ${mim_n} на ${mim_wan}"
+            systemctl is-active --quiet "$mim_unit" 2>/dev/null || _pr_warn "mimic: привязки есть, ${mim_unit} не активен"
+            # - конфиг детерминированно собирается из книги, расхождение чиним на месте -
+            local mim_want mim_have
+            mim_want=$mim_n
+            # - grep -c печатает 0 и при этом возвращает 1: подстраховка через регулярку, а не через || -
+            mim_have=$(grep -c '^filter = ' "$mim_conf" 2>/dev/null)
+            [[ "$mim_have" =~ ^[0-9]+$ ]] || mim_have=0
+            if [[ "$mim_have" != "$mim_want" ]] && declare -f _mim_build_conf >/dev/null 2>&1; then
+                if _mim_build_conf; then
+                    _pr_fixed "mimic: конфиг ${mim_conf} пересобран из книги (фильтров было ${mim_have}, стало ${mim_want})"
+                    _pr_warn "mimic: нужен рестарт ${mim_unit}, чтобы фильтры применились"
+                else
+                    _pr_warn "mimic: конфиг ${mim_conf} разошёлся с книгой, пересобрать не вышло"
+                fi
+            fi
+        fi
+    else
+        [[ "$(book_read '.mimic.installed')" == "true" ]] && { book_write ".mimic.installed" "false" bool; _pr_updated "book: .mimic.installed=false"; }
+        _pr_check "mimic не установлен"
     fi
 
     # --> ФИНАЛЬНОЕ ОБНОВЛЕНИЕ <--
