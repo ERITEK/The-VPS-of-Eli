@@ -21,6 +21,8 @@ unbound_install() {
     echo -e "  ${GREEN}2)${NC} Форвард (Google / Cloudflare / Quad9)"
     echo -e "     ${CYAN}VPS пересылает запросы на Google 8.8.8.8 / CF 1.1.1.1.${NC}"
     echo -e "     ${CYAN}Быстрее за счёт их кэша, но они видят все домены.${NC}"
+    echo -e "     ${CYAN}Транспорт до них шифруется по DoT (TLS, порт 853),${NC}"
+    echo -e "     ${CYAN}с деградацией в рекурсию если 853 заблокирован.${NC}"
     echo -e "     ${CYAN}Провайдер клиента всё равно ничего не видит (VPN).${NC}"
     echo ""
     local dns_mode="recursive"
@@ -140,12 +142,14 @@ ${access_lines}
     use-caps-for-id: no
     verbosity: 0
     log-queries: no
+    tls-cert-bundle: "/etc/ssl/certs/ca-certificates.crt"
 
 forward-zone:
     name: "."
-    forward-addr: 8.8.8.8
-    forward-addr: 1.1.1.1
-    forward-addr: 9.9.9.9
+    forward-tls-upstream: yes
+    forward-addr: 8.8.8.8@853#dns.google
+    forward-addr: 1.1.1.1@853#cloudflare-dns.com
+    forward-addr: 9.9.9.9@853#dns.quad9.net
     forward-first: yes
 EOF
     fi
@@ -175,8 +179,10 @@ EOF
         print_ok "Unbound запущен (${dns_mode})"
         book_write ".unbound.installed" "true" bool
         book_write ".unbound.mode" "$dns_mode"
-        local _ub_ips
-        _ub_ips=$(printf '%s\n' "${awg_ips[@]}" 2>/dev/null | jq -R . | jq -s . 2>/dev/null || echo "[]")
+        local _ub_ips="[]"
+        if [[ ${#awg_ips[@]} -gt 0 ]]; then
+            _ub_ips=$(printf '%s\n' "${awg_ips[@]}" | jq -R . | jq -s . 2>/dev/null || echo "[]")
+        fi
         book_write_obj ".unbound.listen_ips" "$_ub_ips"
     else
         print_err "Не запустился"; return 1
