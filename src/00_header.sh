@@ -19,9 +19,7 @@ if ! flock -n 200; then
     exit 1
 fi
 
-ELI_VERSION="5.780 dev"
-# shellcheck disable=SC2034
-ELI_CODENAME="The VPS of Eli" # - используется в баннере и book -
+ELI_VERSION="6.618"
 
 # --> ЦВЕТА <--
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -47,8 +45,8 @@ eli_header() {
     echo "+=========================+"
     echo "|     The VPS of Eli      |"
     echo "|  scrp by ERITEK & Loo1  |"
-    echo "|    Claude (Anthropic)   |"
-    echo "|         v${ELI_VERSION}      |"
+    echo "|    GLM-5.3 (Zhipu AI)   |"
+    echo "|         v${ELI_VERSION}          |"
     echo "+=========================+"
     echo -e "${NC}"
 }
@@ -83,7 +81,7 @@ eli_read_line() {
     local __eli_input="" __eli_ch="" __eli_old_stty="" __eli_esc_tail=""
 
     if [[ -r /dev/tty && -w /dev/tty ]]; then
-        # Если основной вывод сейчас идёт через pipe/FIFO, даём tee допечатать предыдущую строку.
+        # - если основной вывод идёт через pipe/FIFO, даём tee допечатать предыдущую строку -
         [[ ! -t 1 || ! -t 2 ]] && sleep 0.05
         printf '%b' "$__eli_prompt" > /dev/tty
 
@@ -119,7 +117,7 @@ eli_read_line() {
                     done
                     ;;
                 $'\033')
-                    # Игнор ESC/стрелок, чтобы в меню не попадали escape-последовательности.
+                    # - игнор ESC/стрелок, чтобы в меню не попадали escape-последовательности -
                     read -r -s -n 2 -t 0.01 __eli_esc_tail < /dev/tty 2>/dev/null || true
                     ;;
                 *)
@@ -244,20 +242,6 @@ rand_h() {
     printf '%u\n' $(( 5 + $(_rand_bits30 2147483643) ))
 }
 
-# - диапазон H для AWG 2.0: возвращает "min-max" внутри сегмента [lo, hi] -
-rand_h_range() {
-    local lo="$1" hi="$2"
-    # - guard: невалидные аргументы → пустой stdout + rc=1, без мусора в выводе -
-    if [[ -z "$lo" || -z "$hi" ]] || ! [[ "$lo" =~ ^[0-9]+$ && "$hi" =~ ^[0-9]+$ ]] || (( lo >= hi )); then
-        return 1
-    fi
-    local mid=$(( (lo + hi) / 2 ))
-    local span_lo=$(( mid - lo + 1 ))
-    local span_hi=$(( hi - mid ))
-    local mn=$(( lo + $(_rand_bits30 "$span_lo") ))
-    local mx=$(( mid + 1 + $(_rand_bits30 "$span_hi") ))
-    echo "${mn}-${mx}"
-}
 
 # - guard на $1 > $2, иначе RANDOM % 0 -> shell падает -
 # - RANDOM в bash даёт только 0..32767, для диапазонов шире используем _rand_bits30 -
@@ -295,13 +279,6 @@ rand_str() {
     tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c "$len"
 }
 
-rand_path() {
-    local seg="${1:-3}" out=""
-    for (( i=0; i<seg; i++ )); do
-        out+="/$(tr -dc 'a-z0-9' < /dev/urandom | head -c 6)"
-    done
-    echo "$out"
-}
 
 # --> ПРОВЕРКА ПЕРЕСЕЧЕНИЯ ПОДСЕТЕЙ <--
 # - ВНИМАНИЕ: рассчитана на подсети вида 10.X.0.0/24 (схема AWG)
@@ -436,16 +413,16 @@ book_init() {
         '{
             "_meta":{"version":$ver,"created":$now,"updated":$now,"host":$host,"server_ip":$ip},
             "system":{"os":"","kernel":"","arch":"","main_iface":"","server_ip":$ip,"ssh_port":22,"permit_root_login":""},
-            "awg":{"installed":false,"version":"","setup_dir":"/etc/awg-setup","conf_dir":"/etc/amnezia/amneziawg","interfaces":{}},
+            "awg":{"installed":false,"version":"","interfaces":{}},
             "outline":{"installed":false,"server_ip":"","api_port":0,"mgmt_port":0,"keys_port":0,"manager_key_path":"/etc/outline/manager_key.json","api_url":"","installed_at":""},
             "3xui":{"installed":false,"version":"","server_ip":"","panel_port":0,"panel_path":"","panel_user":"","panel_pass":"","db_path":"","installed_at":""},
-            "teamspeak":{"installed":false,"version":"","server_ip":"","voice_port":9987,"ft_port":30033,"priv_key":"","db_path":"/opt/teamspeak/tsserver.sqlitedb","installed_at":""},
-            "mumble":{"installed":false,"version":"","server_ip":"","port":64738,"superuser_set":false,"superuser_pass":"","installed_at":""},
-            "unbound":{"installed":false,"listen_ips":[]},
+            "teamspeak":{"installed":false,"version":"","server_ip":"","voice_port":9987,"ft_port":30033,"priv_key":"","db_path":"/opt/teamspeak/tsserver.sqlitedb"},
+            "mumble":{"installed":false,"server_ip":"","port":64738,"superuser_set":false,"superuser_pass":""},
+            "unbound":{"installed":false,"mode":"","listen_ips":[]},
             "ufw":{"active":false},
             "mtproto":{"instances":{}},
             "socks5":{"instances":{}},
-            "hysteria2":{"installed":false,"port":0,"version":""},
+            "hysteria2":{"installed":false},
             "signal_proxy":{"installed":false,"domain":""},
             "telegram_bot":{"enabled":false,"interval":0}
         }' > "$_BOOK"
