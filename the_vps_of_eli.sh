@@ -1525,7 +1525,8 @@ _awg_cps_preset_rtp() {
 }
 
 # - выбор варианта STUN-пакета: bare/nofp/fp, общий для auto и manual веток мастера -
-# - кладёт вариант в AWG_STUN_VARIANT, CPS-строку в stdout -
+# - кладёт вариант в AWG_STUN_VARIANT, CPS-строку в OBF_I1 -
+# - вызывается только как оператор, без $(): иначе строки меню попадут в подстановку -
 _awg_choose_stun_variant() {
     local _sv=""
     echo ""
@@ -1536,9 +1537,9 @@ _awg_choose_stun_variant() {
     while true; do
         ask_raw "$(printf '  \033[1mВариант?\033[0m [1]: ')" _sv
         case "${_sv:-1}" in
-            1) AWG_STUN_VARIANT="bare"; _awg_cps_preset_stun_bare; return 0 ;;
-            2) AWG_STUN_VARIANT="nofp"; _awg_cps_preset_stun no;    return 0 ;;
-            3) AWG_STUN_VARIANT="fp";   _awg_cps_preset_stun yes;   return 0 ;;
+            1) AWG_STUN_VARIANT="bare"; OBF_I1=$(_awg_cps_preset_stun_bare); return 0 ;;
+            2) AWG_STUN_VARIANT="nofp"; OBF_I1=$(_awg_cps_preset_stun no);    return 0 ;;
+            3) AWG_STUN_VARIANT="fp";   OBF_I1=$(_awg_cps_preset_stun yes);   return 0 ;;
             *) print_warn "1, 2 или 3" ;;
         esac
     done
@@ -1721,7 +1722,7 @@ _awg_gen_i_packets() {
 
         case "$AWG_I1_PRESET" in
             stun)
-                OBF_I1=$(_awg_choose_stun_variant)
+                _awg_choose_stun_variant
                 print_info "I1 пресет: stun (${AWG_STUN_VARIANT})"
                 ;;
             sip)
@@ -1780,7 +1781,7 @@ _awg_gen_i_packets() {
             ask_raw "$(printf '  \033[1mВыбор для I1?\033[0m [s]: ')" _ch
             case "${_ch:-s}" in
                 s|S)
-                    OBF_I1=$(_awg_choose_stun_variant)
+                    _awg_choose_stun_variant
                     AWG_I1_PRESET="stun"
                     break ;;
                 p|P)
