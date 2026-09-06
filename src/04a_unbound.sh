@@ -90,6 +90,16 @@ EOF
 
     mkdir -p /etc/unbound/unbound.conf.d/
 
+    # - root.hints: строка в конфиге только если файл реально скачался -
+    local hints_line=""
+    if curl -fsSL --connect-timeout 10 "https://www.internic.net/domain/named.cache"         -o /var/lib/unbound/root.hints 2>/dev/null; then
+        chown unbound:unbound /var/lib/unbound/root.hints 2>/dev/null || true
+        hints_line='    root-hints: "/var/lib/unbound/root.hints"'
+        print_ok "root.hints обновлён"
+    else
+        print_warn "root.hints: internic.net недоступен, работаем на встроенных корневых подсказках"
+    fi
+
     # - генерация конфига в зависимости от режима -
     if [[ "$dns_mode" == "recursive" ]]; then
         # - рекурсивный: VPS сам ходит root -> TLD -> NS, forward-zone отсутствует -
@@ -116,7 +126,7 @@ ${access_lines}
     val-clean-additional: yes
     verbosity: 0
     log-queries: no
-    root-hints: "/var/lib/unbound/root.hints"
+${hints_line}
 EOF
     else
         # - форвард: запросы на Google/CF/Quad9, быстрее но менее приватно -
@@ -158,15 +168,6 @@ EOF
     echo "$dns_mode" > "$UNBOUND_MODE_FILE"
     chmod 600 "$UNBOUND_MODE_FILE"
 
-    # - root.hints (нужен для рекурсии, не мешает форварду) -
-    if curl -fsSL --connect-timeout 10 "https://www.internic.net/domain/named.cache" \
-        -o /var/lib/unbound/root.hints 2>/dev/null; then
-        # - chown чтобы unbound-пользователь в chroot смог прочитать -
-        chown unbound:unbound /var/lib/unbound/root.hints 2>/dev/null || true
-        print_ok "root.hints обновлён"
-    else
-        print_warn "root.hints: internic.net недоступен, используем встроенный"
-    fi
 
     # - проверка и запуск -
     if unbound-checkconf "$UNBOUND_CONF" 2>/dev/null; then
@@ -184,6 +185,20 @@ EOF
             _ub_ips=$(printf '%s\n' "${awg_ips[@]}" | jq -R . | jq -s . 2>/dev/null || echo "[]")
         fi
         book_write_obj ".unbound.listen_ips" "$_ub_ips"
+        # - UFW: DNS клиентов из туннельных подсетей -
+        local _ufw_state
+        _ufw_state=$(ufw status 2>/dev/null || true)
+        if [[ "$_ufw_state" == *"Status: active"* ]]; then
+            local _envf _sub
+            for _envf in "${AWG_SETUP_DIR}"/iface_*.env; do
+                [[ -f "$_envf" ]] || continue
+                _sub=$(grep "^TUNNEL_SUBNET=" "$_envf" | cut -d'"' -f2)
+                [[ -z "$_sub" ]] && continue
+                ufw allow from "$_sub" to any port 53 proto udp comment "Unbound DNS" >/dev/null 2>&1 || true
+                ufw allow from "$_sub" to any port 53 proto tcp comment "Unbound DNS" >/dev/null 2>&1 || true
+            done
+            print_ok "UFW: 53/udp+tcp для туннельных подсетей разрешён"
+        fi
     else
         print_err "Не запустился"; return 1
     fi
