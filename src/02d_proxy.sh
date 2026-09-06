@@ -12,9 +12,7 @@ HY2_BIN="/usr/local/bin/hysteria"
 SIG_ENV="/etc/signal-proxy/signal.env"
 SIG_DIR="/opt/signal-proxy"
 
-# ==========================================================================
 # --> MTPROTO PROXY (TELEGRAM) - МУЛЬТИИНСТАНС <--
-# ==========================================================================
 # - образ: nineseconds/mtg:2 (актуальный mtg) -
 # - один инстанс = один секрет (mtg без мультисекрета) -
 # - секрет содержит в себе домен (генерится mtg generate-secret --hex DOMAIN) -
@@ -114,6 +112,10 @@ mtp_add() {
     echo -e "  ${CYAN}Домен для маскировки Fake TLS (DPI видит его в SNI).${NC}"
     echo -e "  ${CYAN}Зашивается прямо в секрет клиента.${NC}"
     ask "Fake TLS domen" "$tls_domain" tls_domain
+    if ! validate_domain "$tls_domain"; then
+        print_warn "Домен '$tls_domain' не прошёл проверку, откат на дефолт"
+        tls_domain="fonts.googleapis.com"
+    fi
 
     # - предварительно подтянуть образ (чтобы generate-secret не тянул в фоне) -
     print_info "Проверяю образ ${MTG_IMAGE}..."
@@ -241,9 +243,7 @@ mtp_remove() {
     return 0
 }
 
-# ==========================================================================
 # --> SOCKS5 PROXY - МУЛЬТИИНСТАНС <--
-# ==========================================================================
 
 # - следующий свободный ID -
 _s5_next_id() {
@@ -420,9 +420,7 @@ s5_remove() {
     return 0
 }
 
-# ==========================================================================
 # --> HYSTERIA 2 - МУЛЬТИИНСТАНС + МУЛЬТИЮЗЕР <--
-# ==========================================================================
 
 _hy2_next_id() {
     local i=1
@@ -817,13 +815,7 @@ hy2_remove() {
     return 0
 }
 
-# --> HY2: BACKWARD COMPAT <--
-hy2_install() { hy2_add "$@"; }
-hy2_status()  { hy2_list "$@"; }
-
-# ==========================================================================
 # --> SIGNAL TLS PROXY <--
-# ==========================================================================
 
 # --> SIGNAL: УСТАНОВКА <--
 sig_install() {
@@ -916,9 +908,7 @@ sig_install() {
 
     # - запуск -
     print_section "Запуск Signal Proxy"
-    # - логика `docker compose up && ! docker-compose up` была инвертирована -
-    # - true если compose v2 упал И v1 вернул 0 (бред ебаный?) -
-    # - юзаем v2, не получилось -> юзаем v1, если оба мимо -> fail -
+    # - юзаем compose v2, не получилось -> юзаем v1, если оба мимо -> fail -
     # - stderr пишем в tmp-лог и показываем юзеру при ошибке -
     local sig_up_ok="no" sig_up_log
     sig_up_log=$(mktemp -t signal-proxy-up.XXXXXX.log)
@@ -939,7 +929,7 @@ sig_install() {
     sleep 3
 
     local running
-    running=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -c "signal\|nginx-terminate\|nginx-relay" || echo "0")
+    running=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -c "signal\|nginx-terminate\|nginx-relay" || true)
     if [[ "$running" -ge 2 ]]; then
         print_ok "Signal Proxy запущен (${running} контейнеров)"
     else
@@ -995,7 +985,7 @@ sig_status() {
     source "$SIG_ENV"
 
     local running
-    running=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -c "signal\|nginx-terminate\|nginx-relay" || echo "0")
+    running=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -c "signal\|nginx-terminate\|nginx-relay")
     if [[ "$running" -ge 2 ]]; then
         echo -e "  ${GREEN}(*)${NC} ${BOLD}Signal Proxy${NC}  ${running} контейнеров"
     else
