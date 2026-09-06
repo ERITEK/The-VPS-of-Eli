@@ -288,24 +288,13 @@ _mim_install_apt() {
     return 0
 }
 
-# --> MIM: МОДУЛЬ ЯДРА <--
-# - без модуля mimic работает, но чинить контрольные суммы ему нечем: трафик поедет мусором -
-_mim_kmod_ok() {
-    [[ -d /sys/module/mimic ]] && return 0
-    local err
-    err=$(modprobe mimic 2>&1)
-    [[ -d /sys/module/mimic ]] && return 0
-    # - причину не глотаем: без неё юзер видит только "не загрузился" вслепую -
-    [[ -n "$err" ]] && print_err "modprobe mimic: ${err}" >&2
-    print_info "Диагностика: dkms status ; dmesg | tail" >&2
-    return 1
-}
 
 # --> MIM: ДЕТЕРМИНИРОВАННАЯ ЗАГРУЗКА МОДУЛЯ ПОСЛЕ СБОРКИ <--
-# - проверка загрузки строго через /sys/module/mimic, а не `lsmod | grep`: при set -o pipefail
-#   grep -q закрывает пайп по первому совпадению, lsmod ловит SIGPIPE и пайп возвращает 141
-#   даже когда модуль есть -> проверка ложно-отрицательна "через раз". /sys/module без пайпа.
-#   Порядок: собран ли под текущее ядро (dkms status) -> depmod -a -> modprobe -> проверка. -
+# - проверка загрузки строго через /sys/module/mimic, а не `lsmod | grep` -
+# - при set -o pipefail grep -q закрывает пайп по первому совпадению, lsmod ловит SIGPIPE -
+# - и пайп возвращает 141 даже когда модуль есть, проверка ложно-отрицательна "через раз" -
+# - /sys/module без пайпа -
+# - порядок: собран ли под текущее ядро (dkms status) -> depmod -a -> modprobe -> проверка -
 _mim_kmod_load() {
     [[ -d /sys/module/mimic ]] && return 0
 
