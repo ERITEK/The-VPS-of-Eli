@@ -12,11 +12,21 @@ XUI_DB="/etc/x-ui/x-ui.db"
 XUI_SERVICE="x-ui"
 XUI_UNIT="/etc/systemd/system/x-ui.service"
 
+# - значение для env-файла в одинарных кавычках: безопасно для любого символа пароля -
+# - хитрое место: кавычка в значении уходит в env как кавычка-бэкслеш-кавычка-кавычка -
+_xui_env_sq() {
+    local v="${1//\'/"'\''"}"
+    printf '%s' "$v"
+}
+
 # - ветка master, используется как fallback для x-ui.sh и unit-файла -
 XUI_REPO_BRANCH="master"
 XUI_GITHUB_REPO="MHSanaei/3x-ui"
 XUI_RAW_URL="https://raw.githubusercontent.com/${XUI_GITHUB_REPO}/${XUI_REPO_BRANCH}"
 XUI_API_URL="https://api.github.com/repos/${XUI_GITHUB_REPO}/releases/latest"
+# - пин версии апстрима: пусто = последний релиз. Модуль понимает контракты -
+# - 2.x и 3.x; пин пригодится, если апстрим снова сломает совместимость -
+XUI_PIN_TAG=""
 
 # - установка "на самом деле 'нет'" требует бинарь и unit -
 # - is-active проверяем отдельно через xui_running (иначе после падения сервиса нельзя переустановить) -
@@ -43,10 +53,6 @@ _xui_detect_db() {
     return 1
 }
 
-xui_get_param() {
-    local key="$1"
-    [[ -f "$XUI_ENV" ]] && grep -oP "^${key}=\"\K[^\"]+" "$XUI_ENV" | head -1 || true
-}
 
 # --> 3X-UI: АРХИТЕКТУРА ДЛЯ РЕЛИЗА <--
 _xui_arch() {
@@ -68,6 +74,12 @@ _xui_arch() {
 _xui_fetch_release_info() {
     local arch
     arch=$(_xui_arch)
+    # - непустой пин важнее апстрима: latest может сломать совместимость модуля -
+    if [[ -n "${XUI_PIN_TAG:-}" ]]; then
+        XUI_TAG="$XUI_PIN_TAG"
+        XUI_TARBALL_URL="https://github.com/${XUI_GITHUB_REPO}/releases/download/${XUI_TAG}/x-ui-linux-${arch}.tar.gz"
+        return 0
+    fi
     local tag
     # - jq уже доступен (boot_install_packages его ставит) -
     tag=$(curl -fsSL --connect-timeout 10 "$XUI_API_URL" 2>/dev/null | jq -r '.tag_name // empty' 2>/dev/null)
@@ -372,20 +384,19 @@ xui_install() {
     local xui_version
     xui_version=$("$XUI_BIN" -v 2>/dev/null | head -1 || echo "?")
 
+    # - значения в одинарных кавычках: любые символы в логине/пароле не ломают env -
     cat > "$XUI_ENV" << EOF
-SERVER_IP="${server_ip}"
-PANEL_PORT="${panel_port}"
-PANEL_PATH="${panel_path}"
-PANEL_USER="${panel_user}"
-PANEL_PASS="${panel_pass}"
-INSTALLED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-VERSION="${xui_version}"
+SERVER_IP='$(_xui_env_sq "${server_ip}")'
+PANEL_PORT='$(_xui_env_sq "${panel_port}")'
+PANEL_PATH='$(_xui_env_sq "${panel_path}")'
+PANEL_USER='$(_xui_env_sq "${panel_user}")'
+PANEL_PASS='$(_xui_env_sq "${panel_pass}")'
+INSTALLED_AT='$(_xui_env_sq "$(date -u +%Y-%m-%dT%H:%M:%SZ)")'
+VERSION='$(_xui_env_sq "${xui_version}")'
 EOF
     chmod 600 "$XUI_ENV"
 
     # - book -
-    local _xui_db
-    _xui_db=$(find /usr/local/x-ui /etc/x-ui -maxdepth 2 -name "x-ui.db" 2>/dev/null | head -1 || echo "")
     book_write ".3xui.installed" "true" bool
     book_write ".3xui.server_ip" "$server_ip"
     book_write ".3xui.panel_port" "$panel_port" number
@@ -393,7 +404,7 @@ EOF
     book_write ".3xui.panel_user" "$panel_user"
     book_write ".3xui.panel_pass" "$panel_pass"
     book_write ".3xui.version" "$xui_version"
-    book_write ".3xui.db_path" "$_xui_db"
+    book_write ".3xui.db_path" "$XUI_DB"
     book_write ".3xui.installed_at" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
     echo ""
@@ -455,6 +466,29 @@ xui_show_creds() {
 
 # --> 3X-UI: INBOUND'Ы ЧЕРЕЗ API <--
 # - ВНИМАНИЕ: endpoint /panel/api/inbounds/list, curl с -L и -c cookie -
+# - логин в панель, общий для API-функций модуля -
+# - контракт 2.x: форма + cookie сессии; контракт 3.x: CSRF-токен из -
+# - GET /csrf-token + заголовок X-CSRF-Token на POST /login -
+_xui_api_login() {
+    local jar="$1"
+    local port="${PANEL_PORT:-2053}" path="${PANEL_PATH:-/}"
+    [[ "$path" != "/" ]] && path="${path%/}"
+    local base_url="http://127.0.0.1:${port}${path}"
+    local result csrf
+    result=$(curl -sk --connect-timeout 5 -c "$jar" -X POST "${base_url}/login" \
+        --data-urlencode "username=${PANEL_USER}" \
+        --data-urlencode "password=${PANEL_PASS}" 2>/dev/null || echo "")
+    echo "$result" | grep -q '"success":true' && return 0
+    csrf=$(curl -sk --connect-timeout 5 -c "$jar" "${base_url}/csrf-token" 2>/dev/null \
+        | jq -r '.obj // empty' 2>/dev/null || echo "")
+    [[ -z "$csrf" ]] && return 1
+    result=$(curl -sk --connect-timeout 5 -b "$jar" -c "$jar" -X POST "${base_url}/login" \
+        -H "X-CSRF-Token: ${csrf}" \
+        --data-urlencode "username=${PANEL_USER}" \
+        --data-urlencode "password=${PANEL_PASS}" 2>/dev/null || echo "")
+    echo "$result" | grep -q '"success":true'
+}
+
 xui_show_inbounds() {
     print_section "Inbound'ы 3X-UI"
     if ! xui_running 2>/dev/null; then
@@ -472,13 +506,7 @@ xui_show_inbounds() {
     cookie_jar=$(mktemp)
     # - trap на cleanup cookie (в нём логин/пароль до ответа сервера) -
     trap 'rm -f "$cookie_jar" 2>/dev/null' RETURN
-    local login_result
-    # - --data-urlencode обязателен, иначе спецсимволы в пароле (&, =, %) ломают тело запроса -
-    login_result=$(curl -sk --connect-timeout 5 -c "$cookie_jar" \
-        -X POST "${base_url}/login" \
-        --data-urlencode "username=${PANEL_USER}" \
-        --data-urlencode "password=${PANEL_PASS}" 2>/dev/null || echo "")
-    if ! echo "$login_result" | grep -q '"success":true'; then
+    if ! _xui_api_login "$cookie_jar"; then
         print_err "Авторизация не удалась"
         rm -f "$cookie_jar"; return 0
     fi
@@ -551,13 +579,19 @@ xui_delete() {
     rm -rf "$XUI_DIR" /etc/x-ui 2>/dev/null || true
     rm -f /usr/bin/x-ui "$XUI_UNIT" 2>/dev/null || true
     if [[ -f "$XUI_ENV" ]] && command -v ufw &>/dev/null; then
-        local p; p=$(grep "^PANEL_PORT=" "$XUI_ENV" | cut -d'"' -f2)
+        # - порт вытягиваем цифрами: env может быть в одинарных или двойных кавычках -
+        local p; p=$(grep "^PANEL_PORT=" "$XUI_ENV" 2>/dev/null | head -1 | tr -dc '0-9')
         if [[ -n "$p" ]]; then
             ufw delete allow "${p}/tcp" 2>/dev/null || true
         fi
     fi
     rm -f "$XUI_ENV" 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
+    # - чистим поля панели: пароли и пути не должны оставаться в книге -
+    local _f
+    for _f in .3xui.panel_user .3xui.panel_pass .3xui.panel_path .3xui.panel_port               .3xui.version .3xui.db_path .3xui.installed_at; do
+        book_del "$_f"
+    done
     book_write ".3xui.installed" "false" bool
     print_ok "3X-UI удалён"
     return 0
