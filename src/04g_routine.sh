@@ -230,6 +230,11 @@ fi
 _check_svc "unbound.service" "Unbound"
 _check_svc "fail2ban.service" "Fail2ban"
 
+# - обфускаторы и обходы (02e/02f/02g): юниты-шаблоны, проверяем все экземпляры -
+for _u in $(systemctl list-units --all 'zapret2-eli@*' 'wgobfs-eli@*' 'mimic@*' --no-legend 2>/dev/null | awk '{print $1}'); do
+    _check_svc "$_u" "$_u"
+done
+
 # --> OUTLINE КОНТЕЙНЕРЫ <--
 if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker 2>/dev/null; then
     for cname in shadowbox watchtower; do
