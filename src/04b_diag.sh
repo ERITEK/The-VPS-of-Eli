@@ -20,6 +20,17 @@ _hb() {
         err) echo "<span class='badge badge-err'>[X] $2</span>" ;; *) echo "<span class='badge badge-info'>$2</span>" ;; esac
 }
 _hr() { echo "<tr><td class='label'>$1</td><td>$(_hb "${3:-info}" "$2")</td></tr>"; }
+# - значение для вставки в HTML: строка сервера может содержать спецсимволы разметки -
+# - замены в кавычках: без кавычек bash 5.2+ разворачивает & в совпавший шаблон -
+_dg_esc() {
+    local s="${1:-}"
+    s="${s//&/"&amp;"}"
+    s="${s//</"&lt;"}"
+    s="${s//>/"&gt;"}"
+    s="${s//\"/"&quot;"}"
+    s="${s//\'/"&#39;"}"
+    printf '%s' "$s"
+}
 
 diag_run() {
     eli_header
@@ -61,7 +72,7 @@ diag_run() {
     # - идемпотентно: повторный вызов из разных trap не упадёт -
     _dg_cleanup() {
         [[ -z "${_DG_TEE_PID:-}" ]] && return 0
-        exec 1>&3 2>&4 3>&- 4>&- 2>/dev/null || true
+        exec 1>&3 2>&4 3>&- 4>&- || true
         wait "$_DG_TEE_PID" 2>/dev/null || true
         [[ -n "${_DG_TMPDIR:-}" && -d "$_DG_TMPDIR" ]] && rm -rf "$_DG_TMPDIR"
         _DG_TEE_PID=""
@@ -109,13 +120,13 @@ diag_run() {
     # --> 2. CPU CRYPTO <--
     _dg_cpu() {
         local raw
-        raw=$(openssl speed -elapsed -evp aes-256-gcm 2>/dev/null | grep "aes-256-gcm" | tail -1 || true)
+        raw=$(openssl speed -elapsed -evp aes-256-gcm 2>/dev/null | grep -i "aes-256-gcm" | tail -1 || true)
         if [[ -n "$raw" ]]; then
             D_AES=$(echo "$raw" | awk '{for(i=1;i<=NF;i++) if($i~/k$/) {print $i; exit}}')
             D_AES_MBIT=$(echo "$D_AES" | sed 's/k//' | awk '{printf "%.0f", $1*8/1000}' 2>/dev/null || echo "?")
             print_ok "AES-256-GCM: ${D_AES} (~${D_AES_MBIT} Мбит/с)"
         else print_warn "AES-256-GCM: не замерено"; fi
-        raw=$(openssl speed -elapsed -evp chacha20-poly1305 2>/dev/null | grep "chacha20-poly1305" | tail -1 || true)
+        raw=$(openssl speed -elapsed -evp chacha20-poly1305 2>/dev/null | grep -i "chacha20-poly1305" | tail -1 || true)
         if [[ -n "$raw" ]]; then
             D_CHA=$(echo "$raw" | awk '{for(i=1;i<=NF;i++) if($i~/k$/) {print $i; exit}}')
             D_CHA_MBIT=$(echo "$D_CHA" | sed 's/k//' | awk '{printf "%.0f", $1*8/1000}' 2>/dev/null || echo "?")
@@ -239,7 +250,7 @@ diag_run() {
         # - NTP -
         echo ""; echo -e "  ${BOLD}NTP:${NC}"
         if command -v timedatectl &>/dev/null; then
-            local ntp_sync; ntp_sync=$(timedatectl 2>/dev/null | grep -i "synchronized" | grep -c "yes" || echo "0")
+            local ntp_sync; ntp_sync=$(timedatectl 2>/dev/null | grep -i "synchronized" | grep -c "yes")
             if [[ $ntp_sync -gt 0 ]]; then
                 D_NTP="синхронизировано"; print_ok "NTP: синхронизировано"; _dg_green "NTP синхронизировано"
             else
@@ -254,7 +265,7 @@ diag_run() {
         local ssh_log
         ssh_log=$(journalctl -u ssh -u sshd --since "24 hours ago" --no-pager -q 2>/dev/null || true)
         if [[ -n "$ssh_log" ]]; then
-            D_SSH_FAILS=$(echo "$ssh_log" | grep -cE 'Failed password|Invalid user' | tr -d '[:space:]' || echo "0")
+            D_SSH_FAILS=$(echo "$ssh_log" | grep -cE 'Failed password|Invalid user' | tr -d '[:space:]')
             D_SSH_FAILS=${D_SSH_FAILS:-0}
             [[ $D_SSH_FAILS -gt 500 ]] && D_SEC_LEVEL="высокий"
             [[ $D_SSH_FAILS -gt 50 && $D_SSH_FAILS -le 500 ]] && D_SEC_LEVEL="средний"
@@ -283,7 +294,7 @@ diag_run() {
             local conf="/etc/amnezia/amneziawg/${iface}.conf"
             [[ -f "$conf" ]] && grep -q "TCPMSS" "$conf" && { mss_conf="есть"; _dg_green "MSS clamping в ${iface}.conf"; }
             [[ "$mss_conf" != "есть" ]] && _dg_red "MSS clamping отсутствует в ${iface}.conf|Добавь TCPMSS в PostUp/PostDown"
-            local mss_cnt; mss_cnt=$(iptables-save -t mangle 2>/dev/null | grep "TCPMSS" | grep -c "${iface}" || echo "0")
+            local mss_cnt; mss_cnt=$(iptables-save -t mangle 2>/dev/null | grep "TCPMSS" | grep -c "${iface}")
             [[ $mss_cnt -ge 2 ]] && mss_ipt="да"
             echo -e "  ${BOLD}${iface}:${NC} порт=${port} пиров=${peers} MTU=${mtu} MSS_conf=${mss_conf} MSS_ipt=${mss_ipt}"
             D_AWG_DATA+=("${iface}|${port}|${peers}|${mtu}|${mss_conf}|${mss_ipt}")
@@ -308,7 +319,7 @@ diag_run() {
             D_OL_CPU=$(docker stats --no-stream --format "{{.CPUPerc}}" shadowbox 2>/dev/null || echo "?")
             D_OL_MEM=$(docker stats --no-stream --format "{{.MemUsage}}" shadowbox 2>/dev/null | grep -oP '^[\d.]+\w+' || echo "?")
             print_info "CPU: ${D_OL_CPU}  RAM: ${D_OL_MEM}"
-            local udp_cnt; udp_cnt=$(ss -ulpn 2>/dev/null | grep -c "outline\|ss-server" || echo "0")
+            local udp_cnt; udp_cnt=$(ss -ulpn 2>/dev/null | grep -c "outline\|ss-server" || true)
             [[ "$udp_cnt" -gt 0 ]] && { D_OL_UDP="да (${udp_cnt} портов)"; _dg_green "UDP включён в Outline (${udp_cnt} портов)"; } \
                 || D_OL_UDP="нет"
             _dg_green "Outline запущен (CPU=${D_OL_CPU} RAM=${D_OL_MEM})"
@@ -371,7 +382,7 @@ diag_run() {
         _dg_green "Entropy: ${D_ENTROPY} (${D_ENTROPY_SRC})"
     }
 
-    # --> 12-16: iptables, порты, диск, сервисы, обслуживание (как раньше) <--
+    # --> 16-21: ядро, iptables, порты, диск, сервисы, обслуживание <--
     _dg_iptables() {
         # - MSS clamping нужен только если есть AWG -
         if [[ ${#D_AWG_DATA[@]} -eq 0 ]]; then
@@ -591,12 +602,12 @@ diag_run() {
         local js; js=$(journalctl --disk-usage 2>/dev/null | grep -oP '[\d.]+\s*[KMGTPE]i?B?' | tail -1 || echo "?")
         [[ -n "$jl" ]] && { print_ok "Journald: ${js}/${jl}"; D_MAINT_TABLE+=("Journald|[OK] ${js} / ${jl}"); } \
             || { print_warn "Journald: без лимита"; _dg_yellow "Journald без лимита|Запусти Автообслуживание"; D_MAINT_TABLE+=("Journald|[!] Без лимита"); }
-        local cr; cr=$(crontab -l 2>/dev/null | grep -v "^#" | grep -c "reboot" | tr -d '[:space:]' || echo "0")
+        local cr; cr=$(crontab -l 2>/dev/null | grep -v "^#" | grep -c "reboot" | tr -d '[:space:]')
         [[ "${cr:-0}" -gt 0 ]] && { print_ok "Авто-reboot: ${cr}"; D_MAINT_TABLE+=("Авто-reboot|[OK] ${cr} задачи"); } \
             || { print_warn "Авто-reboot: нет"; _dg_yellow "Нет авто-reboot|Запусти Автообслуживание"; D_MAINT_TABLE+=("Авто-reboot|[!] Выключен"); }
-        local cd; cd=$(crontab -l 2>/dev/null | grep -v "^#" | grep -c "docker-cleanup" | tr -d '[:space:]' || echo "0")
+        local cd; cd=$(crontab -l 2>/dev/null | grep -v "^#" | grep -c "docker-cleanup" | tr -d '[:space:]')
         [[ "${cd:-0}" -gt 0 ]] && D_MAINT_TABLE+=("Docker cleanup|[OK] Активен") || D_MAINT_TABLE+=("Docker cleanup|[!] Выключен")
-        local upd; upd=$(apt-get upgrade --dry-run 2>/dev/null | grep -c "^Inst " | tr -d '[:space:]' || echo "0")
+        local upd; upd=$(apt-get upgrade --dry-run 2>/dev/null | grep -c "^Inst " | tr -d '[:space:]')
         [[ "${upd:-0}" -gt 0 ]] && { print_warn "Обновлений: ${upd}"; D_MAINT_TABLE+=("Обновлений|[!] ${upd}"); } \
             || { print_ok "Система актуальна"; D_MAINT_TABLE+=("Обновлений|[OK] Актуально"); }
         local ud; ud=$(awk '{print int($1/86400)}' /proc/uptime 2>/dev/null || echo "?")
@@ -710,6 +721,7 @@ diag_run() {
             _dg_red "mimic ${unit} не активен|systemctl start ${unit}"
             D_SVC_TABLE+=("mimic ${wan}|остановлен")
         fi
+        return 0
     }
 
     # --> ЗАПУСК <--
@@ -769,9 +781,7 @@ diag_run() {
     if [[ ${#_DG_GREEN[@]} -gt 0 ]]; then echo -e "${GREEN}${BOLD}ВСЁ ХОРОШО (${#_DG_GREEN[@]}):${NC}"
         for i in "${_DG_GREEN[@]}"; do echo -e "  ${GREEN}[OK]${NC} ${i%%|*}"; done; echo ""; fi
 
-    # ============================================================
-    # --> HTML ГЕНЕРАЦИЯ (ПОЛНАЯ, КАК В ОРИГИНАЛЕ) <--
-    # ============================================================
+    # --> HTML ГЕНЕРАЦИЯ <--
     cat > "$RPT_HTML" << 'CSS'
 <!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VPS Diag</title>
 <style>
@@ -818,8 +828,8 @@ CSS
     # - header -
     echo "<div class='header'><div><h1>[VPS] VPS Diag v${ELI_VERSION}</h1>"
     echo "<div style='color:var(--mut);font-size:13px;margin-top:4px'>AmneziaWG * Outline * 3X-UI * TeamSpeak * Mumble</div></div>"
-    echo "<div class='meta'><span><b style='color:var(--txt)'>${D_HOST}</b></span>"
-    echo "<span>$(date '+%d.%m.%Y %H:%M:%S UTC')</span><span>${D_OS}</span><span>Ядро: ${D_KERNEL}</span></div></div>"
+    echo "<div class='meta'><span><b style='color:var(--txt)'>$(_dg_esc "${D_HOST}")</b></span>"
+    echo "<span>$(date '+%d.%m.%Y %H:%M:%S UTC')</span><span>$(_dg_esc "${D_OS}")</span><span>Ядро: $(_dg_esc "${D_KERNEL}")</span></div></div>"
 
     # - светофор с подсказками -
     echo "<div class='traffic-light'>"
@@ -843,22 +853,22 @@ CSS
     # - карточки -
     echo "<div class='grid'>"
 
-    # Железо
+    # - Железо -
     echo "<div class='card'><div class='card-header'><span class='icon'>[HW]</span> Железо и система<div class='card-sub'>CPU, RAM, swap, ядро, uptime</div></div><div class='card-body'><table>"
     _hr "CPU" "${D_CPU}" "info"; _hr "vCPU" "${D_CORES}" "info"
     _hr "RAM" "${D_RAM} MB (свободно: ${D_RAMFREE} MB)" "$([ $D_RAM -ge 870 ] && echo ok || echo warn)"
     _hr "Swap" "${D_SWAP} MB (исп: ${D_SWAPUSED} MB)" "$([ $D_SWAP -gt 0 ] && echo ok || echo warn)"
     _hr "AES-NI" "${D_AESNI}" "$([ "$D_AESNI" = "есть" ] && echo ok || echo warn)"
-    _hr "Ядро" "${D_KERNEL}" "info"; _hr "OS" "${D_OS}" "info"; _hr "Uptime" "${D_UPTIME}" "info"
+    _hr "Ядро" "$(_dg_esc "${D_KERNEL}")" "info"; _hr "OS" "$(_dg_esc "${D_OS}")" "info"; _hr "Uptime" "$(_dg_esc "${D_UPTIME}")" "info"
     echo "</table></div></div>"
 
-    # CPU crypto
+    # - CPU crypto -
     echo "<div class='card'><div class='card-header'><span class='icon'>[CPU]</span> Производительность CPU<div class='card-sub'>Скорость шифрования, влияет на пропускную способность VPN</div></div><div class='card-body'><table>"
     _hr "AES-256-GCM (Outline)" "${D_AES} (~${D_AES_MBIT} Мбит/с)" "$([ "$D_AES" != "?" ] && echo ok || echo warn)"
     _hr "ChaCha20-Poly1305 (AWG)" "${D_CHA} (~${D_CHA_MBIT} Мбит/с)" "$([ "$D_CHA" != "?" ] && echo ok || echo warn)"
     echo "</table></div></div>"
 
-    # Канал с регионами
+    # - Канал с регионами -
     echo "<div class='card'><div class='card-header'><span class='icon'>[NET]</span> Скорость канала<div class='card-sub'>Загрузка до живых точек по регионам (СНГ, Азия, ЕС, США)</div></div><div class='card-body'><table>"
     for sr in "${D_SPEED_RESULTS[@]}"; do
         local sh="${sr%%|*}" sv="${sr##*|}"
@@ -876,7 +886,7 @@ CSS
     _hr "Лучший результат" "${D_BEST_SPEED} Мбит/с (${D_BEST_HOST})" "ok"
     echo "</table></div></div>"
 
-    # Латентность
+    # - Латентность -
     echo "<div class='card'><div class='card-header'><span class='icon'>[PING]</span> Латентность (10 пакетов)<div class='card-sub'>TeamSpeak: jitter &lt;5 мс, потери &lt;1%, avg &lt;50 мс</div></div><div class='card-body'><table class='ping-table'>"
     echo "<tr><th>Хост</th><th>avg</th><th>jitter</th><th>loss</th></tr>"
     for pr in "${D_PING_RESULTS[@]}"; do
@@ -886,13 +896,13 @@ CSS
     done
     echo "</table></div></div>"
 
-    # Безопасность
+    # - Безопасность -
     echo "<div class='card'><div class='card-header'><span class='icon'>[SEC]</span> Безопасность<div class='card-sub'>SSH атаки, fail2ban, TCP соединения</div></div><div class='card-body'><table>"
     _hr "SSH атак (24ч)" "${D_SSH_FAILS} (${D_SEC_LEVEL})" "$([ "$D_SEC_LEVEL" = "высокий" ] && echo err || echo info)"
     _hr "Fail2ban забанено" "${D_F2B_TOTAL}" "ok"
     echo "</table></div></div>"
 
-    # AWG интерфейсы
+    # - AWG интерфейсы -
     if [[ ${#D_AWG_DATA[@]} -gt 0 ]]; then
         echo "<div class='card'><div class='card-header'><span class='icon'>[AWG]</span> AmneziaWG<div class='card-sub'>Интерфейсы, MSS clamping, MTU</div></div><div class='card-body'>"
         for ae in "${D_AWG_DATA[@]}"; do
@@ -906,32 +916,32 @@ CSS
         echo "</div></div>"
     fi
 
-    # Outline
+    # - Outline -
     echo "<div class='card'><div class='card-header'><span class='icon'>[OTL]</span> Outline (Shadowsocks)<div class='card-sub'>Docker контейнер shadowbox</div></div><div class='card-body'><table>"
     _hr "Статус" "${D_OL_STATUS}" "$([ "$D_OL_STATUS" = "запущен" ] && echo ok || echo warn)"
     _hr "CPU" "${D_OL_CPU}" "info"; _hr "RAM" "${D_OL_MEM}" "info"
     _hr "UDP" "${D_OL_UDP}" "$([ "$D_OL_UDP" != "нет" ] && echo ok || echo info)"
     echo "</table></div></div>"
 
-    # 3X-UI
+    # - 3X-UI -
     echo "<div class='card'><div class='card-header'><span class='icon'>[HTML]</span> 3X-UI (VLESS/VMESS)<div class='card-sub'>Панель управления Xray прокси</div></div><div class='card-body'><table>"
     _hr "Статус" "${D_XUI_STATUS}" "$([ "$D_XUI_STATUS" = "активен" ] && echo ok || echo warn)"
     _hr "Версия 3X-UI" "${D_XUI_VER}" "info"; _hr "Версия Xray" "${D_XRAY_VER}" "info"
     echo "</table></div></div>"
 
-    # TeamSpeak
+    # - TeamSpeak -
     echo "<div class='card'><div class='card-header'><span class='icon'>[TS]</span> TeamSpeak<div class='card-sub'>Голосовой сервер</div></div><div class='card-body'><table>"
     _hr "Статус" "${D_TS_STATUS}" "$([ "$D_TS_STATUS" = "запущен" ] && echo ok || echo warn)"
     _hr "RAM" "${D_TS_MEM} MB" "info"
     echo "</table></div></div>"
 
-    # Unbound
+    # - Unbound -
     echo "<div class='card'><div class='card-header'><span class='icon'>[DNS]</span> Unbound DNS<div class='card-sub'>Рекурсивный резолвер для VPN туннелей</div></div><div class='card-body'><table>"
     _hr "Статус" "${D_UB_STATUS}" "$([ "$D_UB_STATUS" = "активен" ] && echo ok || echo warn)"
     _hr "Резолвинг" "${D_UB_RESOLVE}" "$(echo "$D_UB_RESOLVE" | grep -q "OK" && echo ok || echo warn)"
     echo "</table></div></div>"
 
-    # Ядро
+    # - Ядро -
     echo "<div class='card'><div class='card-header'><span class='icon'>[KERN]</span> Сетевые настройки ядра<div class='card-sub'>BBR, буферы, conntrack, file descriptors</div></div><div class='card-body'><table>"
     _hr "TCP Congestion" "${D_BBR}" "$([ "$D_BBR" = "bbr" ] && echo ok || echo warn)"
     _hr "Queue Discipline" "${D_QDISC}" "$([ "$D_QDISC" = "fq" ] && echo ok || echo warn)"
@@ -943,7 +953,7 @@ CSS
     _hr "Entropy" "${D_ENTROPY} (${D_ENTROPY_SRC})" "ok"
     echo "</table></div></div>"
 
-    # Сервисы
+    # - Сервисы -
     echo "<div class='card'><div class='card-header'><span class='icon'>[SVC]</span> Сервисы<div class='card-sub'>Статус всех системных сервисов</div></div><div class='card-body'><table>"
     for sv in "${D_SVC_TABLE[@]}"; do
         local sl="${sv%%|*}" ss="${sv##*|}" st="info"
@@ -954,7 +964,7 @@ CSS
     done
     echo "</table></div></div>"
 
-    # Диск
+    # - Диск -
     echo "<div class='card'><div class='card-header'><span class='icon'>[DISK]</span> Диск<div class='card-sub'>Занятое место и скорость записи</div></div><div class='card-body'><table>"
     _hr "Скорость записи" "${D_DISK_SPEED}" "ok"
     while IFS= read -r line; do
@@ -968,7 +978,7 @@ CSS
     done <<< "$(df -hT | grep -v 'tmpfs\|overlay\|udev')"
     echo "</table></div></div>"
 
-    # Прогноз
+    # - Прогноз -
     echo "<div class='card'><div class='card-header'><span class='icon'>[STAT]</span> Прогноз ёмкости (${D_CORES} vCPU * ${D_RAM} MB RAM)<div class='card-sub'>Ориентировочно при CPU ≤72% и RAM ≤80%</div></div><div class='card-body'>"
     echo "<div class='forecast'>"
     echo "<div class='forecast-item'><div class='num'>${AWG_MAX}</div><div class='lbl'>AWG клиентов<br><span style='font-size:11px;color:var(--mut)'>ChaCha20 * ~10 Мбит/с/кл</span></div></div>"
@@ -982,28 +992,28 @@ CSS
     echo "</div></div></div>"
     echo "</div>" # grid
 
-    # Порты с цветами
+    # - Порты с цветами -
     echo "<div class='card' style='margin-bottom:24px'><div class='card-header'><span class='icon'>[PORT]</span> Открытые порты<div class='card-sub'>Что слушает снаружи и зачем</div></div><div class='card-body'>"
     echo "<table class='ports-table'><tr><th>Порт</th><th>Протокол</th><th>Процесс</th><th>Назначение</th></tr>"
     for pe in "${D_PORT_TABLE[@]}"; do
         IFS='|' read -r pp ppro ppr ppurp <<< "$pe"
         local cls=""
         case "$ppurp" in AmneziaWG*) cls="port-awg" ;; Outline*) cls="port-outline" ;; TeamSpeak*|Mumble*) cls="port-ts" ;; SSH*) cls="port-ssh" ;; *3X-UI*|Xray*) cls="port-xui" ;; esac
-        echo "<tr><td class='${cls}'>${pp}</td><td>${ppro}</td><td>${ppr}</td><td class='${cls}'>${ppurp}</td></tr>"
+        echo "<tr><td class='${cls}'>$(_dg_esc "${pp}")</td><td>$(_dg_esc "${ppro}")</td><td>$(_dg_esc "${ppr}")</td><td class='${cls}'>$(_dg_esc "${ppurp}")</td></tr>"
     done
     echo "</table></div></div>"
 
-    # Обслуживание
+    # - Обслуживание -
     echo "<div class='card'><div class='card-header'><span class='icon'>[MAINT]</span> Обслуживание системы<div class='card-sub'>Cron, journald, logrotate, Docker cleanup</div></div><div class='card-body'><table>"
     for mt in "${D_MAINT_TABLE[@]}"; do
         local ml="${mt%%|*}" mv="${mt##*|}" t="info"
         [[ "$mv" == "[OK]"* ]] && t="ok"; [[ "$mv" == "[!]"* ]] && t="warn"
-        mv="${mv#[OK] }"; mv="${mv#[!] }"
+        mv="${mv#"[OK] "}"; mv="${mv#"[!] "}"
         _hr "$ml" "$mv" "$t"
     done
     echo "</table></div></div>"
 
-    # DNS
+    # - DNS -
     echo "<div class='grid'><div class='card'><div class='card-header'><span class='icon'>[DNS]</span> DNS резолвинг<div class='card-sub'>Проверка через 8.8.8.8 / 1.1.1.1 / 9.9.9.9</div></div><div class='card-body'><table>"
     for dr in "${D_DNS_RESULTS[@]}"; do
         IFS='|' read -r ns st res <<< "$dr"
@@ -1011,13 +1021,13 @@ CSS
     done
     echo "</table></div></div>"
 
-    # NTP
+    # - NTP -
     echo "<div class='card'><div class='card-header'><span class='icon'>[TIME]</span> Синхронизация времени<div class='card-sub'>NTP, критично для TLS и VPN</div></div><div class='card-body'><table>"
     _hr "NTP статус" "${D_NTP}" "$([ "$D_NTP" = "синхронизировано" ] && echo ok || echo warn)"
     echo "</table><div style='font-size:12px;color:var(--mut);margin-top:8px'>Несинхронизированное время ломает TLS и VPN-хендшейки</div></div></div></div>"
 
-    # Footer
-    echo "<div class='footer'>VPS Diag v${ELI_VERSION} &middot; ${D_HOST} &middot; $(date '+%d.%m.%Y %H:%M:%S UTC')</div></body></html>"
+    # - Footer -
+    echo "<div class='footer'>VPS Diag v${ELI_VERSION} &middot; $(_dg_esc "${D_HOST}") &middot; $(date '+%d.%m.%Y %H:%M:%S UTC')</div></body></html>"
     } >> "$RPT_HTML"
 
     echo -e "${BOLD}====================================================${NC}"
