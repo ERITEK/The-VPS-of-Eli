@@ -407,10 +407,6 @@ _zap_apply_with_rollback() {
     local iface="$1" nftf="$2" table
     table=$(_zap_table "$iface")
 
-    # - снапшот прежнего состояния таблицы, если была -
-    local had_table="no"
-    nft list table inet "$table" &>/dev/null && had_table="yes"
-
     # - атомарное применение -
     nft delete table inet "$table" 2>/dev/null
     if ! nft -f "$nftf" 2>/dev/null; then
@@ -420,7 +416,7 @@ _zap_apply_with_rollback() {
 
     # - страховочный таймер -> снос таблицы, если подтверждение не пришло -
     local rbunit="zeli-rollback-${iface}"
-    systemctl reset-failed "${rbunit}.timer" 2>/dev/null || true
+    systemctl reset-failed "${rbunit}.timer" "${rbunit}.service" 2>/dev/null || true
     systemd-run --unit="$rbunit" --on-active="${ZAP2_ROLLBACK_SEC}" \
         /usr/sbin/nft delete table inet "$table" >/dev/null 2>&1 || \
         systemd-run --unit="$rbunit" --on-active="${ZAP2_ROLLBACK_SEC}" \
@@ -441,8 +437,7 @@ _zap_apply_with_rollback() {
 
     if [[ "$confirm" == "yes" ]]; then
         systemctl stop "${rbunit}.timer" 2>/dev/null || true
-        # - переносим таблицу в постоянные правила -
-        cp "$nftf" "$(_zap_nftf "$iface")" 2>/dev/null || true
+        # - правила уже лежат в постоянном файле (_zap_nftf), фиксирование не требуется -
         print_ok "Правила зафиксированы для ${iface}"
         return 0
     fi
@@ -546,7 +541,9 @@ zapret_bind_iface() {
     if ! _zap_verify_active "$iface"; then
         systemctl disable --now "$unit" 2>/dev/null
         systemctl disable --now "zeli-nft-${iface}.service" 2>/dev/null
-        rm -f "$(_zap_conf "$iface")"
+        rm -f "$(_zap_conf "$iface")" "$(_zap_nftf "$iface")" "$(_zap_hosts "$iface")" 2>/dev/null
+        rm -f "/etc/systemd/system/zeli-nft-${iface}.service" 2>/dev/null
+        systemctl daemon-reload 2>/dev/null || true
         print_err "Привязка отменена -> инстанс nfqws2 не стартовал"
         return 1
     fi
@@ -555,7 +552,9 @@ zapret_bind_iface() {
     if ! _zap_apply_with_rollback "$iface" "$nftf"; then
         systemctl disable --now "$unit" 2>/dev/null
         systemctl disable --now "zeli-nft-${iface}.service" 2>/dev/null
-        rm -f "$(_zap_conf "$iface")"
+        rm -f "$(_zap_conf "$iface")" "$(_zap_nftf "$iface")" "$(_zap_hosts "$iface")" 2>/dev/null
+        rm -f "/etc/systemd/system/zeli-nft-${iface}.service" 2>/dev/null
+        systemctl daemon-reload 2>/dev/null || true
         return 1
     fi
 
@@ -567,9 +566,9 @@ zapret_bind_iface() {
 
 # --> ZAP2: ИЗВЛЕЧЕНИЕ ПОБЕДИВШЕЙ СТРАТЕГИИ ИЗ ЛОГА <--
 # - формат: строка-маркер "!!!!! AVAILABLE !!!!!", а НА СЛЕДУЮЩЕЙ строке -
-#   "- <test> ipv4 <domain> : nfqws2 <фрагмент>". Берём строку после маркера через -A1 -
+# - "- <test> ipv4 <domain> : nfqws2 <фрагмент>". Берём строку после маркера через -A1 -
 # - фрагмент уже содержит --payload/--lua-desync, но НЕ содержит --filter/--hostlist (их добавим сами) -
-# - матч СТРОГО по имени теста в начале строки
+# - матч СТРОГО по имени теста в начале строки -
 _zap_extract_frag() {
     local log="$1" test="$2"
     grep -A1 -F '!!!!! AVAILABLE !!!!!' "$log" 2>/dev/null \
@@ -580,16 +579,16 @@ _zap_extract_frag() {
 }
 
 # --> ZAP2: ПРОГОН BLOCKCHECK2 <--
-# - протоколы гоняем РАЗДЕЛЬНО: общий прогон тонет в сотнях tls12-победителей и умирал по
-#   таймауту ДО начала tls13, а реальные клиенты ходят по tls13 -
+# - протоколы гоняем РАЗДЕЛЬНО: общий прогон тонет в сотнях tls12-победителей и умирает -
+# - по таймауту ДО начала tls13, а реальные клиенты ходят по tls13 -
 # - BATCH=1 = официальный неинтерактивный режим. quick -> стоп на первом победителе -
 # --> ZAP2: УБОРКА АРТЕФАКТОВ BLOCKCHECK2 <--
-# - blockcheck2 именует свою nft-таблицу blockcheck<pid> (+ временную blockcheck<pid>_test),
-#   очередь qnum=pid%64536+1000, правила queue БЕЗ bypass. cleanup() апстрима на Linux пуст,
-#   снятие таблицы висит на нормальном pktws_ipt_unprepare. При убийстве по timeout, таблица
-#   остаётся и без слушателя дропает трафик к тестовым IP (в т.ч. дискорду) на хосте и форварде.
-#   Накапливаются от прогона к прогону = автоподбор ведёт себя по-разному, а трафик глохнет.
-#   Наши таблицы зовутся zeli_*, наш nfqws2 идёт с @<конфиг> без --qnum= в argv - их не трогаем. -
+# - blockcheck2 именует свою nft-таблицу blockcheck<pid> (+ временную blockcheck<pid>_test) -
+# - очередь qnum=pid%64536+1000, правила queue БЕЗ bypass, cleanup() апстрима на Linux пуст -
+# - снятие таблицы висит на нормальном pktws_ipt_unprepare. При убийстве по timeout таблица -
+# - остаётся и без слушателя дропает трафик к тестовым IP (в т.ч. дискорду) на хосте и форварде -
+# - накапливаются от прогона к прогону: автоподбор ведёт себя по-разному, а трафик глохнет -
+# - наши таблицы зовутся zeli_*, наш nfqws2 идёт с @<конфиг> без --qnum= в argv, их не трогаем -
 _zap_blockcheck_gc() {
     local t p cl
     for t in $(nft list tables inet 2>/dev/null | awk '$2=="inet" && $3 ~ /^blockcheck[0-9]+(_test)?$/ {print $3}'); do
@@ -639,8 +638,8 @@ zapret_autostrategy() {
         iface="${arr[$((sel-1))]}"
     fi
 
-    # - для ПРОГОНА берём только реально блокируемые домены: незаблокированный домен даёт
-    #   мгновенный AVAILABLE без обхода и просто съедает время. В hostlist они остаются -
+    # - для ПРОГОНА берём только реально блокируемые домены: незаблокированный домен даёт -
+    # - мгновенный AVAILABLE без обхода и просто съедает время. В hostlist они остаются -
     print_info "Прогон по: discord.com. Можно добавить свои домены."
     local extra=""
     ask_raw "$(printf '  \033[1mДоп. домены через пробел (Enter - пропустить):\033[0m ')" extra
@@ -892,12 +891,13 @@ zapret_autoupdate_toggle() {
         _zap_write_autoupdate_script
         _zap_autoupdate_cron "on"
         book_write ".zapret.autoupdate_enabled" "true" bool
-        print_ok "Автообновление стратегий включено (еженедельно, пн 4:00 UTC)"
+        print_ok "Автопроверка включена (еженедельно, пн 4:00 UTC): лог + алерт в Telegram, подбор стратегий вручную через меню"
     fi
 }
 
-# --> ZAP2: СКРИПТ АВТООБНОВЛЕНИЯ <--
-# - гоняет blockcheck, при смене стратегии пишет в книгу и шлёт алерт через существующий бот -
+# --> ZAP2: СКРИПТ АВТОПРОВЕРКИ <--
+# - еженедельный ход: лог и алерт в Telegram. Подбор стратегий этим скриптом
+# - НЕ выполняется, делается вручную через меню (blockcheck) -
 _zap_write_autoupdate_script() {
     local script="/usr/local/bin/eli-zapret-autoupdate.sh"
     cat > "$script" << 'EOF'
@@ -906,7 +906,7 @@ _zap_write_autoupdate_script() {
 TGBOT_ENV="/etc/vps-eli-stack/telegrambot.env"
 LOG="/var/log/eli-zapret-autoupdate.log"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) zapret autoupdate run" >> "$LOG"
-# - здесь запускается blockcheck и сравнение стратегии; при смене - алерт -
+# - место под будущий автоматический blockcheck; сейчас только лог и алерт -
 if [[ -f "$TGBOT_ENV" ]]; then
     . "$TGBOT_ENV"
     if [[ -n "${BOT_TOKEN:-}" && -n "${CHAT_ID:-}" ]]; then
@@ -999,7 +999,7 @@ zapret_manage() {
         echo -e "  ${GREEN}4)${NC} Telegram-звонки (экспериментально)"
         echo -e "  ${GREEN}5)${NC} Статус"
         echo -e "  ${GREEN}6)${NC} Тест"
-        echo -e "  ${GREEN}7)${NC} Автообновление стратегий"
+        echo -e "  ${GREEN}7)${NC} Автопроверка стратегий (лог + алерт)"
         echo -e "  ${GREEN}8)${NC} Отключить по интерфейсу"
         echo -e "  ${GREEN}9)${NC} Удалить полностью"
         echo ""
