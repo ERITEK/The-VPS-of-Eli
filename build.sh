@@ -40,12 +40,10 @@ echo ""
 
 # - начинаем с shebang -
 echo '#!/usr/bin/env bash' > "$OUT_FILE"
-echo '# =============================================================================' >> "$OUT_FILE"
-echo '# The VPS of Eli v5.780 dev' >> "$OUT_FILE"
+echo '# The VPS of Eli v6.618' >> "$OUT_FILE"
 echo '# Мега-менеджер VPS стека: VPN, связь, обслуживание' >> "$OUT_FILE"
-echo '# scrp by ERITEK & Loo1, Claude (Anthropic)' >> "$OUT_FILE"
+echo '# scrp by ERITEK & Loo1, GLM-5.3 (Zhipu AI)' >> "$OUT_FILE"
 echo "# Собран: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$OUT_FILE"
-echo '# =============================================================================' >> "$OUT_FILE"
 echo '' >> "$OUT_FILE"
 
 TOTAL_LINES=0
@@ -79,6 +77,7 @@ chmod +x "$OUT_FILE"
 
 echo ""
 echo "Готово: ${OUT_FILE}"
+
 echo "Строк: ${TOTAL_LINES}"
 echo "Модулей: ${#FILES[@]} (пропущено: ${MISSING})"
 echo "Размер: $(du -h "$OUT_FILE" | awk '{print $1}')"
