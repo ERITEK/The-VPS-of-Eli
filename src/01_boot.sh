@@ -22,8 +22,11 @@ boot_update_system() {
     fi
     print_ok "apt upgrade"
 
-    apt-get -y full-upgrade -qq || true
-    print_ok "apt full-upgrade"
+    if apt-get -y full-upgrade -qq; then
+        print_ok "apt full-upgrade"
+    else
+        print_warn "apt full-upgrade завершился с ошибками (продолжаем)"
+    fi
     return 0
 }
 
@@ -32,9 +35,9 @@ boot_update_system() {
 boot_install_packages() {
     print_section "Установка пакетов"
 
-    if ! apt-get -y install -qq ufw wget curl nano tcpdump btop ca-certificates gnupg2 \
-        lsof net-tools dnsutils htop iotop ncdu tmux unzip logrotate fail2ban \
-        python3 unbound jq cron dkms; then
+    if ! apt-get -y install -qq ufw wget curl nano tcpdump btop ca-certificates gnupg \
+        lsof net-tools iproute2 dnsutils htop iotop-c ncdu tmux unzip logrotate \
+        fail2ban python3 unbound jq cron dkms golang; then
         print_err "Установка пакетов не удалась"
         return 1
     fi
@@ -224,8 +227,12 @@ boot_setup_swap() {
             if ! grep -q "/swapfile" /etc/fstab; then
                 echo '/swapfile none swap sw 0 0' >> /etc/fstab
             fi
-            swapon /swapfile
-            print_ok "Swapfile активирован"
+            if swapon /swapfile 2>/dev/null; then
+                print_ok "Swapfile активирован"
+            else
+                print_err "Не удалось активировать /swapfile"
+                return 1
+            fi
         else
             print_warn "Swapfile ${swapfile_mb:-0} MB меньше ${swap_min_mb} MB, пересоздаём"
             _boot_create_swapfile "$swap_min_mb"
@@ -471,7 +478,9 @@ boot_setup_ufw() {
     fi
 
     # - предупреждение если UFW не активен -
-    if ! ufw status 2>/dev/null | grep -q "^Status: active"; then
+    local _ufw_state
+    _ufw_state=$(ufw status 2>/dev/null || true)
+    if [[ "$_ufw_state" != *"Status: active"* ]]; then
         echo ""
         print_warn "UFW сейчас НЕАКТИВЕН! Правила добавлены, но не применяются."
         print_info "После установки всех компонентов включи UFW:"
