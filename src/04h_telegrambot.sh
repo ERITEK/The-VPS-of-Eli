@@ -141,6 +141,10 @@ _chk "murmurd.service" "Mumble"
 _chk "unbound.service" "Unbound"
 _chk "fail2ban.service" "Fail2ban"
 
+for _u in $(systemctl list-units --all 'zapret2-eli@*' 'wgobfs-eli@*' 'mimic@*' --no-legend 2>/dev/null | awk '{print $1}'); do
+    _chk "$_u" "$_u"
+done
+
 if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker 2>/dev/null; then
     for cn in shadowbox watchtower; do
         if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -Fxq "$cn"; then
