@@ -70,7 +70,14 @@ backup_create() {
     xui_db=$(find /etc/x-ui /usr/local/x-ui -maxdepth 2 -name "x-ui.db" 2>/dev/null | head -1)
     if [[ -n "$xui_db" ]]; then
         mkdir -p "${tmpdir}/3xui-db"
+        # - согласованный снимок: sqlite на живом сервисе может уехать в wal -
+        local _xui_was_active=0
+        systemctl is-active --quiet x-ui 2>/dev/null && { _xui_was_active=1; systemctl stop x-ui 2>/dev/null || true; sleep 1; }
         _bkp_cp "$xui_db" "${tmpdir}/3xui-db/x-ui.db" "3X-UI база данных"
+        for _side in -wal -shm; do
+            [[ -f "${xui_db}${_side}" ]] && _bkp_cp "${xui_db}${_side}" "${tmpdir}/3xui-db/x-ui.db${_side}" "3X-UI база ${_side}" || true
+        done
+        [[ $_xui_was_active -eq 1 ]] && systemctl start x-ui 2>/dev/null || true
     fi
 
     # - Outline -
@@ -148,8 +155,8 @@ backup_create() {
 
     # - Системные конфиги -
     mkdir -p "${tmpdir}/system"
-    _bkp_add /etc/ssh/sshd_config "${tmpdir}/system/sshd_config" && print_ok "sshd_config"
-    _bkp_add /etc/sysctl.d/99-awg-forward.conf "${tmpdir}/system/99-awg-forward.conf" 2>/dev/null || true
+    _bkp_add /etc/ssh/sshd_config "${tmpdir}/system/sshd_config" && { print_ok "sshd_config"; collected=$(( collected + 1 )); }
+    _bkp_add /etc/sysctl.d/99-awg-forward.conf "${tmpdir}/system/99-awg-forward.conf" 2>/dev/null && { print_ok "99-awg-forward.conf"; collected=$(( collected + 1 )); } || true
 
     # - systemd units: нужны для мульти-инстансов Hysteria2 и для нативно-установленных -
     # - 3X-UI / TeamSpeak (на чистой машине после restore сервис не запустится без unit) -
@@ -190,7 +197,16 @@ backup_create() {
 
     # - Crontab -
     crontab -l > "${tmpdir}/system/crontab.txt" 2>/dev/null || true
-    [[ -s "${tmpdir}/system/crontab.txt" ]] && print_ok "Crontab"
+    [[ -s "${tmpdir}/system/crontab.txt" ]] && { print_ok "Crontab"; collected=$(( collected + 1 )); }
+
+    # - системный drop-in SSH и fail2ban -
+    # - конфиги обфускаторов и Telegram-бота -
+    _bkp_add /etc/vps-eli-stack/wgobfs "${tmpdir}/vps-stack/wgobfs" && { print_ok "wg-obfuscator конфиги"; collected=$(( collected + 1 )); }
+    _bkp_add /etc/vps-eli-stack/zapret2 "${tmpdir}/vps-stack/zapret2" && { print_ok "zapret2 конфиги"; collected=$(( collected + 1 )); }
+    _bkp_add /etc/mimic "${tmpdir}/vps-stack/mimic" && { print_ok "mimic конфиги"; collected=$(( collected + 1 )); }
+    _bkp_add /etc/vps-eli-stack/telegrambot.env "${tmpdir}/vps-stack/telegrambot.env" && { print_ok "Telegram бот env"; collected=$(( collected + 1 )); }
+    _bkp_add /etc/ssh/sshd_config.d/99-eli.conf "${tmpdir}/system/99-eli.conf" && { print_ok "SSH drop-in"; collected=$(( collected + 1 )); }
+    _bkp_add /etc/fail2ban/jail.d/ssh-hardening.local "${tmpdir}/system/ssh-hardening.local" && { print_ok "fail2ban jail"; collected=$(( collected + 1 )); }
 
     # - метаданные -
     # - debian_version и version_id для проверки совместимости при restore -
@@ -205,7 +221,7 @@ os="$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'"' -f2 || echo 'unkn
 kernel="$(uname -r)"
 debian_version="${_deb_ver}"
 version_id="${_version_id}"
-eli_version="5.780 dev"
+eli_version="${ELI_VERSION}"
 components=${collected}
 METAEOF
 
@@ -263,28 +279,6 @@ backup_list() {
     return 0
 }
 
-# --> ВОССТАНОВЛЕНИЕ: РАСКЛАДКА КОМПОНЕНТА <--
-# - останавливает сервис, копирует, запускает -
-# - mode: опциональный аргумент для явных прав (default: не трогать) -
-_bkp_restore_svc() {
-    local label="$1" svc="$2" src="$3" dst="$4" mode="${5:-}"
-    if [[ ! -e "$src" ]]; then return 1; fi
-    print_info "Восстанавливаю: ${label}"
-    if [[ -n "$svc" ]]; then
-        systemctl stop "$svc" 2>/dev/null || true
-    fi
-    mkdir -p "$(dirname "$dst")"
-    cp -a "$src" "$dst" 2>/dev/null || { print_warn "Не удалось скопировать ${label}"; return 1; }
-    # - не меняем права если не указан mode (cp -a сохранит исходные из архива) -
-    if [[ -n "$mode" ]]; then
-        chmod "$mode" "$dst" 2>/dev/null || true
-    fi
-    if [[ -n "$svc" ]]; then
-        systemctl start "$svc" 2>/dev/null || true
-    fi
-    print_ok "${label}"
-    return 0
-}
 
 # --> ВОССТАНОВЛЕНИЕ <--
 backup_restore() {
@@ -404,7 +398,8 @@ backup_restore() {
             iface=$(basename "$unit" | sed 's/^awg-quick@//;s/\.service$//')
             systemctl stop "awg-quick@${iface}" 2>/dev/null || true
         done
-        cp -a "${root}/awg-setup" /etc/awg-setup 2>/dev/null || true
+        mkdir -p /etc/awg-setup
+        cp -a "${root}/awg-setup/." /etc/awg-setup/ 2>/dev/null || true
         chmod 700 /etc/awg-setup
         find /etc/awg-setup -type f -exec chmod 600 {} \;
         print_ok "AWG setup (env, ключи, клиенты)"
@@ -427,7 +422,7 @@ backup_restore() {
 
     # - 3X-UI -
     if [[ -d "${root}/3xui-env" ]]; then
-        if cp -a "${root}/3xui-env" /etc/3xui 2>/dev/null; then
+        if mkdir -p /etc/3xui && cp -a "${root}/3xui-env/." /etc/3xui/ 2>/dev/null; then
             chmod 700 /etc/3xui; find /etc/3xui -type f -exec chmod 600 {} \;
             print_ok "3X-UI env"
             restored=$(( restored + 1 ))
@@ -463,7 +458,7 @@ backup_restore() {
 
     # - Outline -
     if [[ -d "${root}/outline" ]]; then
-        if cp -a "${root}/outline" /etc/outline 2>/dev/null; then
+        if mkdir -p /etc/outline && cp -a "${root}/outline/." /etc/outline/ 2>/dev/null; then
             chmod 700 /etc/outline; find /etc/outline -type f -exec chmod 600 {} \;
             print_ok "Outline"
             restored=$(( restored + 1 ))
@@ -474,13 +469,55 @@ backup_restore() {
 
     # - TeamSpeak -
     if [[ -d "${root}/teamspeak-env" ]]; then
-        if cp -a "${root}/teamspeak-env" /etc/teamspeak 2>/dev/null; then
+        if mkdir -p /etc/teamspeak && cp -a "${root}/teamspeak-env/." /etc/teamspeak/ 2>/dev/null; then
             chmod 700 /etc/teamspeak; find /etc/teamspeak -type f -exec chmod 600 {} \;
             print_ok "TeamSpeak env"
             restored=$(( restored + 1 ))
         else
             print_err "TeamSpeak env: cp не выполнился"
         fi
+    fi
+
+    # - mimic: конфиги живут в /etc/mimic, отдельная ветка до bulk-копии стека -
+    if [[ -d "${root}/vps-stack/mimic" ]]; then
+        if mkdir -p /etc/mimic && cp -a "${root}/vps-stack/mimic/." /etc/mimic/ 2>/dev/null; then
+            chmod 755 /etc/mimic 2>/dev/null || true
+            print_ok "mimic конфиги"
+            restored=$(( restored + 1 ))
+        else
+            print_err "mimic конфиги: cp не выполнился"
+        fi
+    fi
+
+    # - конфиги обходов и Telegram-бота -
+    if [[ -d "${root}/vps-stack" ]]; then
+        mkdir -p /etc/vps-eli-stack
+        local _vs_entry _vs_copied=0
+        for _vs_entry in "${root}/vps-stack"/*; do
+            [[ -e "$_vs_entry" ]] || continue
+            [[ "$(basename "$_vs_entry")" == "mimic" ]] && continue
+            cp -a "$_vs_entry" /etc/vps-eli-stack/ 2>/dev/null || true
+            _vs_copied=$(( _vs_copied + 1 ))
+        done
+        if [[ $_vs_copied -gt 0 ]]; then
+            chmod 700 /etc/vps-eli-stack 2>/dev/null || true
+            find /etc/vps-eli-stack -type f -exec chmod 600 {} \; 2>/dev/null
+            print_ok "wg-obfuscator / zapret2 / Telegram env"
+            restored=$(( restored + 1 ))
+        fi
+    fi
+    if [[ -f "${root}/system/99-eli.conf" ]]; then
+        mkdir -p /etc/ssh/sshd_config.d
+        cp -a "${root}/system/99-eli.conf" /etc/ssh/sshd_config.d/99-eli.conf 2>/dev/null || true
+        print_ok "SSH drop-in"
+        restored=$(( restored + 1 ))
+    fi
+    if [[ -f "${root}/system/ssh-hardening.local" ]]; then
+        mkdir -p /etc/fail2ban/jail.d
+        cp -a "${root}/system/ssh-hardening.local" /etc/fail2ban/jail.d/ssh-hardening.local 2>/dev/null || true
+        systemctl restart fail2ban 2>/dev/null || true
+        print_ok "fail2ban jail"
+        restored=$(( restored + 1 ))
     fi
     if [[ -d "${root}/teamspeak-db" ]]; then
         systemctl stop teamspeak 2>/dev/null || true
