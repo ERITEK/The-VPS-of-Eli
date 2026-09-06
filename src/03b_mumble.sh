@@ -2,6 +2,10 @@
 # - open source голосовой сервер, пакет mumble-server (murmurd) -
 
 MBL_CONF="/etc/mumble-server.ini"
+# - Debian 13 (trixie): конфиг в /etc/mumble/, серверный бинарь mumble-server вместо murmurd -
+[[ -f "$MBL_CONF" ]] || [[ ! -f /etc/mumble/mumble-server.ini ]] || MBL_CONF="/etc/mumble/mumble-server.ini"
+MBL_SUPW_BIN="murmurd"
+command -v murmurd >/dev/null 2>&1 || MBL_SUPW_BIN="mumble-server"
 MBL_SERVICE="mumble-server"
 MBL_DB="/var/lib/mumble-server/mumble-server.sqlite"
 MBL_BACKUP_DIR="/etc/mumble-backups"
@@ -76,6 +80,8 @@ mbl_install() {
         print_ok "Конфиг настроен: ${MBL_CONF}"
     else
         print_warn "Конфиг не найден: ${MBL_CONF}"
+        print_info "Сервис возьмёт пакетный дефолт, порт в книге проставим 64738"
+        port=64738
     fi
 
     # - порядок: первый старт для инициализации БД -> stop -> supw -> start -
@@ -105,12 +111,12 @@ mbl_install() {
         # - останавливаем сервис: murmurd -supw требует эксклюзивный доступ к БД -
         systemctl stop "$MBL_SERVICE" 2>/dev/null || true
         sleep 1
-        if murmurd -ini "$MBL_CONF" -supw "$su_pass" 2>/dev/null; then
+        if "$MBL_SUPW_BIN" -ini "$MBL_CONF" -supw "$su_pass" 2>/dev/null; then
             print_ok "SuperUser пароль задан"
             book_write ".mumble.superuser_pass" "$su_pass"
             su_set="true"
         else
-            print_warn "Не удалось задать SuperUser пароль через murmurd"
+            print_warn "Не удалось задать SuperUser пароль через ${MBL_SUPW_BIN}"
         fi
     fi
 
@@ -148,7 +154,7 @@ mbl_install() {
     if [[ "$su_set" == "true" ]]; then
         echo -e "  ${BOLD}SuperUser:${NC}   пароль задан (логин: SuperUser)"
     else
-        echo -e "  ${BOLD}SuperUser:${NC}   ${YELLOW}НЕ задан${NC} (логин: SuperUser, задай вручную: murmurd -ini ${MBL_CONF} -supw)"
+        echo -e "  ${BOLD}SuperUser:${NC}   ${YELLOW}НЕ задан${NC} (логин: SuperUser, задай вручную: ${MBL_SUPW_BIN} -ini ${MBL_CONF} -supw)"
     fi
     echo ""
     return 0
@@ -208,7 +214,7 @@ mbl_backup() {
 
 mbl_update() {
     print_section "Обновление Mumble"
-    if ! dpkg -l | grep -q "mumble-server"; then
+    if ! dpkg -l mumble-server 2>/dev/null | grep -q "^ii"; then
         print_err "Mumble не установлен"
         return 0
     fi
