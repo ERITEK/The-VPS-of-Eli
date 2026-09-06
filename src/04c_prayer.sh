@@ -27,6 +27,13 @@ _pr_find_file() {
     echo ""
 }
 
+# - значение для env-файла в одинарных кавычках: безопасно для любого символа пароля -
+# - хитрое место: кавычка в значении уходит в env как кавычка-бэкслеш-кавычка-кавычка -
+_pr_env_sq() {
+    local v="${1//\'/"'\''"}"
+    printf '%s' "$v"
+}
+
 prayer_run() {
     eli_header
     eli_banner "Prayer of Eli" \
@@ -40,8 +47,8 @@ prayer_run() {
     Если сменился IP сервера или ядро - обновит книгу.
     Если сервис упал - покажет предупреждение.
 
-  Безопасен: не удаляет данные, не перезапускает сервисы.
-    Только читает, сравнивает, дописывает и сообщает."
+  Аккуратен: чинит окружение по книге, но удаляет осиротевшие записи
+  книги и пересобирает конфиги mimic. Показывает каждое действие."
 
     _PR_FIXED=(); _PR_UPDATED=(); _PR_WARN=(); _PR_FAILED=()
 
@@ -108,7 +115,9 @@ prayer_run() {
 
     if command -v ufw &>/dev/null; then
         local ufw_st="false"
-        if ufw status 2>/dev/null | grep -q "^Status: active"; then
+        local _ufw_out
+        _ufw_out=$(ufw status 2>/dev/null || true)
+        if [[ "$_ufw_out" == *"Status: active"* ]]; then
             ufw_st="true"
         fi
         book_write ".ufw.active" "$ufw_st" bool
@@ -135,7 +144,7 @@ prayer_run() {
         fi
 
         # - проверка что модуль ядра загружен (может слететь после обновления ядра) -
-        if lsmod 2>/dev/null | grep -q "^amneziawg"; then
+        if [[ -d /sys/module/amneziawg ]]; then
             _pr_found "Модуль amneziawg: загружен"
         else
             _pr_warn "Модуль amneziawg: НЕ загружен"
@@ -162,6 +171,8 @@ prayer_run() {
         local _saved_nullglob; _saved_nullglob=$(shopt -p nullglob)
         shopt -s nullglob
         for env_f in "${AWG_SETUP_DIR}"/iface_*.env; do
+            # - чистим необязательные поля: у младших версий интерфейса их в файле нет -
+            _awg_unset_env_fields
             # shellcheck disable=SC1090
             source "$env_f" 2>/dev/null || continue
             local iface="${IFACE_NAME:-}"
@@ -194,6 +205,7 @@ prayer_run() {
             local _p_jmax="${JMAX:-1000}"; [[ "$_p_jmax" =~ ^[0-9]+$ ]] || _p_jmax=1000
             local _p_s1="${S1:-0}";   [[ "$_p_s1"   =~ ^[0-9]+$ ]] || _p_s1=0
             local _p_s2="${S2:-0}";   [[ "$_p_s2"   =~ ^[0-9]+$ ]] || _p_s2=0
+            # - схема едина с awg_create_iface: базовые поля + поля awg 3.0 -
             iobj=$(jq -n --arg desc "${IFACE_DESC:-}" --arg ep "${SERVER_ENDPOINT_IP:-}" \
                 --argjson port "$_p_port" --arg tip "${SERVER_TUNNEL_IP:-}" \
                 --arg snet "${TUNNEL_SUBNET:-}" --arg dns "${CLIENT_DNS:-}" \
@@ -205,13 +217,25 @@ prayer_run() {
                 --arg h1 "${H1:-1}" --arg h2 "${H2:-2}" --arg h3 "${H3:-3}" --arg h4 "${H4:-4}" \
                 --arg i1 "${I1:-}" --arg i2 "${I2:-}" --arg i3 "${I3:-}" \
                 --arg i4 "${I4:-}" --arg i5 "${I5:-}" \
+                --arg hpr_key "${HEADER_PROTECTION_KEY:-}" --arg content_padding "${CONTENT_PADDING_ADDITION:-}" \
+                --arg random_trailers "${RANDOM_TRAILERS:-}" --arg disable_cookies "${DISABLE_COOKIES:-}" \
+                --arg adv_security "${ADVANCED_SECURITY:-}" --arg persistent_keepalive "${PERSISTENT_KEEPALIVE:-}" \
+                --arg rekey_after_time "${REKEY_AFTER_TIME:-}" --arg rekey_timeout "${REKEY_TIMEOUT:-}" \
+                --arg reject_after_time "${REJECT_AFTER_TIME:-}" --arg keepalive_timeout "${KEEPALIVE_TIMEOUT:-}" \
+                --arg max_handshake_attempts "${MAX_HANDSHAKE_ATTEMPTS:-}" \
                 '{"desc":$desc,"endpoint_ip":$ep,"port":$port,"server_tunnel_ip":$tip,
                   "tunnel_subnet":$snet,"client_dns":$dns,"client_allowed_ips":$allowed,
                   "awg_version":$awg_ver,
                   "obfuscation":{"jc":$jc,"jmin":$jmin,"jmax":$jmax,
                     "s1":$s1,"s2":$s2,"s3":$s3,"s4":$s4,
                     "h1":$h1,"h2":$h2,"h3":$h3,"h4":$h4,
-                    "i1":$i1,"i2":$i2,"i3":$i3,"i4":$i4,"i5":$i5}}' 2>/dev/null || echo "{}")
+                    "i1":$i1,"i2":$i2,"i3":$i3,"i4":$i4,"i5":$i5,
+                    "hpr_key":$hpr_key,"content_padding":$content_padding,
+                    "random_trailers":$random_trailers,"disable_cookies":$disable_cookies,
+                    "adv_security":$adv_security,"persistent_keepalive":$persistent_keepalive,
+                    "rekey_after_time":$rekey_after_time,"rekey_timeout":$rekey_timeout,
+                    "reject_after_time":$reject_after_time,"keepalive_timeout":$keepalive_timeout,
+                    "max_handshake_attempts":$max_handshake_attempts}}' 2>/dev/null || echo "{}")
             book_write_obj ".awg.interfaces.${iface}" "$iobj"
         done
         # - восстанавливаем исходное состояние nullglob -
@@ -291,13 +315,20 @@ EOF
             if [[ -n "$bp" && "$bp" != "0" ]]; then
                 mkdir -p /etc/3xui
                 chmod 700 /etc/3xui
+                # - значения из книги пишем через одинарные кавычки: символы пароля не искажаются -
+                local e_ip e_path e_user e_pass e_port
+                e_ip=$(_pr_env_sq "$(book_read '.3xui.server_ip')")
+                e_path=$(_pr_env_sq "$(book_read '.3xui.panel_path')")
+                e_user=$(_pr_env_sq "$(book_read '.3xui.panel_user')")
+                e_pass=$(_pr_env_sq "$(book_read '.3xui.panel_pass')")
+                e_port=$(_pr_env_sq "$(book_read '.3xui.panel_port')")
                 cat > "$xe" << EOF
-SERVER_IP="$(book_read '.3xui.server_ip')"
-PANEL_PORT="$(book_read '.3xui.panel_port')"
-PANEL_PATH="$(book_read '.3xui.panel_path')"
-PANEL_USER="$(book_read '.3xui.panel_user')"
-PANEL_PASS="$(book_read '.3xui.panel_pass')"
-VERSION="${rv}"
+SERVER_IP='${e_ip}'
+PANEL_PORT='${e_port}'
+PANEL_PATH='${e_path}'
+PANEL_USER='${e_user}'
+PANEL_PASS='${e_pass}'
+VERSION='$(_pr_env_sq "${rv}")'
 EOF
                 chmod 600 "$xe"
                 _pr_fixed "3xui.env восстановлен"
@@ -341,16 +372,21 @@ EOF
             if [[ -n "$tbi" ]]; then
                 mkdir -p /etc/teamspeak
                 chmod 700 /etc/teamspeak
-                cat > "$te" << EOF
-SERVER_IP="$(book_read '.teamspeak.server_ip')"
-TS_VOICE_PORT="$(book_read '.teamspeak.voice_port')"
-TS_FT_PORT="$(book_read '.teamspeak.ft_port')"
-TS_PRIV_KEY="$(book_read '.teamspeak.priv_key')"
-TS_VERSION="$(book_read '.teamspeak.version')"
-TS_DB_PATH="${tdb}"
-EOF
+                # - TS_DB_PATH пишем только когда БД найдена: пустой путь в env хуже отсутствия строки -
+                {
+                    echo "SERVER_IP=\"$(book_read '.teamspeak.server_ip')\""
+                    echo "TS_VOICE_PORT=\"$(book_read '.teamspeak.voice_port')\""
+                    echo "TS_FT_PORT=\"$(book_read '.teamspeak.ft_port')\""
+                    echo "TS_PRIV_KEY=\"$(book_read '.teamspeak.priv_key')\""
+                    echo "TS_VERSION=\"$(book_read '.teamspeak.version')\""
+                    [[ -n "$tdb" ]] && echo "TS_DB_PATH=\"${tdb}\""
+                } > "$te"
                 chmod 600 "$te"
-                _pr_fixed "teamspeak.env восстановлен"
+                if [[ -n "$tdb" ]]; then
+                    _pr_fixed "teamspeak.env восстановлен"
+                else
+                    _pr_fixed "teamspeak.env восстановлен, TS_DB_PATH не записан: БД не найдена"
+                fi
             else
                 _pr_failed "Нет данных для восстановления"
             fi
@@ -381,6 +417,7 @@ EOF
             fi
         else
             _pr_warn "Unbound установлен но не запущен"
+            book_write ".unbound.installed" "false" bool
         fi
     else
         _pr_check "Unbound не установлен"
@@ -676,8 +713,9 @@ EOF
         [[ -n "$mim_ver" && "$(book_read '.mimic.version')" != "$mim_ver" ]] && { book_write ".mimic.version" "$mim_ver"; _pr_updated "book: .mimic.version=${mim_ver}"; }
 
         # - без модуля ядра контрольные суммы не чинятся: трафик пойдёт мусором -
-        if ! lsmod 2>/dev/null | grep -q '^mimic[[:space:]]'; then
-            if modprobe mimic 2>/dev/null && lsmod 2>/dev/null | grep -q '^mimic[[:space:]]'; then
+        if ! [[ -d /sys/module/mimic ]]; then
+            modprobe mimic 2>/dev/null || true
+            if [[ -d /sys/module/mimic ]]; then
                 _pr_fixed "Модуль mimic: загружен через modprobe"
             else
                 _pr_warn "Модуль mimic: НЕ загружен, проверь dkms status mimic"
