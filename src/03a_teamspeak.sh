@@ -19,9 +19,6 @@ ts_installed() {
     [[ -f "$TS_BIN" ]]
 }
 
-ts_running() {
-    systemctl is-active --quiet teamspeak 2>/dev/null
-}
 
 ts_find_db() {
     # - Ищет *.sqlitedb в директории установки, обновляет переменную и env -
@@ -418,7 +415,6 @@ ts_update() {
         systemctl start teamspeak 2>/dev/null || true
         return 1
     fi
-    rm -rf "$tmpdir"
     chmod +x "$TS_BIN"; chown -R "${TS_USER}:${TS_USER}" "$TS_DIR"
     systemctl start teamspeak; sleep 3
     if ! systemctl is-active --quiet teamspeak; then
