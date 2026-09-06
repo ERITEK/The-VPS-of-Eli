@@ -913,7 +913,7 @@ wgo_test() {
 }
 
 # --> WGO: ОБНОВЛЕНИЕ ДВИЖКА <--
-# - ручное: cron-обновление вынесено до общей headless-ветки the_vps_of_eli.sh -
+    # - ручное: cron-обновление настраивается в этом же меню (пункт автообновления) -
 wgo_update() {
     _wgo_installed || { print_err "wg-obfuscator не установлен"; return 1; }
     print_section "Обновление wg-obfuscator"
