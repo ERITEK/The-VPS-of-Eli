@@ -7,7 +7,10 @@ _ufw_guard() {
 }
 
 ufw_active() {
-    ufw status 2>/dev/null | grep -q "^Status: active"
+    # - снимок вывода вместо grep -q: длинный список правил + pipefail давал SIGPIPE 141 -
+    local st
+    st=$(ufw status 2>/dev/null || true)
+    [[ "$st" == *"Status: active"* ]]
 }
 
 # - проверка наличия правила для порта/протокола, работает и при неактивном UFW -
