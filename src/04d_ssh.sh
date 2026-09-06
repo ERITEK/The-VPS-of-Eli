@@ -84,9 +84,10 @@ ssh_change_port() {
         sed -i "/^[[:space:]]*Port[[:space:]]/Id" /etc/ssh/sshd_config.d/99-eli.conf 2>/dev/null
         return 1
     fi
+    # - новое правило добавляем сразу, старое удаляем ТОЛЬКО после -
+    # - подтверждения, что sshd реально переехал, иначе риск lockout -
     if command -v ufw &>/dev/null; then
         ufw allow "${new_port}/tcp" comment "SSH" 2>/dev/null || true
-        ufw delete allow "${current_port}/tcp" 2>/dev/null || true
     fi
     ssh_restart
     sleep 1
@@ -96,9 +97,20 @@ ssh_change_port() {
     eff_port=$(ssh_get_port)
     if [[ "$eff_port" != "$new_port" ]]; then
         print_err "Порт не применился: эффективный ${eff_port}, ожидался ${new_port}"
+        print_warn "Старое UFW-правило сохранено, доступ не потерян"
         return 1
     fi
+    if command -v ufw &>/dev/null; then
+        ufw delete allow "${current_port}/tcp" 2>/dev/null || true
+    fi
     print_ok "SSH порт: ${new_port}"
+    # - fail2ban джейл следит за актуальным портом -
+    local _jail="/etc/fail2ban/jail.d/ssh-hardening.local"
+    if [[ -f "$_jail" ]]; then
+        sed -i "s/^port[[:space:]]*=.*/port = ${new_port}/" "$_jail"
+        systemctl restart fail2ban 2>/dev/null || true
+        print_ok "fail2ban jail: порт ${new_port}"
+    fi
     book_write ".system.ssh_port" "$new_port" number
     print_warn "Переподключайся: ssh -p ${new_port} root@IP"
     return 0
