@@ -17,7 +17,7 @@ menu_vpn() {
     Поддерживает протоколы VLESS, VMess, Trojan, Shadowsocks.
     Трафик маскируется под обычные HTTPS-сайты.
 
-  Outline - простейший VPN от Google Jigsaw на базе Shadowsocks.
+  Outline - простейший VPN на базе Shadowsocks (проект Outline Foundation).
     Раздаёшь ключ другу - он вставляет его в приложение и всё работает.
 
   Прокси - отдельные инструменты для мессенджеров:
@@ -253,7 +253,7 @@ menu_otl() {
     while true; do
         eli_header
         eli_banner "Outline" \
-            "Простейший VPN на базе Shadowsocks от Google Jigsaw.
+            "Простейший VPN на базе Shadowsocks (проект Outline Foundation).
 
   Что делает: создаёт зашифрованный туннель. Работает по принципу ключей -
     ты генерируешь ключ, отправляешь его другу, он вставляет в приложение
@@ -768,7 +768,8 @@ menu_ufw() {
 
         local ufw_state=""
         if command -v ufw &>/dev/null; then
-            if ufw status 2>/dev/null | grep -q "^Status: active"; then
+            ufw_state=$(ufw status 2>/dev/null || true)
+            if [[ "$ufw_state" == *"Status: active"* ]]; then
                 ufw_state="${GREEN}(*)${NC} активен"
             else
                 ufw_state="${RED}( )${NC} неактивен"
