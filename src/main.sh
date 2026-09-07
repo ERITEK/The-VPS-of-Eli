@@ -876,6 +876,7 @@ awg_manage() {
         echo -e "  ${GREEN}8)${NC} Показать конфиг клиента"
         echo -e "  ${GREEN}9)${NC} Редактировать клиента"
         echo -e "  ${GREEN}10)${NC} Удалить клиента"
+        echo -e "  ${GREEN}11)${NC} Сменить порт интерфейса"
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
@@ -892,8 +893,9 @@ awg_manage() {
             8) awg_show_client    || print_warn "Ошибка при показе конфига" ;;
             9) awg_edit_client    || print_warn "Ошибка при редактировании клиента" ;;
             10) awg_delete_client || print_warn "Ошибка при удалении клиента" ;;
+            11) awg_change_port   || print_warn "Ошибка при смене порта" ;;
             0) return 0 ;;
-            *) print_warn "Введите число от 0 до 10" ;;
+            *) print_warn "Введите число от 0 до 11" ;;
         esac
 
         eli_pause
