@@ -529,12 +529,13 @@ boot_update_system() {
 
 # --> BOOT: УСТАНОВКА БАЗОВЫХ ПАКЕТОВ <--
 # - утилиты, jq (для book), dkms + headers (для AWG), unbound (настраивается позже) -
+# - сетевая диагностика: tcpdump, mtr, iperf3, vnstat - гистория трафика по интерфейсам -
 boot_install_packages() {
     print_section "Установка пакетов"
 
     if ! apt-get -y install -qq ufw wget curl nano tcpdump btop ca-certificates gnupg \
         lsof net-tools iproute2 dnsutils htop iotop-c ncdu tmux unzip logrotate \
-        fail2ban python3 unbound jq cron dkms golang; then
+        fail2ban python3 unbound jq cron dkms iperf3 mtr-tiny vnstat qrencode; then
         print_err "Установка пакетов не удалась"
         return 1
     fi
@@ -2509,18 +2510,13 @@ _awg_client_header_comment() {
 }
 
 # --> AWG: QR-КОД КЛИЕНТСКОГО КОНФИГА <--
-# - показывает QR в терминале, ставит qrencode если нет -
+# - показывает QR в терминале; qrencode ставится boot-модулем, -
+# - здесь тихий фолбэк для серверов, где boot пропущен -
 _awg_show_qr() {
     local conf_file="$1"
     [[ ! -f "$conf_file" ]] && return 1
     if ! command -v qrencode &>/dev/null; then
-        local do_install=""
-        ask_yn "Установить qrencode для QR-кодов?" "y" do_install
-        if [[ "$do_install" == "yes" ]]; then
-            apt-get install -y -qq qrencode 2>/dev/null || { print_warn "Не удалось установить qrencode"; return 1; }
-        else
-            return 1
-        fi
+        apt-get install -y -qq qrencode 2>/dev/null || { print_warn "qrencode недоступен, QR не показать"; return 1; }
     fi
     echo ""
     qrencode -t ansiutf8 < "$conf_file"
