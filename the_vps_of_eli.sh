@@ -2,7 +2,7 @@
 # The VPS of Eli v6.618
 # Мега-менеджер VPS стека: VPN, связь, обслуживание
 # scrp by ERITEK & Loo1, GLM-5.3 (Zhipu AI)
-# Собран: 2026-09-06 rls
+# Собран: 2026-09-07 rls
 
 
 # === 00_header.sh ===
@@ -1135,6 +1135,8 @@ AWG_SETUP_DIR="/etc/awg-setup"
 AWG_CONF_DIR="/etc/amnezia/amneziawg"
 AWG_ACTIVE_IFACE=""
 AWG_VER=""
+# - TTL выгоревшего порта в burned_ports (сек): 30 дней, потом порт снова в пуле -
+AWG_BURNED_TTL="2592000"
 
 # --> AWG: ВЫБОР ВЕРСИИ ПРОТОКОЛА <--
 # - 1.0 (H+S1/S2) vs 1.5 (+ I1-I5) vs 2.0 (+ ranged H, S3/S4) vs 3.0 (+ HPK, CPA) vs WG -
@@ -1545,24 +1547,59 @@ _awg_choose_stun_variant() {
     done
 }
 
-# - дефолтный UDP-порт нового туннеля: 1618 если свободен, -
-# - иначе случайный свободный вне портов существующих интерфейсов -
+# - порт в burned-списке свежее TTL? 0 = да (не предлагать) -
+_awg_port_in_burned() {
+    local p="$1"
+    local list="${AWG_SETUP_DIR}/burned_ports"
+    [[ -f "$list" ]] || return 1
+    local now cutoff bp ts
+    now=$(date +%s)
+    cutoff=$(( now - AWG_BURNED_TTL ))
+    while read -r bp ts; do
+        [[ "$bp" == "$p" && "$ts" -gt "$cutoff" ]] && return 0
+    done < "$list"
+    return 1
+}
+
+# - порт занят сокетом системы или другим интерфейсом? 0 = да -
+_awg_port_in_use() {
+    local p="$1" f
+    ss -H -uln 2>/dev/null | grep -Eq "[:.]${p}[[:space:]]" && return 0
+    for f in "${AWG_SETUP_DIR}"/iface_*.env; do
+        [[ -f "$f" ]] || continue
+        [[ "$(grep '^SERVER_PORT=' "$f" | cut -d'"' -f2)" == "$p" ]] && return 0
+    done
+    return 1
+}
+
+# - сменить ListenPort в server conf с проверкой, что замена произошла: -
+# - sed молча возвращает 0 и при отсутствии совпадения, поэтому контролируем grep -
+_awg_conf_set_port() {
+    local file="$1" old_port="$2" new_port="$3"
+    sed -i "s/^ListenPort = ${old_port}\$/ListenPort = ${new_port}/" "$file"
+    grep -q "^ListenPort = ${new_port}\$" "$file"
+}
+
+# - случайный свободный UDP-порт: вне портов существующих интерфейсов, -
+# - вне burned-списка (порт помечается при ротации и остывает TTL дней) -
+# - типичные порты VPN-скриптов (1618 и прочие ниже 20000) не предлагаются -
+# - намеренно: у дефолтных портов установщиков плохая репутация у DPI-эвристик -
 _awg_default_port() {
-    local p="1618"
-    if ss -H -uln 2>/dev/null | grep -Eq "[:.]${p}[[:space:]]"; then
-        local f
-        while true; do
-            p=$(rand_port 20000 60000)
-            local clash=""
-            for f in "${AWG_SETUP_DIR}"/iface_*.env; do
-                [[ -f "$f" ]] || continue
-                [[ "$(grep '^SERVER_PORT=' "$f" | cut -d'"' -f2)" == "$p" ]] && clash="yes"
-            done
-            [[ -n "$clash" ]] && continue
-            ss -H -uln 2>/dev/null | grep -Eq "[:.]${p}[[:space:]]" || break
-        done
-    fi
+    local p attempt
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        p=$(rand_port 20000 60000)
+        _awg_port_in_use "$p" && continue
+        _awg_port_in_burned "$p" && continue
+        break
+    done
     echo "$p"
+}
+
+# - переписать Endpoint в клиентском conf на новый порт: только строки Endpoint, -
+# - якорь конца строки, чтобы не задеть IP/hostname/похожие числа (16180 при 1618) -
+_awg_repoint_client_conf() {
+    local file="$1" old_port="$2" new_port="$3"
+    sed -i "/^Endpoint = /s/:${old_port}\$/:${new_port}/" "$file"
 }
 
 # --> AWG: ВАЛИДАЦИЯ CPS-СТРОК <--
@@ -1977,10 +2014,14 @@ _awg_ranges_overlap() {
 # - H1-H4 ranged: 4 равные зоны по ~500M в пространстве [5, 2^31-1] -
 # - в каждой зоне под-диапазон ширины 100-1000, зоны не пересекаются 'задумано' -
 # - arg3: нижняя граница S1-S4 (AWG 3.0 передаёт 12 из за требования HeaderProtection) -
+# - arg4: "hp" - активен HeaderProtection (AWG 3.0): в manual H1-H4 вводятся -
+# - одиночными значениями (включая 1..4 vanilla, дефолт 1,2,3,4) или диапазонами; -
+# - диапазоны вместе с RandomTrailers дают мисдетект коротких пакетов (go#186) -
 _awg_gen_obf_v2() {
     local auto="$1"
     local mtu="${2:-1320}"
     local s_floor="${3:-0}"
+    local hp_fixed="${4:-}"
     _awg_gen_obf_common "$auto" "$mtu" "$s_floor"
     local s3_limit=64 s4_limit=32
 
@@ -2013,6 +2054,8 @@ _awg_gen_obf_v2() {
         OBF_S4="${s4_valid[$(( RANDOM % ${#s4_valid[@]} ))]}"
 
         # - случайное назначение зон к H1..H4 через shuffle (Fisher-Yates) -
+        # - при активном HP диапазоны ничего не маскируют, но и не мешают (RT off), -
+        # - диапазоны оставляем: профиль без RT лежит на потолке канала (t7/t8) -
         local _ord=(0 1 2 3) _i _j _tmp
         for (( _i=3; _i>0; _i-- )); do
             _j=$(( RANDOM % (_i + 1) ))
@@ -2063,6 +2106,75 @@ _awg_gen_obf_v2() {
             fi
             break
         done
+        local _att=0 _max_att=3 _pair _a _b _give_up=0
+        if [[ -n "$hp_fixed" ]]; then
+            echo -e "  ${CYAN}H1-H4 - одно число или диапазон min-max, значения не пересекаются.${NC}"
+            echo -e "  ${CYAN}Дефолт 1, 2, 3, 4 - vanilla-значения: тип пакета при HeaderProtection${NC}"
+            echo -e "  ${CYAN}и так скрыт шифрованием. Дефолт безопасен при любом RandomTrailers;${NC}"
+            echo -e "  ${CYAN}диапазоны без RT допустимы, но с включённым RT провоцируют${NC}"
+            echo -e "  ${CYAN}amneziawg-go#186: короткие пакеты молча теряются, канал деградирует.${NC}"
+            while true; do
+                ask "H1 (число или min-max, рекомендуется 1)" "1" OBF_H1
+                ask "H2 (число или min-max, рекомендуется 2)" "2" OBF_H2
+                ask "H3 (число или min-max, рекомендуется 3)" "3" OBF_H3
+                ask "H4 (число или min-max, рекомендуется 4)" "4" OBF_H4
+                # - формат: одиночное u32 (в том числе 1..4) или диапазон min-max c min >= 5 -
+                local _fmt_ok="yes" _h _lo _hi
+                for _h in OBF_H1 OBF_H2 OBF_H3 OBF_H4; do
+                    local -n _hv="$_h"
+                    if [[ "$_hv" =~ ^[0-9]+$ ]]; then
+                        if (( _hv < 1 || _hv > 4294967295 )); then
+                            print_err "${_h}: число в границах 1..4294967295"
+                            _fmt_ok="no"; unset -n _hv; break
+                        fi
+                    elif [[ "$_hv" =~ ^[0-9]+-[0-9]+$ ]]; then
+                        _lo="${_hv%-*}"; _hi="${_hv#*-}"
+                        if (( _lo < 5 )); then
+                            print_err "${_h}: в диапазоне min >= 5 (границы 1..4 задевают vanilla WG)"
+                            _fmt_ok="no"; unset -n _hv; break
+                        fi
+                        if (( _lo > _hi )); then
+                            print_err "${_h}: min (${_lo}) должен быть <= max (${_hi})"
+                            _fmt_ok="no"; unset -n _hv; break
+                        fi
+                    else
+                        print_err "${_h}: число (2) или диапазон min-max (5-1005)"
+                        _fmt_ok="no"; unset -n _hv; break
+                    fi
+                    unset -n _hv
+                done
+                if [[ "$_fmt_ok" != "yes" ]]; then
+                    (( _att++ ))
+                    [[ $_att -ge $_max_att ]] && { _give_up=1; break; }
+                    continue
+                fi
+                # - пересечение проверяется на вырожденных диапазонах: одиночное N = N-N -
+                local _overlap="no"
+                for _pair in "H1:H2" "H1:H3" "H1:H4" "H2:H3" "H2:H4" "H3:H4"; do
+                    _a="${_pair%:*}"; _b="${_pair#*:}"
+                    local -n _av_ref="OBF_${_a}"
+                    local -n _bv_ref="OBF_${_b}"
+                    local _ar="$_av_ref" _br="$_bv_ref"
+                    [[ "$_ar" =~ ^[0-9]+$ ]] && _ar="${_ar}-${_ar}"
+                    [[ "$_br" =~ ^[0-9]+$ ]] && _br="${_br}-${_br}"
+                    if _awg_ranges_overlap "$_ar" "$_br"; then
+                        print_err "Значения ${_a}(${_av_ref}) и ${_b}(${_bv_ref}) пересекаются"
+                        _overlap="yes"
+                        unset -n _av_ref _bv_ref
+                        break
+                    fi
+                    unset -n _av_ref _bv_ref
+                done
+                [[ "$_overlap" == "no" ]] && break
+                (( _att++ ))
+                [[ $_att -ge $_max_att ]] && { _give_up=1; break; }
+            done
+            # - невалидные H1-H4 в конфиг не уходят: фоллбек на рекомендованные апстримом -
+            if [[ $_give_up -eq 1 ]]; then
+                print_warn "Слишком много невалидных вводов, фиксирую H1-H4 = 1, 2, 3, 4"
+                OBF_H1=1; OBF_H2=2; OBF_H3=3; OBF_H4=4
+            fi
+        else
         echo -e "  ${CYAN}H1-H4 - диапазоны магических чисел в формате min-max, >= 5, ширина 100-1000.${NC}"
         echo -e "  ${CYAN}Диапазоны не должны пересекаться между собой.${NC}"
         # - дефолты из 4 равных зон, корректные start-end -
@@ -2071,7 +2183,6 @@ _awg_gen_obf_v2() {
         read -r _zlo _zhi <<< "${_zones[1]}"; _d2="$(_awg_h_subrange "$_zlo" "$_zhi")"
         read -r _zlo _zhi <<< "${_zones[2]}"; _d3="$(_awg_h_subrange "$_zlo" "$_zhi")"
         read -r _zlo _zhi <<< "${_zones[3]}"; _d4="$(_awg_h_subrange "$_zlo" "$_zhi")"
-        local _att=0 _max_att=3 _pair _a _b _give_up=0
         while true; do
             ask "H1 (min-max, зона 1: 5..500M)" "$_d1" OBF_H1
             ask "H2 (min-max, зона 2: 500M..1G)" "$_d2" OBF_H2
@@ -2136,6 +2247,7 @@ _awg_gen_obf_v2() {
             done
             print_info "H1=${OBF_H1} H2=${OBF_H2} H3=${OBF_H3} H4=${OBF_H4}"
         fi
+        fi
     fi
     # - I1-I5 для v2, пробрасываем MTU в _awg_gen_i_packets через env -
     TUNNEL_MTU_CURRENT="$mtu" _awg_gen_i_packets "$auto"
@@ -2179,6 +2291,12 @@ _awg_ask_u16_range() {
 
 # --> AWG: ГЕНЕРАЦИЯ ОБФУСКАЦИИ AWG 3.0 <--
 # - база 2.0 (ranged H, S3/S4, I1-I5) с floor S >= 12 -
+# - RandomTrailers в auto выключен: фича 3.1 сырая в релизах 3.1.x -
+# - amneziawg-go#186 (открыт): RT с ranged H1-H3 молча роняет транспортные -
+# - пакеты, ширина диапазона модулирует степень - вплоть до коллапса канала -
+# - amneziawg-go#178: RT паниковал на каждом cookie reply (исправлен в апстриме -
+# - 2026-08-13, но фича остаётся молодой). Live-матрица 2026-09-07: любой RT on -
+# - ниже любого RT off (9-33 против 32-39 Мбит/с), wide H + RT on = 0.1 Мбит/с -
 # - HeaderProtectionKey (base64, общий для сервера и клиента, требует S1-S4 >= 12) -
 # - ContentPaddingAddition (u16 диапазон, клиентская сторона) -
 # - RandomTrailers (on/off), DisableCookies (on/off), AdvancedSecurity (on/off) -
@@ -2194,14 +2312,15 @@ _awg_gen_obf_v3() {
     OBF_KEEPALIVE_TIMEOUT=""; OBF_MAX_HANDSHAKE_ATTEMPTS=""
 
     # - базовые параметры 2.0 с нижней границей S1-S4 = 12 (требование HeaderProtection) -
-    _awg_gen_obf_v2 "$auto" "$mtu" 12
+    _awg_gen_obf_v2 "$auto" "$mtu" 12 "hp"
 
     if [[ "$auto" == "yes" ]]; then
         OBF_HPK=$(wg genkey)
         # - ContentPaddingAddition: компактный диапазон, ловит статистику размеров -
         local _cpa_lo=$(rand_range 4 16)
         OBF_CPA="${_cpa_lo}-$(( _cpa_lo + $(rand_range 8 24) ))"
-        OBF_RTRAILERS="on"
+        # - RT off по умолчанию: см. шапку функции (#186 открыт, #178 закрыт месяц назад) -
+        OBF_RTRAILERS="off"
         OBF_NOCOOKIES="off"
         OBF_ADVSEC="off"
     else
@@ -2220,8 +2339,12 @@ _awg_gen_obf_v3() {
         local _cpa_lo=$(rand_range 4 16)
         _awg_ask_u16_range "ContentPaddingAddition" "${_cpa_lo}-$(( _cpa_lo + $(rand_range 8 24) ))" OBF_CPA
         echo -e "  ${CYAN}RandomTrailers - случайные хвосты пакетам маскируют размер трафика.${NC}"
+        echo -e "  ${YELLOW}Внимание: фича 3.1 сырая в текущих релизах. С ranged H1-H4 молча${NC}"
+        echo -e "  ${YELLOW}роняет короткие пакеты (amneziawg-go#186, открыт): чем шире${NC}"
+        echo -e "  ${YELLOW}диапазоны, тем хуже, вплоть до нуля. В go до 2026-08-13 была ещё${NC}"
+        echo -e "  ${YELLOW}и паника на cookie reply (#178). Live: любой RT on медленнее RT off.${NC}"
         local _rt=""
-        ask_yn "RandomTrailers" "y" _rt
+        ask_yn "RandomTrailers" "n" _rt
         OBF_RTRAILERS=$([[ "$_rt" == "yes" ]] && echo on || echo off)
         echo -e "  ${CYAN}DisableCookies - отключение cookie-защиты от перегрузки. Не рекомендуется:${NC}"
         echo -e "  ${CYAN}без cookies сервер отвечает на мусорные handshake полными ответами.${NC}"
@@ -3214,7 +3337,9 @@ SYSEOF
     local srv_port
     srv_port=$(_awg_default_port)
     while true; do
-        echo -e "  ${CYAN}UDP порт AmneziaWG. Дефолт подберётся свободный (1618, если не занят).${NC}"
+        echo -e "  ${CYAN}UDP порт AmneziaWG. Дефолт - случайный свободный из 20000-60000.${NC}"
+        echo -e "  ${CYAN}Типичные порты VPN-скриптов (1618, 51820 и т.п.) сознательно не предлагаются:${NC}"
+        echo -e "  ${CYAN}у дефолтных портов установщиков плохая репутация у DPI-эвристик.${NC}"
         ask "UDP порт" "$srv_port" srv_port
         if ! validate_port "$srv_port"; then print_err "Порт 1-65535"; continue; fi
         if ss -H -uln 2>/dev/null | grep -Eq "[:.]${srv_port}[[:space:]]"; then
@@ -3831,9 +3956,9 @@ awg_create_iface() {
     local tunnel_mtu="1320"
     echo ""
     echo -e "  ${BOLD}MTU туннеля:${NC}"
-    echo -e "  ${GREEN}1)${NC} 1280 - максимальная совместимость"
-    echo -e "  ${GREEN}2)${NC} 1320 - баланс (рекомендуется)"
-    echo -e "  ${GREEN}3)${NC} 1420 - максимальная скорость"
+    echo -e "  ${GREEN}1)${NC} 1280 - максимальная совместимость (мобильные сети, GTP)"
+    echo -e "  ${GREEN}2)${NC} 1320 - баланс (рекомендуется 'ЭТО БАЗА')"
+    echo -e "  ${GREEN}3)${NC} 1420 - максимальная скорость (чистый Ethernet)"
     while true; do
         ask_raw "$(printf '  \033[1mВыбор?\033[0m [2]: ')" mtu_ch
         case "${mtu_ch:-2}" in
@@ -4028,6 +4153,144 @@ awg_change_dns() {
         [[ $updated -gt 0 ]] && print_ok "Обновлено конфигов: ${updated}"
     fi
     print_info "Клиентам нужно переимпортировать конфиг"
+    return 0
+}
+
+# --> AWG: СМЕНИТЬ ПОРТ ИНТЕРФЕЙСА <--
+# - симптом выгорания: ping в туннеле живой, throughput мёртв, трафик мимо -
+# - туннеля быстрый. Новый порт: сервер + ufw + env + книга + клиентские conf -
+# - старый порт помечается в burned_ports (TTL 30 дней), опционально -
+# - grace-redirect старого порта на новый через systemd-run (до ребута сервера) -
+awg_change_port() {
+    print_section "Сменить порт интерфейса"
+    awg_select_iface
+    [[ -z "$AWG_ACTIVE_IFACE" ]] && return 0
+    local iface="$AWG_ACTIVE_IFACE"
+    local env_file conf_file
+    env_file=$(awg_iface_env "$iface")
+    conf_file=$(awg_iface_conf "$iface")
+    if [[ ! -f "$env_file" || ! -f "$conf_file" ]]; then
+        print_err "Конфиги интерфейса ${iface} не найдены"
+        return 1
+    fi
+    local old_port
+    old_port=$(grep '^SERVER_PORT=' "$env_file" | cut -d'"' -f2)
+    if ! validate_port "$old_port"; then
+        print_err "Не удалось определить текущий порт интерфейса ${iface}"
+        return 1
+    fi
+
+    echo ""
+    echo -e "  ${CYAN}Текущий порт ${iface}: ${BOLD}${old_port}${NC}"
+    echo -e "  ${CYAN}Показание к смене: ping в туннеле живой, скорость упала, а трафик мимо${NC}"
+    echo -e "  ${CYAN}туннеля быстрый - так выгорает UDP-порт на границе сети (DPI/антифлад).${NC}"
+    echo -e "  ${CYAN}У клиентов меняется одно поле - порт в Endpoint, ключи и обфускация не трогаются.${NC}"
+
+    # - новый порт: свободный, не занят другими интерфейсами, не burned (TTL 30 дней) -
+    local new_port
+    new_port=$(_awg_default_port)
+    while [[ "$new_port" == "$old_port" ]]; do
+        new_port=$(_awg_default_port)
+    done
+    while true; do
+        ask "Новый UDP порт" "$new_port" new_port
+        if ! validate_port "$new_port"; then print_err "Порт 1-65535"; continue; fi
+        if [[ "$new_port" == "$old_port" ]]; then print_err "Новый порт равен старому"; continue; fi
+        if _awg_port_in_burned "$new_port"; then print_warn "Порт недавно выгорел (burned, TTL 30 дней)"; continue; fi
+        if _awg_port_in_use "$new_port"; then print_warn "Порт занят системой или другим интерфейсом"; continue; fi
+        break
+    done
+
+    local confirm=""
+    ask_yn "Сменить порт ${old_port} -> ${new_port} у интерфейса ${iface}?" "y" confirm
+    [[ "$confirm" == "yes" ]] || { print_info "Отменено"; return 0; }
+
+    # - сервер: замена ListenPort с контролем (sed молчивал бы неудачу), рестарт. -
+    # - рестарт упал или порт не подтвердился -> откат conf на старый и подъём, -
+    # - burned/ufw/env/книга/клиенты трогаются только после подтверждённого рестарта -
+    if ! _awg_conf_set_port "$conf_file" "$old_port" "$new_port"; then
+        print_err "Строка 'ListenPort = ${old_port}' в ${conf_file} не найдена, ничего не изменено"
+        return 1
+    fi
+    systemctl restart "awg-quick@${iface}"
+    sleep 1
+    if ! systemctl is-active --quiet "awg-quick@${iface}" \
+       || [[ "$(awg show "${iface}" listen-port 2>/dev/null)" != "$new_port" ]]; then
+        print_err "Подъём на порту ${new_port} не удался, откатываю на ${old_port}"
+        _awg_conf_set_port "$conf_file" "$new_port" "$old_port"
+        systemctl restart "awg-quick@${iface}"
+        sleep 1
+        if systemctl is-active --quiet "awg-quick@${iface}"; then
+            print_ok "Откат выполнен, ${iface} работает на ${old_port}"
+        else
+            print_err "Откат не поднялся: journalctl -xeu awg-quick@${iface} --no-pager | tail -20"
+        fi
+        return 1
+    fi
+
+    # - старый порт в burned: повторно предлагается через TTL; -
+    # - протухшие записи (старше TTL) подчищаем при каждой записи -
+    local now cutoff
+    now=$(date +%s)
+    cutoff=$(( now - AWG_BURNED_TTL ))
+    if [[ -f "${AWG_SETUP_DIR}/burned_ports" ]]; then
+        awk -v c "$cutoff" '$2 > c' "${AWG_SETUP_DIR}/burned_ports" > "${AWG_SETUP_DIR}/burned_ports.tmp"
+        mv "${AWG_SETUP_DIR}/burned_ports.tmp" "${AWG_SETUP_DIR}/burned_ports"
+    fi
+    echo "${old_port} ${now}" >> "${AWG_SETUP_DIR}/burned_ports"
+
+    # - ufw: новый открыть, старый закрыть (там же, где create/delete интерфейса) -
+    if command -v ufw &>/dev/null; then
+        ufw allow "${new_port}/udp" comment "AWG ${iface}" >/dev/null 2>&1 || true
+        ufw delete allow "${old_port}/udp" >/dev/null 2>&1 || true
+    fi
+
+    # - env (iface + legacy server.env) и книга -
+    sed -i "s/^SERVER_PORT=\"${old_port}\"/SERVER_PORT=\"${new_port}\"/" "$env_file"
+    [[ -f "${AWG_SETUP_DIR}/server.env" ]] && \
+        sed -i "s/^SERVER_PORT=\"${old_port}\"/SERVER_PORT=\"${new_port}\"/" "${AWG_SETUP_DIR}/server.env"
+    book_write ".awg.interfaces.${iface}.port" "$new_port" number
+
+    # - клиентские conf: только строки Endpoint, якорь конца строки -
+    local clients_dir clients_changed=0 cfile
+    clients_dir=$(awg_iface_clients "$iface")
+    if [[ -d "$clients_dir" ]]; then
+        for cfile in "${clients_dir}"/*/client.conf; do
+            [[ -f "$cfile" ]] || continue
+            _awg_repoint_client_conf "$cfile" "$old_port" "$new_port"
+            clients_changed=$(( clients_changed + 1 ))
+        done
+    fi
+
+    print_ok "Порт ${iface}: ${old_port} -> ${new_port}"
+    print_info "Обновлено клиентских конфигов: ${clients_changed} (${clients_dir}/<имя>/client.conf)"
+    print_info "Клиентам: обнови порт (одно поле) или перекачай свежий конфиг/QR (пункт 8)"
+
+    # - grace-redirect: для непереехавших клиентов, полезен при проактивной ротации; -
+    # - если старый порт уже выгорел на границе, redirect не спасает -
+    local grace=""
+    ask_yn "Завернуть старый порт ${old_port} на новый на 6 часов?" "n" grace
+    if [[ "$grace" == "yes" ]]; then
+        local main_iface
+        main_iface=$(grep "^MAIN_IFACE=" "${AWG_SETUP_DIR}/server.env" 2>/dev/null | cut -d'"' -f2)
+        [[ -z "$main_iface" ]] && main_iface=$(ip route show default 2>/dev/null | awk '/default/{print $5}' | head -1)
+        if command -v iptables &>/dev/null && [[ -n "$main_iface" ]]; then
+            iptables -t nat -A PREROUTING -i "$main_iface" -p udp --dport "$old_port" -j REDIRECT --to-ports "$new_port" 2>/dev/null \
+                && print_ok "Redirect ${old_port} -> ${new_port} включён" \
+                || print_warn "Redirect не создался"
+            if command -v systemd-run &>/dev/null; then
+                systemd-run --on-active="6h" --unit="awg-grace-${iface}-${old_port}" \
+                    iptables -t nat -D PREROUTING -i "$main_iface" -p udp --dport "$old_port" -j REDIRECT --to-ports "$new_port" \
+                    >/dev/null 2>&1 \
+                    && print_info "Снятие redirect через 6 ч (transient-таймер, ребут сервера не переживёт)" \
+                    || print_warn "Таймер не создан: сними redirect вручную: iptables -t nat -D PREROUTING -i ${main_iface} -p udp --dport ${old_port} -j REDIRECT --to-ports ${new_port}"
+            else
+                print_warn "systemd-run недоступен: сними redirect вручную: iptables -t nat -D PREROUTING -i ${main_iface} -p udp --dport ${old_port} -j REDIRECT --to-ports ${new_port}"
+            fi
+        else
+            print_warn "iptables или основной интерфейс не найдены, redirect пропущен"
+        fi
+    fi
     return 0
 }
 
@@ -16031,6 +16294,7 @@ awg_manage() {
         echo -e "  ${GREEN}8)${NC} Показать конфиг клиента"
         echo -e "  ${GREEN}9)${NC} Редактировать клиента"
         echo -e "  ${GREEN}10)${NC} Удалить клиента"
+        echo -e "  ${GREEN}11)${NC} Сменить порт интерфейса"
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
@@ -16047,8 +16311,9 @@ awg_manage() {
             8) awg_show_client    || print_warn "Ошибка при показе конфига" ;;
             9) awg_edit_client    || print_warn "Ошибка при редактировании клиента" ;;
             10) awg_delete_client || print_warn "Ошибка при удалении клиента" ;;
+            11) awg_change_port   || print_warn "Ошибка при смене порта" ;;
             0) return 0 ;;
-            *) print_warn "Введите число от 0 до 10" ;;
+            *) print_warn "Введите число от 0 до 11" ;;
         esac
 
         eli_pause
