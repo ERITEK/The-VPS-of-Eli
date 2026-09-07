@@ -32,12 +32,13 @@ boot_update_system() {
 
 # --> BOOT: УСТАНОВКА БАЗОВЫХ ПАКЕТОВ <--
 # - утилиты, jq (для book), dkms + headers (для AWG), unbound (настраивается позже) -
+# - сетевая диагностика: tcpdump, mtr, iperf3, vnstat - гистория трафика по интерфейсам -
 boot_install_packages() {
     print_section "Установка пакетов"
 
     if ! apt-get -y install -qq ufw wget curl nano tcpdump btop ca-certificates gnupg \
         lsof net-tools iproute2 dnsutils htop iotop-c ncdu tmux unzip logrotate \
-        fail2ban python3 unbound jq cron dkms golang; then
+        fail2ban python3 unbound jq cron dkms iperf3 mtr-tiny vnstat qrencode; then
         print_err "Установка пакетов не удалась"
         return 1
     fi
