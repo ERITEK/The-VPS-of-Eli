@@ -1380,18 +1380,13 @@ _awg_client_header_comment() {
 }
 
 # --> AWG: QR-КОД КЛИЕНТСКОГО КОНФИГА <--
-# - показывает QR в терминале, ставит qrencode если нет -
+# - показывает QR в терминале; qrencode ставится boot-модулем, -
+# - здесь тихий фолбэк для серверов, где boot пропущен -
 _awg_show_qr() {
     local conf_file="$1"
     [[ ! -f "$conf_file" ]] && return 1
     if ! command -v qrencode &>/dev/null; then
-        local do_install=""
-        ask_yn "Установить qrencode для QR-кодов?" "y" do_install
-        if [[ "$do_install" == "yes" ]]; then
-            apt-get install -y -qq qrencode 2>/dev/null || { print_warn "Не удалось установить qrencode"; return 1; }
-        else
-            return 1
-        fi
+        apt-get install -y -qq qrencode 2>/dev/null || { print_warn "qrencode недоступен, QR не показать"; return 1; }
     fi
     echo ""
     qrencode -t ansiutf8 < "$conf_file"
