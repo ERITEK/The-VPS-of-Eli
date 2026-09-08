@@ -9,6 +9,18 @@ AWG_VER=""
 # - TTL выгоревшего порта в burned_ports (сек): 30 дней, потом порт снова в пуле -
 AWG_BURNED_TTL="2592000"
 
+# - значение для env-файла в двойных кавычках: нейтрализует \ " $ ` -
+# - env-файлы AWG исполняются через source от root, сырой текст из -
+# - desc/allowed_ips в них = command injection; source возвращает исходную строку -
+_awg_env_dq() {
+    local v="$1"
+    v="${v//\\/\\\\}"
+    v="${v//\"/\\\"}"
+    v="${v//\$/\\\$}"
+    v="${v//\`/\\\`}"
+    printf '%s' "$v"
+}
+
 # --> AWG: ВЫБОР ВЕРСИИ ПРОТОКОЛА <--
 # - 1.0 (H+S1/S2) vs 1.5 (+ I1-I5) vs 2.0 (+ ranged H, S3/S4) vs 3.0 (+ HPK, CPA) vs WG -
 # - Keenetic: 1.0 работает на KeeneticOS 4.2+, 1.5/2.0 требуют 5.1+ dev-канал -
@@ -1723,7 +1735,8 @@ awg_select_iface() {
         local status="" desc=""
         local env_file
         env_file=$(awg_iface_env "$iface")
-        [[ -f "$env_file" ]] && desc=$(grep "^IFACE_DESC=" "$env_file" | cut -d'"' -f2 || true)
+        # - чтение через source в сабшелле: cut по кавычке не понимает экранирования -
+        [[ -f "$env_file" ]] && desc=$(source "$env_file" 2>/dev/null; printf '%s' "$IFACE_DESC")
         if systemctl is-active --quiet "awg-quick@${iface}" 2>/dev/null; then
             status="${GREEN}(*) активен${NC}"
         else
@@ -2443,6 +2456,10 @@ CLIEOF
     done
 
     # - iface_awg0.env -
+    # - значения из меню/ручного ввода экранируются: env исполняется source-ом от root -
+    local dns_e allowed_e
+    dns_e=$(_awg_env_dq "$client_dns")
+    allowed_e=$(_awg_env_dq "$allowed")
     cat > "$(awg_iface_env "$iface")" << ENVEOF
 IFACE_NAME="${iface}"
 IFACE_DESC="основной"
@@ -2451,8 +2468,8 @@ SERVER_PORT="${srv_port}"
 SERVER_TUNNEL_IP="${srv_tunnel_ip}"
 TUNNEL_SUBNET="${tunnel_subnet}"
 TUNNEL_BASE="${tunnel_base}"
-CLIENT_DNS="${client_dns}"
-CLIENT_ALLOWED_IPS="${allowed}"
+CLIENT_DNS="${dns_e}"
+CLIENT_ALLOWED_IPS="${allowed_e}"
 TUNNEL_MTU="${tunnel_mtu}"
 $(_awg_obf_env_lines)
 ENVEOF
@@ -2467,8 +2484,8 @@ TUNNEL_SUBNET="${tunnel_subnet}"
 TUNNEL_BASE="${tunnel_base}"
 MAIN_IFACE="${main_iface}"
 AWG_IFACE="${iface}"
-CLIENT_DNS="${client_dns}"
-CLIENT_ALLOWED_IPS="${allowed}"
+CLIENT_DNS="${dns_e}"
+CLIENT_ALLOWED_IPS="${allowed_e}"
 TUNNEL_MTU="${tunnel_mtu}"
 $(_awg_obf_env_lines)
 LEGEOF
@@ -2570,7 +2587,8 @@ awg_show_status() {
         local env_file desc="" port="" subnet="" ver=""
         env_file=$(awg_iface_env "$iface")
         if [[ -f "$env_file" ]]; then
-            desc=$(grep "^IFACE_DESC=" "$env_file" | cut -d'"' -f2 || true)
+            # - desc через source (экранирование), port/subnet/ver - валидированные, cut безопасен -
+            desc=$(source "$env_file" 2>/dev/null; printf '%s' "$IFACE_DESC")
             port=$(grep "^SERVER_PORT=" "$env_file" | cut -d'"' -f2 || true)
             subnet=$(grep "^TUNNEL_SUBNET=" "$env_file" | cut -d'"' -f2 || true)
             ver=$(grep "^AWG_VERSION=" "$env_file" | cut -d'"' -f2 || true)
@@ -2876,16 +2894,22 @@ CONFEOF
     mkdir -p "$(awg_iface_clients "$iface")"; chmod 700 "$(awg_iface_clients "$iface")"
 
     # - env файл интерфейса -
+    # - desc и allowed_ips свободный текст, env исполняется source-ом от root: -
+    # - без экранирования "Описание интерфейса" превращается в command injection -
+    local desc_e dns_e allowed_e
+    desc_e=$(_awg_env_dq "$desc")
+    dns_e=$(_awg_env_dq "$dns")
+    allowed_e=$(_awg_env_dq "$allowed_ips")
     cat > "$(awg_iface_env "$iface")" << ENVEOF
 IFACE_NAME="${iface}"
-IFACE_DESC="${desc}"
+IFACE_DESC="${desc_e}"
 SERVER_ENDPOINT_IP="${endpoint_ip}"
 SERVER_PORT="${port}"
 SERVER_TUNNEL_IP="${srv_tunnel_ip}"
 TUNNEL_SUBNET="${tunnel_subnet}"
 TUNNEL_BASE="${tunnel_base}"
-CLIENT_DNS="${dns}"
-CLIENT_ALLOWED_IPS="${allowed_ips}"
+CLIENT_DNS="${dns_e}"
+CLIENT_ALLOWED_IPS="${allowed_e}"
 TUNNEL_MTU="${tunnel_mtu}"
 $(_awg_obf_env_lines)
 ENVEOF
@@ -2970,7 +2994,8 @@ awg_change_dns() {
     for iface in $ifaces; do
         local env_f cur_dns=""
         env_f=$(awg_iface_env "$iface")
-        [[ -f "$env_f" ]] && cur_dns=$(grep "^CLIENT_DNS=" "$env_f" | cut -d'"' -f2 || true)
+        # - чтение через source в сабшелле: экранированное значение читается целиком -
+        [[ -f "$env_f" ]] && cur_dns=$(source "$env_f" 2>/dev/null; printf '%s' "$CLIENT_DNS")
         echo -e "  ${GREEN}${i})${NC} ${iface}  ${CYAN}(DNS: ${cur_dns:-?})${NC}"
         iface_arr+=("$iface"); i=$(( i + 1 ))
     done
