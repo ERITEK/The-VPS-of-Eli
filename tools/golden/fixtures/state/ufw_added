@@ -1,0 +1,2 @@
+Added user rules (see 'ufw status' for running rules):
+ufw allow 53/tcp

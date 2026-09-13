@@ -1,0 +1,19 @@
+# golden: ufw_status
+--- вывод ---
+
+<cyan><bold>>> Статус UFW<off>
+<cyan>------------------------------------------------------<off>
+  <green>[-OK-]<off> UFW: активен
+
+  <bold>Правила:<off>
+
+       To                         Action      From
+       --                         ------      ----
+  [ 1] 22/tcp                     ALLOW IN    Anywhere
+  [ 2] 443/tcp                    ALLOW IN    Anywhere
+--- вызовы платформы ---
+CMD flock -n 200
+CMD ufw status
+CMD ufw status
+CMD ufw status numbered
+rc=0

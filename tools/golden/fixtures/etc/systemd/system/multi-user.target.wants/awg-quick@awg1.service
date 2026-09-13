@@ -1,0 +1,14 @@
+[Unit]
+Description=WireGuard via awg-quick(8) for %I
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/awg-quick up %i
+ExecStop=/usr/bin/awg-quick down %i
+Environment=WG_ENDPOINT_RESOLUTION_RETRIES=infinity
+
+[Install]
+WantedBy=multi-user.target

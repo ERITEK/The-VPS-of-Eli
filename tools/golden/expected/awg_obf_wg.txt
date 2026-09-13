@@ -1,0 +1,77 @@
+# golden: awg_obf_wg
+--- вывод ---
+
+<cyan><bold>>> Тест обфускации AmneziaWG<off>
+<cyan>------------------------------------------------------<off>
+
+  <bold>Интерфейс:<off>      <cyan>awg0<off>
+  <bold>Порт:<off>           <cyan>151515/udp<off>
+  <bold>Версия AWG:<off>     <cyan>wg<off>
+  <bold>Внешний iface:<off>  <cyan>eth0<off>
+
+  <bold>Ожидаемые параметры обфускации:<off>
+    Jc=0  Jmin=0  Jmax=0
+    S1=0  S2=0
+    H1=?  H2=?  H3=?  H4=?
+
+  <bold>Ожидаемые размеры пакетов (UDP payload):<off>
+    Vanilla WG:          init=148, resp=92
+    AWG S1/S2 padding:   init=148, resp=92
+
+  <bold>Длительность захвата:<off>
+    <green>1)<off> 30 секунд
+    <green>2)<off> 60 секунд (по умолчанию)
+    <green>3)<off> 120 секунд
+
+
+  <cyan>*<off> Инструкция:
+    1) На клиенте (Keenetic/Amnezia/etc) <bold>ОТКЛЮЧИ<off> VPN
+    2) Подожди 3-5 секунд
+    3) <bold>ВКЛЮЧИ<off> VPN обратно -> клиент пошлёт handshake
+    4) Жди пока tcpdump завершится (60 сек)
+
+
+  <cyan>*<off> Путь дампа: <SB>/tmp/<pcap>
+  <cyan>*<off> (удаляется автоматически после анализа)
+  <cyan>*<off> Захват до 60 сек на eth0:151515/udp (остановится по хендшейку)
+
+  <green>[-OK-]<off> Хендшейк замечен на 1-й секунде, добираю ответ и данные
+
+
+
+<cyan><bold>>> Анализ дампа<off>
+<cyan>------------------------------------------------------<off>
+  <green>[-OK-]<off> Захвачено пакетов всего: 5
+
+  <bold>Распределение размеров пакетов:<off>
+       64 байт  x1    <off><- data-трафик (после handshake)<off>
+       92 байт  x1    <yellow><- vanilla WG response (S2 НЕ применилось)<off>
+      148 байт  x1    <yellow><- vanilla WG init (S1 НЕ применилось)<off>
+      152 байт  x1    <off><- data-трафик (после handshake)<off>
+      300 байт  x1    <off><- data-трафик (после handshake)<off>
+
+  <bold>Первый байт UDP payload (WG type field):<off>
+    пакет #1: 0x01 -> vanilla WG init (H1 mangle НЕ применилось)
+    пакет #2: 0x02 -> vanilla WG response (H2 mangle НЕ применилось)
+    пакет #3: 0x03 -> vanilla WG cookie (H3 mangle НЕ применилось)
+    пакет #4: 0x04 -> vanilla WG data (H4 mangle НЕ применилось)
+    пакет #5: 0x01 -> vanilla WG init (H1 mangle НЕ применилось)
+
+  <bold>Итог:<off>
+  <cyan>*<off> S1=0 (padding отключён)
+  <cyan>*<off> S2=0 (padding отключён)
+  <cyan>*<off> Jc=0 (junk отключён)
+  <cyan>*<off> H: vanilla WG, mangle не применяется по определению
+
+  <cyan>*<off> Дамп был сохранён как <SB>/tmp/<pcap> и сейчас удаляется
+--- вызовы платформы ---
+CMD flock -n 200
+CMD ip route show default
+CMD awg show awg0 latest-handshakes
+CMD timeout 60 tcpdump -i eth0 -nn -U -s 0 udp port 151515 -w <SB>/tmp/<pcap>
+CMD tcpdump -i eth0 -nn -U -s 0 udp port 151515 -w <SB>/tmp/<pcap>
+CMD awg show awg0 latest-handshakes
+CMD tcpdump -nn -r <SB>/tmp/<pcap>
+CMD tcpdump -nn -r <SB>/tmp/<pcap> -c 100
+CMD tcpdump -nn -r <SB>/tmp/<pcap> -c 10 -x
+rc=0

@@ -1,0 +1,14 @@
+# golden: ts_backup_db
+--- вывод ---
+
+<cyan><bold>>> Бэкап БД<off>
+<cyan>------------------------------------------------------<off>
+  <green>[-OK-]<off> Бэкап: <SB>/etc/teamspeak/backups/ts6_20260913_120000/ (WAL)
+--- каталог бэкапа ---
+ts6_20260913_120000
+--- вызовы платформы ---
+CMD flock -n 200
+CMD systemctl is-active --quiet teamspeak
+CMD systemctl stop teamspeak
+CMD systemctl start teamspeak
+rc=0

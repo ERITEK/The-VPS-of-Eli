@@ -1,0 +1,28 @@
+# golden: mim_test
+--- вывод ---
+
+<cyan><bold>>> Тест mimic<off>
+<cyan>------------------------------------------------------<off>
+  <green>[-OK-]<off> инстанс mimic@eth0.service активен
+  <green>[-OK-]<off> модуль ядра загружен
+  <green>[-OK-]<off> конфиг <SB>/etc/mimic/eth0.conf: фильтров 2
+
+  <bold>awg0<off>
+  <green>[-OK-]<off>   фильтр смотрит на живой адрес 203.0.113.9
+  <green>[-OK-]<off>   туннель поднят
+  <red>[xXx]<off>   UFW: 8443/tcp закрыт = хендшейк mimic не дойдёт
+  <red>[xXx]<off>   UFW: 8443/udp закрыт = восстановленный трафик не дойдёт до туннеля
+  <green>[-OK-]<off>   живых хендшейков: 1
+
+  <cyan>*<off> Соединения mimic:
+    wan eth0: 3 потоков, исправлено контрольных сумм 2
+      10.8.0.2:51234 -> 203.0.113.9:8443 tcp
+--- вызовы платформы ---
+CMD flock -n 200
+CMD systemctl is-active --quiet mimic@eth0.service
+CMD ip -4 route get 1.1.1.1
+CMD systemctl is-active --quiet awg-quick@awg0
+CMD ufw show added
+CMD ufw show added
+CMD awg show awg0 latest-handshakes
+rc=0

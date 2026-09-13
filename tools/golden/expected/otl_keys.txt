@@ -1,0 +1,10 @@
+# golden: otl_keys
+--- вывод ---
+
+<cyan><bold>>> Ключи клиентов<off>
+<cyan>------------------------------------------------------<off>
+  <red>[xXx]<off> API не ответил
+--- вызовы платформы ---
+CMD flock -n 200
+CMD curl -fsk --connect-timeout 5 https://203.0.113.9:8443/abc123/access-keys
+rc=0

@@ -1,0 +1,18 @@
+# golden: mim_status
+--- вывод ---
+
+<cyan><bold>>> Статус mimic<off>
+<cyan>------------------------------------------------------<off>
+  <cyan>*<off> Версия: 1.4 (источник: repo)
+  <cyan>*<off> WAN: eth0, xdp_mode: native
+  <cyan>*<off> Инстанс mimic@eth0.service: active
+  <green>[-OK-]<off> Модуль ядра загружен
+
+  <bold>awg0<off>: туннель active
+    фильтр: local=203.0.113.9:8443
+    клиентов: 2
+--- вызовы платформы ---
+CMD flock -n 200
+CMD systemctl is-active mimic@eth0.service
+CMD systemctl is-active awg-quick@awg0
+rc=0

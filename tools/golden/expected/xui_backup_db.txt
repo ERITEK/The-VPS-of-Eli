@@ -1,0 +1,15 @@
+# golden: xui_backup_db
+--- вывод ---
+
+<cyan><bold>>> Бэкап БД<off>
+<cyan>------------------------------------------------------<off>
+  <green>[-OK-]<off> Бэкап: <SB>/etc/3xui/backups/x-ui_20260913_120000.db (4.0K)
+--- файлы бэкапа ---
+x-ui_20260913_120000.db
+--- вызовы платформы ---
+CMD flock -n 200
+CMD systemctl is-active --quiet x-ui
+CMD systemctl stop x-ui
+CMD systemctl start x-ui
+CMD du -h <SB>/etc/3xui/backups/x-ui_20260913_120000.db
+rc=0

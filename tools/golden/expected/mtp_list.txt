@@ -1,0 +1,15 @@
+# golden: mtp_list
+--- вывод ---
+
+<cyan><bold>>> MTProto Proxy - список<off>
+<cyan>------------------------------------------------------<off>
+  <green>(*)<off> <bold>#1<off>  port:8443  domen:www.example.com
+    <cyan>tg://proxy?server=203.0.113.9&port=8443&secret=ee0123456789abcdef0123456789abcdef<off>
+
+  <red>( )<off> <bold>#2<off>  port:8444  [<yellow>остановлен<off>]
+    <cyan>tg://proxy?server=203.0.113.9&port=8444&secret=ee9876543210fedcba9876543210fedc<off>
+--- вызовы платформы ---
+CMD flock -n 200
+CMD docker ps --format {{.Names}}
+CMD docker ps --format {{.Names}}
+rc=0

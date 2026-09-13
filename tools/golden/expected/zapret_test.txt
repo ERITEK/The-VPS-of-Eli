@@ -1,0 +1,16 @@
+# golden: zapret_test
+--- вывод ---
+
+<cyan><bold>>> Тест zapret2<off>
+<cyan>------------------------------------------------------<off>
+  <green>[-OK-]<off> awg0: инстанс активен
+  <green>[-OK-]<off> awg0: nft-правила загружены
+  <red>[xXx]<off> awg1: инстанс не активен
+  <red>[xXx]<off> awg1: nft-правила отсутствуют
+--- вызовы платформы ---
+CMD flock -n 200
+CMD systemctl is-active --quiet zapret2-eli@awg0.service
+CMD nft list table inet zeli_awg0
+CMD systemctl is-active --quiet zapret2-eli@awg1.service
+CMD nft list table inet zeli_awg1
+rc=0

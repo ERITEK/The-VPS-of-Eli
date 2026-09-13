@@ -1,0 +1,800 @@
+# --> МОДУЛЬ: БЭКАП И ВОССТАНОВЛЕНИЕ СТЕКА <--
+# - единый архив всех конфигов, ключей, баз данных -
+
+BACKUP_DIR="/root/eli-backups"
+
+# --> БЭКАП: СБОР КОМПОНЕНТА <--
+# - копирует файл/директорию в temp если существует -
+_bkp_add() {
+    local src="$1" dst="$2"
+    if [[ -e "$src" ]]; then
+        mkdir -p "$(dirname "$dst")"
+        cp -a "$src" "$dst" 2>/dev/null && return 0
+    fi
+    return 1
+}
+
+# --> БЭКАП: СОЗДАНИЕ <--
+backup_create() {
+    print_section "Создание бэкапа стека"
+
+    local ts
+    ts=$(date +%Y%m%d_%H%M%S)
+    local tmpdir
+    tmpdir=$(mktemp -d "/tmp/eli-backup-${ts}-XXXX")
+    local collected=0
+    local failed=0
+
+    # - хелпер с проверкой exit-кода cp -
+    # - успех = collected++, провал = failed++ и warn -
+    _bkp_cp() {
+        local src="$1" dst="$2" label="$3"
+        if cp -a "$src" "$dst" 2>/dev/null; then
+            print_ok "$label"
+            collected=$(( collected + 1 ))
+            return 0
+        else
+            print_warn "Не удалось: $label (${src} -> ${dst})"
+            failed=$(( failed + 1 ))
+            return 1
+        fi
+    }
+
+    # - Book of Eli -
+    if _bkp_add /etc/vps-eli-stack/book_of_Eli.json "${tmpdir}/book/book_of_Eli.json"; then
+        print_ok "Book of Eli"
+        collected=$(( collected + 1 ))
+    fi
+
+    # - AWG: env, ключи, клиенты -
+    if [[ -d /etc/awg-setup ]]; then
+        _bkp_cp /etc/awg-setup "${tmpdir}/awg-setup" "AWG setup (env, ключи, клиенты)"
+    fi
+    if [[ -d /etc/amnezia/amneziawg ]]; then
+        mkdir -p "${tmpdir}/amnezia-conf"
+        if cp -a /etc/amnezia/amneziawg/*.conf "${tmpdir}/amnezia-conf/" 2>/dev/null; then
+            local nconf
+            nconf=$(ls "${tmpdir}/amnezia-conf/"*.conf 2>/dev/null | wc -l)
+            if [[ "$nconf" -gt 0 ]]; then
+                print_ok "AWG конфиги (${nconf} шт)"
+                collected=$(( collected + 1 ))
+            fi
+        fi
+    fi
+
+    # - 3X-UI: env + db -
+    if [[ -d /etc/3xui ]]; then
+        _bkp_cp /etc/3xui "${tmpdir}/3xui-env" "3X-UI env"
+    fi
+    local xui_db=""
+    xui_db=$(find /etc/x-ui /usr/local/x-ui -maxdepth 2 -name "x-ui.db" 2>/dev/null | head -1)
+    if [[ -n "$xui_db" ]]; then
+        mkdir -p "${tmpdir}/3xui-db"
+        # - согласованный снимок: sqlite на живом сервисе может уехать в wal -
+        local _xui_was_active=0
+        systemctl is-active --quiet x-ui 2>/dev/null && { _xui_was_active=1; systemctl stop x-ui 2>/dev/null || true; sleep 1; }
+        _bkp_cp "$xui_db" "${tmpdir}/3xui-db/x-ui.db" "3X-UI база данных"
+        for _side in -wal -shm; do
+            [[ -f "${xui_db}${_side}" ]] && _bkp_cp "${xui_db}${_side}" "${tmpdir}/3xui-db/x-ui.db${_side}" "3X-UI база ${_side}" || true
+        done
+        [[ $_xui_was_active -eq 1 ]] && systemctl start x-ui 2>/dev/null || true
+    fi
+
+    # - Outline -
+    if [[ -d /etc/outline ]]; then
+        _bkp_cp /etc/outline "${tmpdir}/outline" "Outline (env, manager key)"
+    fi
+
+    # - TeamSpeak: env + SQLite WAL -
+    if [[ -d /etc/teamspeak ]]; then
+        _bkp_cp /etc/teamspeak "${tmpdir}/teamspeak-env" "TeamSpeak env"
+    fi
+    local ts_db=""
+    ts_db=$(find /opt/teamspeak -name "*.sqlitedb" -type f 2>/dev/null | head -1)
+    if [[ -n "$ts_db" ]]; then
+        mkdir -p "${tmpdir}/teamspeak-db"
+        # - согласованный снимок: копия только при остановленном сервисе -
+        local _ts_was_active=0
+        systemctl is-active --quiet teamspeak 2>/dev/null && { _ts_was_active=1; systemctl stop teamspeak 2>/dev/null || true; sleep 1; }
+        local db_ok=0
+        cp -a "${ts_db}" "${tmpdir}/teamspeak-db/" 2>/dev/null && db_ok=1
+        cp -a "${ts_db}-shm" "${tmpdir}/teamspeak-db/" 2>/dev/null || true
+        cp -a "${ts_db}-wal" "${tmpdir}/teamspeak-db/" 2>/dev/null || true
+        [[ $_ts_was_active -eq 1 ]] && systemctl start teamspeak 2>/dev/null || true
+        if [[ "$db_ok" -eq 1 ]]; then
+            print_ok "TeamSpeak SQLite (WAL)"
+            collected=$(( collected + 1 ))
+        else
+            print_warn "TeamSpeak SQLite: копирование базы не удалось"
+            failed=$(( failed + 1 ))
+        fi
+    fi
+
+    # - Mumble: конфиг + sqlite БД (ACL, каналы, регистрации) -
+    for mcfg in /etc/mumble-server.ini /etc/murmur/murmur.ini /etc/mumble/mumble-server.ini; do
+        if [[ -f "$mcfg" ]]; then
+            mkdir -p "${tmpdir}/mumble"
+            _bkp_cp "$mcfg" "${tmpdir}/mumble/" "Mumble конфиг ($(basename "$mcfg"))"
+            break
+        fi
+    done
+    # - sqlite БД: варианты путей по дистрибутиву -
+    local mbl_db=""
+    for candidate in /var/lib/mumble-server/mumble-server.sqlite \
+                     /var/lib/mumble/mumble-server.sqlite \
+                     /var/lib/murmur/murmur.sqlite; do
+        if [[ -f "$candidate" ]]; then
+            mbl_db="$candidate"; break
+        fi
+    done
+    # - fallback: поиск по filesystem -
+    if [[ -z "$mbl_db" ]]; then
+        mbl_db=$(find /var/lib/mumble-server /var/lib/mumble /var/lib/murmur \
+            -maxdepth 2 -name "*.sqlite" -type f 2>/dev/null | head -1)
+    fi
+    if [[ -n "$mbl_db" && -f "$mbl_db" ]]; then
+        mkdir -p "${tmpdir}/mumble"
+        # - согласованный снимок: копия только при остановленном сервисе -
+        local _mbl_svc="" _mbl_was_active=0
+        if systemctl list-unit-files mumble-server.service 2>/dev/null | grep -q mumble-server; then
+            _mbl_svc="mumble-server"
+        elif systemctl list-unit-files murmurd.service 2>/dev/null | grep -q murmurd; then
+            _mbl_svc="murmurd"
+        fi
+        [[ -n "$_mbl_svc" ]] && systemctl is-active --quiet "$_mbl_svc" 2>/dev/null && {
+            _mbl_was_active=1; systemctl stop "$_mbl_svc" 2>/dev/null || true; sleep 1; }
+        _bkp_cp "$mbl_db" "${tmpdir}/mumble/$(basename "$mbl_db")" "Mumble sqlite БД"
+        [[ $_mbl_was_active -eq 1 ]] && systemctl start "$_mbl_svc" 2>/dev/null || true
+    fi
+
+    # - MTProto -
+    if [[ -d /etc/mtproto ]]; then
+        _bkp_cp /etc/mtproto "${tmpdir}/mtproto" "MTProto env"
+    fi
+
+    # - Signal Proxy -
+    if [[ -d /etc/signal-proxy ]]; then
+        _bkp_cp /etc/signal-proxy "${tmpdir}/signal-proxy" "Signal Proxy env"
+    fi
+
+    # - SOCKS5 -
+    if [[ -d /etc/socks5 ]]; then
+        _bkp_cp /etc/socks5 "${tmpdir}/socks5" "SOCKS5 env"
+    fi
+
+    # - Hysteria 2 -
+    if [[ -d /etc/hysteria ]]; then
+        _bkp_cp /etc/hysteria "${tmpdir}/hysteria" "Hysteria 2 (config, сертификаты, env)"
+    fi
+
+    # - Системные конфиги -
+    mkdir -p "${tmpdir}/system"
+    _bkp_add /etc/ssh/sshd_config "${tmpdir}/system/sshd_config" && { print_ok "sshd_config"; collected=$(( collected + 1 )); }
+    _bkp_add /etc/sysctl.d/99-awg-forward.conf "${tmpdir}/system/99-awg-forward.conf" 2>/dev/null && { print_ok "99-awg-forward.conf"; collected=$(( collected + 1 )); } || true
+
+    # - systemd units: нужны для мульти-инстансов Hysteria2 и для нативно-установленных -
+    # - 3X-UI / TeamSpeak (на чистой машине после restore сервис не запустится без unit) -
+    mkdir -p "${tmpdir}/system/systemd"
+    local unit_count=0
+    local _old_nullglob
+    _old_nullglob=$(shopt -p nullglob 2>/dev/null || true)
+    shopt -s nullglob
+    for u in \
+        /etc/systemd/system/hysteria-*.service \
+        /etc/systemd/system/x-ui.service \
+        /etc/systemd/system/teamspeak.service; do
+        [[ -f "$u" ]] || continue
+        cp -a "$u" "${tmpdir}/system/systemd/" 2>/dev/null && unit_count=$(( unit_count + 1 ))
+    done
+    eval "$_old_nullglob"
+    if [[ $unit_count -gt 0 ]]; then
+        print_ok "systemd units (${unit_count} шт)"
+        collected=$(( collected + 1 ))
+    else
+        rmdir "${tmpdir}/system/systemd" 2>/dev/null || true
+    fi
+
+    # - UFW rules -
+    if [[ -f /etc/ufw/user.rules ]]; then
+        mkdir -p "${tmpdir}/ufw"
+        local ufw_ok=0
+        cp -a /etc/ufw/user.rules "${tmpdir}/ufw/" 2>/dev/null && ufw_ok=1
+        cp -a /etc/ufw/user6.rules "${tmpdir}/ufw/" 2>/dev/null || true
+        if [[ "$ufw_ok" -eq 1 ]]; then
+            print_ok "UFW rules"
+            collected=$(( collected + 1 ))
+        else
+            print_warn "UFW rules: не скопированы"
+            failed=$(( failed + 1 ))
+        fi
+    fi
+
+    # - Crontab -
+    crontab -l > "${tmpdir}/system/crontab.txt" 2>/dev/null || true
+    [[ -s "${tmpdir}/system/crontab.txt" ]] && { print_ok "Crontab"; collected=$(( collected + 1 )); }
+
+    # - системный drop-in SSH и fail2ban -
+    # - конфиги обфускаторов и Telegram-бота -
+    _bkp_add /etc/vps-eli-stack/wgobfs "${tmpdir}/vps-stack/wgobfs" && { print_ok "wg-obfuscator конфиги"; collected=$(( collected + 1 )); }
+    _bkp_add /etc/vps-eli-stack/zapret2 "${tmpdir}/vps-stack/zapret2" && { print_ok "zapret2 конфиги"; collected=$(( collected + 1 )); }
+    _bkp_add /etc/mimic "${tmpdir}/vps-stack/mimic" && { print_ok "mimic конфиги"; collected=$(( collected + 1 )); }
+    _bkp_add /etc/vps-eli-stack/telegrambot.env "${tmpdir}/vps-stack/telegrambot.env" && { print_ok "Telegram бот env"; collected=$(( collected + 1 )); }
+    # - оба имени: 00-eli каноничное, 99-eli прежнее -
+    local _dropin
+    for _dropin in /etc/ssh/sshd_config.d/00-eli.conf /etc/ssh/sshd_config.d/99-eli.conf; do
+        [[ -f "$_dropin" ]] || continue
+        _bkp_add "$_dropin" "${tmpdir}/system/$(basename "$_dropin")" && { print_ok "SSH drop-in $(basename "$_dropin")"; collected=$(( collected + 1 )); }
+    done
+    _bkp_add /etc/fail2ban/jail.d/ssh-hardening.local "${tmpdir}/system/ssh-hardening.local" && { print_ok "fail2ban jail"; collected=$(( collected + 1 )); }
+
+    # - метаданные -
+    # - debian_version и version_id для проверки совместимости при restore -
+    local _deb_ver="unknown"
+    [[ -f /etc/debian_version ]] && _deb_ver=$(cat /etc/debian_version 2>/dev/null | tr -d '\n')
+    local _version_id=""
+    [[ -f /etc/os-release ]] && _version_id=$(grep "^VERSION_ID=" /etc/os-release | cut -d'"' -f2)
+    cat > "${tmpdir}/backup_meta.txt" << METAEOF
+backup_date="${ts}"
+hostname="$(hostname)"
+os="$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'"' -f2 || echo 'unknown')"
+kernel="$(uname -r)"
+debian_version="${_deb_ver}"
+version_id="${_version_id}"
+eli_version="${ELI_VERSION}"
+components=${collected}
+METAEOF
+
+    # - упаковка -
+    if [[ "$collected" -eq 0 ]]; then
+        print_warn "Нечего бэкапить - компоненты не найдены"
+        rm -rf "$tmpdir"
+        return 0
+    fi
+
+    print_section "Упаковка"
+    mkdir -p "$BACKUP_DIR"
+    local archive="${BACKUP_DIR}/eli-backup-${ts}.tar.gz"
+    if tar czf "$archive" -C "$(dirname "$tmpdir")" "$(basename "$tmpdir")" 2>/dev/null; then
+        chmod 600 "$archive"
+        local size
+        size=$(du -h "$archive" | awk '{print $1}')
+        rm -rf "$tmpdir"
+
+        echo ""
+        print_ok "Бэкап создан"
+        echo -e "  ${BOLD}Файл:${NC} ${archive}"
+        echo -e "  ${BOLD}Размер:${NC} ${size}"
+        echo -e "  ${BOLD}Компонентов:${NC} ${collected}"
+        [[ "$failed" -gt 0 ]] && echo -e "  ${YELLOW}${BOLD}Ошибок копирования:${NC} ${failed}"
+        echo ""
+        echo -e "  ${CYAN}Скачать:${NC} scp root@$(curl -4 -fsSL --connect-timeout 3 ifconfig.me 2>/dev/null || echo 'IP'):${archive} ."
+        echo ""
+    else
+        print_err "Ошибка создания архива"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+    return 0
+}
+
+# --> БЭКАП: СПИСОК <--
+backup_list() {
+    print_section "Список бэкапов"
+    if [[ ! -d "$BACKUP_DIR" ]] || [[ -z "$(ls "${BACKUP_DIR}"/eli-backup-*.tar.gz 2>/dev/null)" ]]; then
+        print_warn "Нет бэкапов в ${BACKUP_DIR}"
+        return 0
+    fi
+    echo ""
+    local i=1
+    for f in "${BACKUP_DIR}"/eli-backup-*.tar.gz; do
+        local sz
+        sz=$(du -h "$f" | awk '{print $1}')
+        local dt
+        dt=$(basename "$f" | sed 's/eli-backup-//;s/\.tar\.gz//')
+        echo -e "  ${GREEN}${i})${NC} ${dt}  (${sz})  ${f}"
+        i=$(( i + 1 ))
+    done
+    echo ""
+    return 0
+}
+
+
+# --> ВОССТАНОВЛЕНИЕ <--
+backup_restore() {
+    print_section "Восстановление стека из бэкапа"
+
+    # - выбор архива -
+    local archive=""
+    if [[ -d "$BACKUP_DIR" ]]; then
+        local files=()
+        for f in "${BACKUP_DIR}"/eli-backup-*.tar.gz; do
+            [[ -f "$f" ]] && files+=("$f")
+        done
+        if [[ ${#files[@]} -gt 0 ]]; then
+            echo ""
+            local i=1
+            for f in "${files[@]}"; do
+                local sz dt
+                sz=$(du -h "$f" | awk '{print $1}')
+                dt=$(basename "$f" | sed 's/eli-backup-//;s/\.tar\.gz//')
+                echo -e "  ${GREEN}${i})${NC} ${dt}  (${sz})"
+                i=$(( i + 1 ))
+            done
+            echo ""
+            local sel=""
+            ask "Номер бэкапа (или полный путь к файлу)" "1" sel
+            if [[ "$sel" =~ ^(0|[1-9][0-9]*)$ ]] && [[ "$sel" -ge 1 ]] && [[ "$sel" -le ${#files[@]} ]]; then
+                archive="${files[$(( sel - 1 ))]}"
+            elif [[ -f "$sel" ]]; then
+                archive="$sel"
+            fi
+        fi
+    fi
+
+    if [[ -z "$archive" ]]; then
+        echo -e "  ${CYAN}Укажи полный путь к файлу бэкапа (например: /root/eli-backups/eli-backup-20250101_120000.tar.gz).${NC}"
+        ask "Путь к архиву бэкапа" "" archive
+    fi
+    if [[ ! -f "$archive" ]]; then
+        print_err "Файл не найден: ${archive}"
+        return 1
+    fi
+
+    echo ""
+    print_warn "Восстановление перезапишет текущие конфиги и перезапустит сервисы!"
+    local confirm=""
+    ask_yn "Продолжить?" "n" confirm
+    [[ "$confirm" != "yes" ]] && { print_info "Отмена"; return 0; }
+
+    # - распаковка -
+    local tmpdir
+    tmpdir=$(mktemp -d /tmp/eli-restore-XXXX)
+    if ! tar xzf "$archive" -C "$tmpdir" 2>/dev/null; then
+        print_err "Ошибка распаковки"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # - находим корневую директорию внутри архива -
+    local root
+    root=$(find "$tmpdir" -maxdepth 1 -mindepth 1 -type d | head -1)
+    [[ -z "$root" ]] && root="$tmpdir"
+
+    # - проверка совместимости по backup_meta.txt -
+    # - сравниваем Debian version_id бэкапа и текущей системы -
+    # - предупреждаем -> несовпадение версий = возможные проблемы -
+    local meta="${root}/backup_meta.txt"
+    if [[ -f "$meta" ]]; then
+        local bk_vid="" bk_os="" bk_date="" bk_host=""
+        bk_vid=$(grep "^version_id=" "$meta" | cut -d'"' -f2 || true)
+        bk_os=$(grep "^os=" "$meta" | cut -d'"' -f2 || true)
+        bk_date=$(grep "^backup_date=" "$meta" | cut -d'"' -f2 || true)
+        bk_host=$(grep "^hostname=" "$meta" | cut -d'"' -f2 || true)
+
+        local cur_vid=""
+        [[ -f /etc/os-release ]] && cur_vid=$(grep "^VERSION_ID=" /etc/os-release | cut -d'"' -f2)
+
+        echo ""
+        echo -e "  ${BOLD}Метаданные бэкапа:${NC}"
+        [[ -n "$bk_date" ]] && echo -e "    Дата:    ${bk_date}"
+        [[ -n "$bk_host" ]] && echo -e "    Хост:    ${bk_host}"
+        [[ -n "$bk_os" ]]   && echo -e "    ОС:      ${bk_os}"
+        [[ -n "$bk_vid" ]]  && echo -e "    ver_id:  ${bk_vid}"
+        echo ""
+
+        if [[ -n "$bk_vid" && -n "$cur_vid" && "$bk_vid" != "$cur_vid" ]]; then
+            print_warn "Версия ОС отличается (бэкап: ${bk_vid}, текущая: ${cur_vid})"
+            print_warn "Возможны проблемы с пакетами/сервисами (AWG PPA codename, kernel)"
+            local compat_ok=""
+            ask_yn "Продолжить восстановление несмотря на это?" "n" compat_ok
+            if [[ "$compat_ok" != "yes" ]]; then
+                print_info "Отменено пользователем"
+                rm -rf "$tmpdir"
+                return 0
+            fi
+        fi
+    else
+        print_warn "backup_meta.txt не найден в архиве - восстанавливаю без проверки совместимости"
+    fi
+
+    local restored=0 failed=0
+
+    # - итог одного компонента: печатает и считает вызывающий через эту пару, -
+    # - потому что копии идут и файлом, и каталогом, и шаблоном -
+    _rst_result() {
+        if [[ "$1" -eq 0 ]]; then
+            print_ok "$2"
+            restored=$(( restored + 1 ))
+        else
+            print_err "Не удалось восстановить: ${2}"
+            failed=$(( failed + 1 ))
+        fi
+    }
+
+    # - Book of Eli -
+    if [[ -f "${root}/book/book_of_Eli.json" ]]; then
+        mkdir -p /etc/vps-eli-stack; chmod 700 /etc/vps-eli-stack
+        cp -a "${root}/book/book_of_Eli.json" /etc/vps-eli-stack/book_of_Eli.json 2>/dev/null
+        _rst_result $? "Book of Eli"
+        chmod 600 /etc/vps-eli-stack/book_of_Eli.json
+    fi
+
+    # - AWG setup -
+    if [[ -d "${root}/awg-setup" ]]; then
+        # - останавливаем все AWG интерфейсы -
+        for unit in /etc/systemd/system/multi-user.target.wants/awg-quick@*.service; do
+            [ -e "$unit" ] || continue
+            local iface
+            iface=$(basename "$unit" | sed 's/^awg-quick@//;s/\.service$//')
+            systemctl stop "awg-quick@${iface}" 2>/dev/null || true
+        done
+        mkdir -p /etc/awg-setup
+        cp -a "${root}/awg-setup/." /etc/awg-setup/ 2>/dev/null
+        _rst_result $? "AWG setup (env, ключи, клиенты)"
+        chmod 700 /etc/awg-setup
+        find /etc/awg-setup -type f -exec chmod 600 {} \;
+    fi
+    if [[ -d "${root}/amnezia-conf" ]]; then
+        mkdir -p /etc/amnezia/amneziawg
+        cp -a "${root}/amnezia-conf/"*.conf /etc/amnezia/amneziawg/ 2>/dev/null
+        _rst_result $? "AWG конфиги"
+        chmod 600 /etc/amnezia/amneziawg/*.conf 2>/dev/null || true
+    fi
+    # - туннели возвращаются в строй после подмены файлов: архив мог прийти -
+    # - без amnezia-conf, и тогда запуск из ветки конфигов не срабатывал -
+    if [[ -d "${root}/awg-setup" || -d "${root}/amnezia-conf" ]]; then
+        for unit in /etc/systemd/system/multi-user.target.wants/awg-quick@*.service; do
+            [ -e "$unit" ] || continue
+            local iface
+            iface=$(basename "$unit" | sed 's/^awg-quick@//;s/\.service$//')
+            systemctl start "awg-quick@${iface}" 2>/dev/null || true
+        done
+    fi
+
+    # - 3X-UI -
+    if [[ -d "${root}/3xui-env" ]]; then
+        if mkdir -p /etc/3xui && cp -a "${root}/3xui-env/." /etc/3xui/ 2>/dev/null; then
+            chmod 700 /etc/3xui; find /etc/3xui -type f -exec chmod 600 {} \;
+            print_ok "3X-UI env"
+            restored=$(( restored + 1 ))
+        else
+            print_err "3X-UI env: cp не выполнился"
+        fi
+    fi
+    if [[ -f "${root}/3xui-db/x-ui.db" ]]; then
+        systemctl stop x-ui 2>/dev/null || true
+        local xui_db_dst=""
+        xui_db_dst=$(find /etc/x-ui /usr/local/x-ui -maxdepth 2 -name "x-ui.db" 2>/dev/null | head -1)
+        # - дефолт для апстрима v2.x: /etc/x-ui/x-ui.db -
+        if [[ -z "$xui_db_dst" ]]; then
+            if [[ -f /etc/x-ui/x-ui || -f /usr/local/x-ui/x-ui ]]; then
+                xui_db_dst="/etc/x-ui/x-ui.db"
+                mkdir -p /etc/x-ui
+            else
+                print_warn "3X-UI БД: пакет не установлен, сначала установи x-ui потом restore"
+                xui_db_dst=""
+            fi
+        fi
+        if [[ -n "$xui_db_dst" ]]; then
+            # - старые журналы цели удаляются: иначе SQLite применит старый wal к новой базе -
+            rm -f "${xui_db_dst}-wal" "${xui_db_dst}-shm" 2>/dev/null || true
+            if cp -a "${root}/3xui-db/x-ui.db" "$xui_db_dst" 2>/dev/null; then
+                for _side in -wal -shm; do
+                    [[ -f "${root}/3xui-db/x-ui.db${_side}" ]] && cp -a "${root}/3xui-db/x-ui.db${_side}" "${xui_db_dst}${_side}" 2>/dev/null || true
+                done
+                chmod 600 "$xui_db_dst" "${xui_db_dst}-wal" "${xui_db_dst}-shm" 2>/dev/null || true
+                print_ok "3X-UI база данных -> ${xui_db_dst}"
+                restored=$(( restored + 1 ))
+            else
+                print_err "3X-UI БД: cp не выполнился (${xui_db_dst})"
+            fi
+        fi
+        systemctl start x-ui 2>/dev/null || true
+    fi
+
+    # - Outline -
+    if [[ -d "${root}/outline" ]]; then
+        if mkdir -p /etc/outline && cp -a "${root}/outline/." /etc/outline/ 2>/dev/null; then
+            chmod 700 /etc/outline; find /etc/outline -type f -exec chmod 600 {} \;
+            print_ok "Outline"
+            restored=$(( restored + 1 ))
+        else
+            print_err "Outline: cp не выполнился"
+        fi
+    fi
+
+    # - TeamSpeak -
+    if [[ -d "${root}/teamspeak-env" ]]; then
+        if mkdir -p /etc/teamspeak && cp -a "${root}/teamspeak-env/." /etc/teamspeak/ 2>/dev/null; then
+            chmod 700 /etc/teamspeak; find /etc/teamspeak -type f -exec chmod 600 {} \;
+            print_ok "TeamSpeak env"
+            restored=$(( restored + 1 ))
+        else
+            print_err "TeamSpeak env: cp не выполнился"
+        fi
+    fi
+
+    # - mimic: конфиги живут в /etc/mimic, отдельная ветка до bulk-копии стека -
+    if [[ -d "${root}/vps-stack/mimic" ]]; then
+        if mkdir -p /etc/mimic && cp -a "${root}/vps-stack/mimic/." /etc/mimic/ 2>/dev/null; then
+            chmod 755 /etc/mimic 2>/dev/null || true
+            print_ok "mimic конфиги"
+            restored=$(( restored + 1 ))
+        else
+            print_err "mimic конфиги: cp не выполнился"
+        fi
+    fi
+
+    # - конфиги обходов и Telegram-бота -
+    if [[ -d "${root}/vps-stack" ]]; then
+        mkdir -p /etc/vps-eli-stack
+        local _vs_entry _vs_copied=0
+        for _vs_entry in "${root}/vps-stack"/*; do
+            [[ -e "$_vs_entry" ]] || continue
+            [[ "$(basename "$_vs_entry")" == "mimic" ]] && continue
+            if cp -a "$_vs_entry" /etc/vps-eli-stack/ 2>/dev/null; then
+                _vs_copied=$(( _vs_copied + 1 ))
+            else
+                print_err "Не удалось восстановить: $(basename "$_vs_entry")"
+                failed=$(( failed + 1 ))
+            fi
+        done
+        if [[ $_vs_copied -gt 0 ]]; then
+            chmod 700 /etc/vps-eli-stack 2>/dev/null || true
+            find /etc/vps-eli-stack -type f -exec chmod 600 {} \; 2>/dev/null
+            print_ok "wg-obfuscator / zapret2 / Telegram env"
+            restored=$(( restored + 1 ))
+        fi
+    fi
+    # - drop-in SSH: 00-eli кладётся как есть; прежнее имя 99-eli из бэкапа кладётся -
+    # - под именем 00-eli, чтобы выигрывать first-match у cloud-init -
+    if [[ -f "${root}/system/00-eli.conf" ]]; then
+        mkdir -p /etc/ssh/sshd_config.d
+        cp -a "${root}/system/00-eli.conf" /etc/ssh/sshd_config.d/00-eli.conf 2>/dev/null
+        _rst_result $? "SSH drop-in (00-eli)"
+    elif [[ -f "${root}/system/99-eli.conf" ]]; then
+        mkdir -p /etc/ssh/sshd_config.d
+        cp -a "${root}/system/99-eli.conf" /etc/ssh/sshd_config.d/00-eli.conf 2>/dev/null
+        _rst_result $? "SSH drop-in (99-eli -> 00-eli)"
+    fi
+    if [[ -f "${root}/system/ssh-hardening.local" ]]; then
+        mkdir -p /etc/fail2ban/jail.d
+        cp -a "${root}/system/ssh-hardening.local" /etc/fail2ban/jail.d/ssh-hardening.local 2>/dev/null
+        _rst_result $? "fail2ban jail"
+        systemctl restart fail2ban 2>/dev/null || true
+    fi
+    if [[ -d "${root}/teamspeak-db" ]]; then
+        systemctl stop teamspeak 2>/dev/null || true
+        local ts_dst=""
+        ts_dst=$(find /opt/teamspeak -name "*.sqlitedb" -type f 2>/dev/null | head -1)
+        local ts_dir=""
+        if [[ -n "$ts_dst" ]]; then
+            ts_dir=$(dirname "$ts_dst")
+        elif [[ -d /opt/teamspeak ]]; then
+            ts_dir="/opt/teamspeak"
+        else
+            print_warn "TeamSpeak SQLite: /opt/teamspeak отсутствует, сначала установи TS потом restore"
+        fi
+        if [[ -n "$ts_dir" ]]; then
+            # - журналы старой базы снимаются до копии: иначе SQLite применит их страницы к восстановленной -
+            if [[ -n "$ts_dst" ]]; then
+                rm -f "${ts_dst}-wal" "${ts_dst}-shm" 2>/dev/null || true
+            fi
+            if cp -a "${root}/teamspeak-db/"* "${ts_dir}/" 2>/dev/null; then
+                print_ok "TeamSpeak SQLite -> ${ts_dir}"
+                restored=$(( restored + 1 ))
+            else
+                print_err "TeamSpeak SQLite: cp не выполнился (${ts_dir})"
+            fi
+        fi
+        systemctl start teamspeak 2>/dev/null || true
+    fi
+
+    # - Mumble: конфиг + sqlite БД -
+    if [[ -d "${root}/mumble" ]]; then
+        # - останавливаем сервис перед восстановлением -
+        local mbl_svc=""
+        if systemctl list-unit-files mumble-server.service 2>/dev/null | grep -q mumble-server; then
+            mbl_svc="mumble-server"
+        elif systemctl list-unit-files murmurd.service 2>/dev/null | grep -q murmurd; then
+            mbl_svc="murmurd"
+        fi
+        if [[ -n "$mbl_svc" ]]; then
+            systemctl stop "$mbl_svc" 2>/dev/null || true
+        fi
+
+        # - конфиг: ini файлы -
+        for mcfg in "${root}/mumble/"*.ini; do
+            [[ -f "$mcfg" ]] || continue
+            local fname
+            fname=$(basename "$mcfg")
+            if [[ "$fname" == "mumble-server.ini" ]]; then
+                cp -a "$mcfg" /etc/mumble-server.ini 2>/dev/null
+            elif [[ "$fname" == "murmur.ini" ]]; then
+                mkdir -p /etc/murmur
+                cp -a "$mcfg" /etc/murmur/murmur.ini 2>/dev/null
+            else
+                print_warn "Mumble конфиг (${fname}): имя не из набора mumble-server/murmur, пропущен"
+                continue
+            fi
+            _rst_result $? "Mumble конфиг (${fname})"
+        done
+
+        # - sqlite БД: пути по приоритету mumble-server -> murmur -
+        for mdb in "${root}/mumble/"*.sqlite; do
+            [[ -f "$mdb" ]] || continue
+            local fname
+            fname=$(basename "$mdb")
+            local dst=""
+            if [[ -d /var/lib/mumble-server ]]; then
+                dst="/var/lib/mumble-server/${fname}"
+            elif [[ -d /var/lib/mumble ]]; then
+                dst="/var/lib/mumble/${fname}"
+            elif [[ -d /var/lib/murmur ]]; then
+                dst="/var/lib/murmur/${fname}"
+            fi
+            if [[ -n "$dst" ]]; then
+                # - журнал старой базы снимается до копии: иначе SQLite откатит на восстановленную свои страницы -
+                rm -f "${dst}-journal" 2>/dev/null || true
+                cp -a "$mdb" "$dst" 2>/dev/null
+                _rst_result $? "Mumble sqlite БД"
+                # - владелец: если есть пакетный пользователь -
+                if id mumble-server &>/dev/null; then
+                    chown mumble-server:mumble-server "$dst" 2>/dev/null || true
+                elif id murmur &>/dev/null; then
+                    chown murmur:murmur "$dst" 2>/dev/null || true
+                fi
+            else
+                print_warn "Mumble: не нашёл куда восстановить БД"
+            fi
+            break
+        done
+
+        if [[ -n "$mbl_svc" ]]; then
+            systemctl start "$mbl_svc" 2>/dev/null || true
+        fi
+    fi
+
+    # - MTProto -
+    if [[ -d "${root}/mtproto" ]]; then
+        mkdir -p /etc/mtproto; chmod 700 /etc/mtproto
+        cp -a "${root}/mtproto/"* /etc/mtproto/ 2>/dev/null
+        _rst_result $? "MTProto env"
+        find /etc/mtproto -type f -exec chmod 600 {} \;
+    fi
+
+    # - Signal Proxy -
+    if [[ -d "${root}/signal-proxy" ]]; then
+        mkdir -p /etc/signal-proxy; chmod 700 /etc/signal-proxy
+        cp -a "${root}/signal-proxy/"* /etc/signal-proxy/ 2>/dev/null
+        _rst_result $? "Signal Proxy env"
+        find /etc/signal-proxy -type f -exec chmod 600 {} \;
+    fi
+
+    # - SOCKS5 -
+    if [[ -d "${root}/socks5" ]]; then
+        mkdir -p /etc/socks5; chmod 700 /etc/socks5
+        cp -a "${root}/socks5/"* /etc/socks5/ 2>/dev/null
+        _rst_result $? "SOCKS5 env"
+        find /etc/socks5 -type f -exec chmod 600 {} \;
+    fi
+
+    # - Hysteria 2: поддержка мультиинстанса и legacy -
+    if [[ -d "${root}/hysteria" ]]; then
+        # - останавливаем все hysteria-* юниты -
+        for u in /etc/systemd/system/hysteria-*.service /etc/systemd/system/hysteria-server.service; do
+            [[ -f "$u" ]] || continue
+            local svc_name
+            svc_name=$(basename "$u" | sed 's/\.service$//')
+            systemctl stop "$svc_name" 2>/dev/null || true
+        done
+        mkdir -p /etc/hysteria; chmod 700 /etc/hysteria
+        cp -a "${root}/hysteria/"* /etc/hysteria/ 2>/dev/null
+        _rst_result $? "Hysteria 2 (конфиг, сертификат, env)"
+        find /etc/hysteria -type f -exec chmod 600 {} \;
+        # - запуск откладываем до раздела systemd units -
+    fi
+
+    # - systemd units: хранятся в ${root}/system/systemd/ -
+    if [[ -d "${root}/system/systemd" ]]; then
+        local units_restored=0
+        for u in "${root}/system/systemd/"*.service; do
+            [[ -f "$u" ]] || continue
+            if ! cp -a "$u" /etc/systemd/system/ 2>/dev/null; then
+                print_err "unit не восстановлен: $(basename "$u")"
+                failed=$(( failed + 1 ))
+                continue
+            fi
+            chmod 644 "/etc/systemd/system/$(basename "$u")" 2>/dev/null || true
+            units_restored=$(( units_restored + 1 ))
+        done
+        if [[ $units_restored -gt 0 ]]; then
+            systemctl daemon-reload 2>/dev/null || true
+            print_ok "systemd units (${units_restored} шт)"
+            restored=$(( restored + 1 ))
+            # - enable + start всех восстановленных hysteria-* юнитов -
+            for u in "${root}/system/systemd/"hysteria-*.service; do
+                [[ -f "$u" ]] || continue
+                local svc_name
+                svc_name=$(basename "$u" | sed 's/\.service$//')
+                systemctl enable "$svc_name" 2>/dev/null || true
+                systemctl start "$svc_name" 2>/dev/null || true
+            done
+            # - x-ui и teamspeak запускаем если их бинари на месте -
+            # - актуальный апстрим v2.x ставит в /etc/x-ui, legacy в /usr/local/x-ui -
+            if [[ -f /usr/local/x-ui/x-ui || -f /etc/x-ui/x-ui ]]; then
+                systemctl enable x-ui 2>/dev/null || true
+                systemctl start x-ui 2>/dev/null || true
+            fi
+            [[ -f /opt/teamspeak/tsserver ]] && {
+                systemctl enable teamspeak 2>/dev/null || true
+                systemctl start teamspeak 2>/dev/null || true
+            }
+        fi
+    fi
+
+    # - sshd_config -
+    if [[ -f "${root}/system/sshd_config" ]]; then
+        if cp -a "${root}/system/sshd_config" /etc/ssh/sshd_config 2>/dev/null; then
+            chmod 644 /etc/ssh/sshd_config
+            systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
+            print_ok "sshd_config"
+            restored=$(( restored + 1 ))
+        else
+            print_warn "sshd_config: cp не выполнился, конфиг не восстановлен"
+        fi
+    fi
+
+    # - sysctl -
+    if [[ -f "${root}/system/99-awg-forward.conf" ]]; then
+        cp -a "${root}/system/99-awg-forward.conf" /etc/sysctl.d/ 2>/dev/null
+        _rst_result $? "sysctl ip_forward"
+        sysctl --system >/dev/null 2>&1 || true
+    fi
+
+    # - UFW -
+    if [[ -d "${root}/ufw" ]]; then
+        cp -a "${root}/ufw/user.rules" /etc/ufw/user.rules 2>/dev/null
+        _rst_result $? "UFW rules"
+        # - user6.rules в архиве может не быть: копия только при наличии источника -
+        [[ -f "${root}/ufw/user6.rules" ]] && cp -a "${root}/ufw/user6.rules" /etc/ufw/user6.rules 2>/dev/null || true
+        ufw reload 2>/dev/null || true
+    fi
+
+    # - Crontab: merge eli-задач из бэкапа со сторонними из текущего, чтобы не терять чужое -
+    if [[ -s "${root}/system/crontab.txt" ]]; then
+        echo ""
+        print_info "Бэкап содержит crontab. Сторонние задачи в текущем crontab будут сохранены."
+        local cron_ok=""
+        ask_yn "Восстановить eli-задачи из бэкапа (merge со сторонними)?" "y" cron_ok
+        if [[ "$cron_ok" == "yes" ]]; then
+            # - паттерн eli-задач: всё что относится к нашему стеку (для выборки из бэкапа) -
+            local eli_pat='docker-cleanup|eli-healthcheck|eli-tgbot-monitor|disk-monitor|apt-check|/sbin/reboot'
+            # - удаляются только свои строки: чужие задачи с такими же словами в команде -
+            # - совпадать со свободным шаблоном не должны (обещано "сторонние сохранены") -
+            local eli_del='/usr/local/bin/(docker-cleanup|disk-monitor|eli-healthcheck|eli-tgbot-monitor|eli-zapret-autoupdate)\.sh|^0 2 \* \* [03] /sbin/reboot|logger -t apt-check'
+            local cron_tmp; cron_tmp=$(mktemp)
+            # - сторонние строки из текущего crontab -
+            crontab -l 2>/dev/null | grep -Ev "$eli_del" > "$cron_tmp" || true
+            # - eli-задачи из бэкапа: выборка шире - старые записи тоже должны вернуться -
+            grep -E "$eli_pat" "${root}/system/crontab.txt" >> "$cron_tmp" 2>/dev/null || true
+            if crontab "$cron_tmp" 2>/dev/null; then
+                print_ok "Crontab merged (eli-задачи восстановлены, сторонние сохранены)"
+                restored=$(( restored + 1 ))
+            else
+                print_warn "Crontab: установить не удалось"
+            fi
+            rm -f "$cron_tmp"
+        else
+            print_info "Crontab пропущен"
+        fi
+    fi
+
+    rm -rf "$tmpdir"
+
+    echo ""
+    print_ok "Восстановлено компонентов: ${restored}"
+    [[ $failed -gt 0 ]] && print_err "Не восстановлено: ${failed} (см. строки выше)"
+    print_info "Проверь сервисы: Обслуживание -> Диагностика или Prayer of Eli"
+    return 0
+}

@@ -1,0 +1,17 @@
+# golden: hy2_list
+--- вывод ---
+
+<cyan><bold>>> Hysteria 2 - инстансы<off>
+<cyan>------------------------------------------------------<off>
+  <green>(*)<off> <bold>#1<off>  UDP:8443  ver:2.6.0
+    <cyan>hysteria2://admin:pass-placeholder@203.0.113.9:8443?insecure=1#hy2-1-admin<off>
+    <cyan>hysteria2://friend:pass-placeholder-2@203.0.113.9:8443?insecure=1#hy2-1-friend<off>
+
+  <red>( )<off> <bold>#2<off>  UDP:8444  [<yellow>остановлен<off>]
+
+  <bold>insecure=true обязателен (self-signed)<off>
+--- вызовы платформы ---
+CMD flock -n 200
+CMD systemctl is-active --quiet hysteria-1
+CMD systemctl is-active --quiet hysteria-2
+rc=0

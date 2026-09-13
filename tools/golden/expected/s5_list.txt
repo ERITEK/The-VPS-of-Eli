@@ -1,0 +1,15 @@
+# golden: s5_list
+--- вывод ---
+
+<cyan><bold>>> SOCKS5 Proxy - список<off>
+<cyan>------------------------------------------------------<off>
+  <green>(*)<off> <bold>#1<off>  port:1080  sock:sock-placeholder
+  <cyan>socks5://sock:sock-placeholder@203.0.113.9:1080<off>
+
+  <red>( )<off> <bold>#2<off>  port:1081  [<yellow>остановлен<off>]
+  <cyan>socks5://sock2:sock-placeholder-2@203.0.113.9:1081<off>
+--- вызовы платформы ---
+CMD flock -n 200
+CMD docker ps --format {{.Names}}
+CMD docker ps --format {{.Names}}
+rc=0

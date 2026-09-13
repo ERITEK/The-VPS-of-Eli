@@ -1,0 +1,25 @@
+# golden: wgo_status
+--- вывод ---
+
+<cyan><bold>>> Статус wg-obfuscator<off>
+<cyan>------------------------------------------------------<off>
+  <cyan>*<off> Версия: 1.0.2
+
+  <bold>awg0<off>: обфускатор active, туннель active
+    публичный порт: 3333/udp
+    цель: 10.8.0.1:1618
+    маскировка: quic
+    клиентов: 2
+
+  <bold>awg1<off>: обфускатор inactive, туннель inactive
+    публичный порт: 3334/udp
+    цель: 10.9.0.1:1619
+    маскировка: stun
+    клиентов: 1
+--- вызовы платформы ---
+CMD flock -n 200
+CMD systemctl is-active wgobfs-eli@awg0.service
+CMD systemctl is-active awg-quick@awg0
+CMD systemctl is-active wgobfs-eli@awg1.service
+CMD systemctl is-active awg-quick@awg1
+rc=0

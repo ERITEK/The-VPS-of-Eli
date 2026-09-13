@@ -1,0 +1,9 @@
+# golden: book_read
+--- вывод ---
+.mumble.server_ip=[203.0.113.9]
+.teamspeak.db_path=[/opt/teamspeak/tsserver.sqlitedb]
+.awg.interfaces.awg0.port=[1618]
+.absent.key=[]
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

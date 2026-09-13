@@ -1,0 +1,106 @@
+# golden: awg_obf_cpa
+--- вывод ---
+
+<cyan><bold>>> Тест обфускации AmneziaWG<off>
+<cyan>------------------------------------------------------<off>
+
+  <bold>Интерфейс:<off>      <cyan>awg0<off>
+  <bold>Порт:<off>           <cyan>42003/udp<off>
+  <bold>Версия AWG:<off>     <cyan>3.0<off>
+  <bold>Внешний iface:<off>  <cyan>eth0<off>
+
+  <bold>Ожидаемые параметры обфускации:<off>
+    Jc=6  Jmin=135  Jmax=1094
+    S1=17  S2=84
+    S3=63  S4=24
+    H1=1274307279-1274308111  H2=62600733-62600855  H3=1527381304-1527381941  H4=912760998-912761689
+    I1=<b 0x000100002112a442><r 12>...
+    HeaderProtection: on (первый байт шифруется, vanilla type 1-4 не виден)
+    ContentPaddingAddition: 13-24
+
+  <bold>Ожидаемые размеры пакетов (UDP payload):<off>
+    Vanilla WG:          init=148, resp=92
+    AWG S1/S2 padding:   init=165, resp=176
+    Cookie (S3=63):     127 байт
+    Transport (S4=24): data-пакеты длиннее на 24 байт
+    ContentPaddingAddition: 13-24 байт к транспорту
+    Junk (Jc=6):     135..1094 байт ДО handshake
+
+  <bold>Длительность захвата:<off>
+    <green>1)<off> 30 секунд
+    <green>2)<off> 60 секунд (по умолчанию)
+    <green>3)<off> 120 секунд
+
+
+  <cyan>*<off> Инструкция:
+    1) На клиенте (Keenetic/Amnezia/etc) <bold>ОТКЛЮЧИ<off> VPN
+    2) Подожди 3-5 секунд
+    3) <bold>ВКЛЮЧИ<off> VPN обратно -> клиент пошлёт handshake
+    4) Жди пока tcpdump завершится (60 сек)
+
+
+  <cyan>*<off> Путь дампа: <SB>/tmp/<pcap>
+  <cyan>*<off> (удаляется автоматически после анализа)
+  <cyan>*<off> Захват до 60 сек на eth0:42003/udp (остановится по хендшейку)
+
+  <green>[-OK-]<off> Хендшейк замечен на 1-й секунде, добираю ответ и данные
+
+
+
+<cyan><bold>>> Анализ дампа<off>
+<cyan>------------------------------------------------------<off>
+  <green>[-OK-]<off> Захвачено пакетов всего: 14
+
+  <bold>Распределение размеров пакетов:<off>
+       20 байт  x1
+       24 байт  x1
+       36 байт  x1
+       37 байт  x1
+       40 байт  x1
+      152 байт  x1    <cyan><- junk до рукопожатия (1 пак.)<off>
+      155 байт  x1    <cyan><- junk до рукопожатия (1 пак.)<off>
+      156 байт  x1    <cyan><- junk до рукопожатия (1 пак.)<off>
+      158 байт  x1    <cyan><- junk до рукопожатия (1 пак.)<off>
+      160 байт  x1    <cyan><- junk до рукопожатия (1 пак.)<off>
+      161 байт  x1    <cyan><- junk до рукопожатия (1 пак.)<off>
+      165 байт  x1    <green><- AWG init с S1=17 padding (S1 работает)<off>
+      176 байт  x1    <green><- AWG response с S2=84 padding (S2 работает)<off>
+      240 байт  x1    <off><- data-трафик (после рукопожатия)<off>
+
+  <bold>Первый байт UDP payload (WG type field):<off>
+    <cyan>HeaderProtectionKey задан: первый байт шифрован, тип пакета не виден, -
+    значит H1-H4 по дампу не проверяются. Raw-байты ниже - справка.<off>
+    пакет #1: 0x00 (0) -> тип шифрован HeaderProtection
+    пакет #2: 0x9a (154) -> тип шифрован HeaderProtection
+    пакет #3: 0x3f (63) -> тип шифрован HeaderProtection
+    пакет #4: 0x07 (7) -> тип шифрован HeaderProtection
+    пакет #5: 0xc1 (193) -> тип шифрован HeaderProtection
+
+  <bold>Проверка I1 signature chain:<off>
+  <green>[-OK-]<off>     I1 найден в пакете #1 на offset 0 байт
+    Искомый фрагмент: 000100002112a442...
+
+  <bold>Итог:<off>
+  <green>[-OK-]<off> S1 padding работает (пакет 165 байт)
+  <cyan>*<off> S2: при ContentPaddingAddition размер ответа плавает, по дампу не проверяется
+  <green>[-OK-]<off> Jc junk пакеты присутствуют (6 до рукопожатия, ожидалось 6)
+  <cyan>*<off> H1-H4: тип пакета скрыт HeaderProtection, по дампу не определить
+  <green>[-OK-]<off> I1 signature chain применён (найден статичный фрагмент)
+
+  <bold>По дампу не проверяется:<off>
+    - H1-H4 и тип пакета: первый байт шифрован HeaderProtection
+    - S2: размер ответа рукопожатия размывает ContentPaddingAddition
+    - S4 и ContentPaddingAddition: размеры транспорта зависят от полезной нагрузки
+
+  <cyan>*<off> Дамп был сохранён как <SB>/tmp/<pcap> и сейчас удаляется
+--- вызовы платформы ---
+CMD flock -n 200
+CMD ip route show default
+CMD awg show awg0 latest-handshakes
+CMD timeout 60 tcpdump -i eth0 -nn -U -s 0 udp port 42003 -w <SB>/tmp/<pcap>
+CMD tcpdump -i eth0 -nn -U -s 0 udp port 42003 -w <SB>/tmp/<pcap>
+CMD awg show awg0 latest-handshakes
+CMD tcpdump -nn -r <SB>/tmp/<pcap>
+CMD tcpdump -nn -r <SB>/tmp/<pcap> -c 100
+CMD tcpdump -nn -r <SB>/tmp/<pcap> -c 10 -x
+rc=0

@@ -1,0 +1,38 @@
+# golden: tgbot_disable
+--- вывод ---
+
+<cyan><bold>>> Отключение Telegram бота<off>
+<cyan>------------------------------------------------------<off>
+rc(отказ)=0
+--- отказ: cron ---
+(cron не тронут)
+--- отказ: каталог состояния ---
+last_alert_hash
+--- отказ: книга ---
+null
+
+<cyan><bold>>> Отключение Telegram бота<off>
+<cyan>------------------------------------------------------<off>
+  <green>[-OK-]<off> Cron задача удалена
+  <green>[-OK-]<off> Telegram мониторинг отключён
+rc(отключение)=0
+--- отключение: cron ---
+0 3 * * * /usr/local/bin/eli-backup.sh
+--- отключение: файлы монитора ---
+снят: <SB>/usr/local/bin/eli-tgbot-monitor.sh
+снят: <SB>/etc/vps-eli-stack/telegrambot.env
+снят: <SB>/var/lib/eli-tgbot-monitor
+--- отключение: книга ---
+false
+
+<cyan><bold>>> Отключение Telegram бота<off>
+<cyan>------------------------------------------------------<off>
+  <red>[xXx]<off> Не удалось обновить cron
+rc(провал cron)=1
+--- провал cron: файлы монитора ---
+остался: <SB>/usr/local/bin/eli-tgbot-monitor.sh
+остался: <SB>/etc/vps-eli-stack/telegrambot.env
+остался: <SB>/var/lib/eli-tgbot-monitor
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0
