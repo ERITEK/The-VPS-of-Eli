@@ -1,0 +1,28 @@
+# golden: mtp_add_fail
+--- вывод ---
+
+<cyan><bold>>> Добавить MTProto Proxy<off>
+<cyan>------------------------------------------------------<off>
+  <green>[-OK-]<off> IP: 203.0.113.9
+  <cyan>Порт 443/8443 лучше маскируется под HTTPS.<off>
+  <cyan>Домен для маскировки Fake TLS (DPI видит его в SNI).<off>
+  <cyan>Зашивается прямо в секрет клиента.<off>
+  <cyan>*<off> Проверяю образ nineseconds/mtg:2...
+  <green>[-OK-]<off> Секрет сгенерирован (Fake TLS, домен зашит)
+
+<cyan><bold>>> Запуск MTProto #9<off>
+<cyan>------------------------------------------------------<off>
+  <red>[xXx]<off> Контейнер не запустился: docker logs mtproto-9
+--- остатки ---
+instance_1.env
+instance_2.env
+--- вызовы платформы ---
+CMD flock -n 200
+CMD ss -tlnp
+CMD docker pull nineseconds/mtg:2
+CMD docker stop mtproto-9
+CMD docker rm mtproto-9
+CMD docker run -d --name mtproto-9 --restart always -p 4443:3128 -v <SB>/etc/mtproto/config_9.toml:/config.toml:ro nineseconds/mtg:2 run /config.toml
+CMD docker ps --format {{.Names}}
+CMD docker rm -f mtproto-9
+rc=0

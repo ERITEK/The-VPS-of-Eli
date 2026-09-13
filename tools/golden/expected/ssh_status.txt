@@ -1,0 +1,20 @@
+# golden: ssh_status
+--- вывод ---
+
+<cyan><bold>>> Статус SSH<off>
+<cyan>------------------------------------------------------<off>
+  <cyan>*<off> Порт: 2222
+  <green>[-OK-]<off> Root: только по ключу (prohibit-password)
+  <green>[-OK-]<off> Парольный вход: отключён
+  <green>[-OK-]<off> Сервис sshd: активен
+  <green>[-OK-]<off> Fail2ban: активен (заблокировано: 3)
+  <cyan>*<off> Ключей root: 2
+--- вызовы платформы ---
+CMD flock -n 200
+CMD sshd -T
+CMD sshd -T
+CMD sshd -T
+CMD systemctl is-active --quiet ssh
+CMD systemctl is-active --quiet fail2ban
+CMD fail2ban-client status sshd
+rc=0

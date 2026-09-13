@@ -1,0 +1,100 @@
+# golden: awg_obf_v3
+--- вывод ---
+
+<cyan><bold>>> Тест обфускации AmneziaWG<off>
+<cyan>------------------------------------------------------<off>
+
+  <bold>Интерфейс:<off>      <cyan>awg0<off>
+  <bold>Порт:<off>           <cyan>1618/udp<off>
+  <bold>Версия AWG:<off>     <cyan>3.0<off>
+  <bold>Внешний iface:<off>  <cyan>eth0<off>
+
+  <bold>Ожидаемые параметры обфускации:<off>
+    Jc=3  Jmin=5  Jmax=15
+    S1=12  S2=12
+    S3=8  S4=16
+    H1=1  H2=2  H3=3  H4=4
+    I1=<b 0xdeadbeef>...
+    HeaderProtection: on (первый байт шифруется, vanilla type 1-4 не виден)
+    ContentPaddingAddition: 4-32
+    RandomTrailers: on (размеры пакетов непостоянны)
+    DisableCookies: on
+
+  <bold>Ожидаемые размеры пакетов (UDP payload):<off>
+    Vanilla WG:          init=148, resp=92
+    AWG S1/S2 padding:   init=160, resp=104
+    Cookie (S3=8):     72 байт
+    Transport (S4=16): data-пакеты длиннее на 16 байт
+    ContentPaddingAddition: 4-32 байт к транспорту
+    Junk (Jc=3):     5..15 байт ДО handshake
+    RandomTrailers: к пакетам добавлены случайные хвосты, размеры плавают
+
+  <bold>Длительность захвата:<off>
+    <green>1)<off> 30 секунд
+    <green>2)<off> 60 секунд (по умолчанию)
+    <green>3)<off> 120 секунд
+
+
+  <cyan>*<off> Инструкция:
+    1) На клиенте (Keenetic/Amnezia/etc) <bold>ОТКЛЮЧИ<off> VPN
+    2) Подожди 3-5 секунд
+    3) <bold>ВКЛЮЧИ<off> VPN обратно -> клиент пошлёт handshake
+    4) Жди пока tcpdump завершится (60 сек)
+
+
+  <cyan>*<off> Путь дампа: <SB>/tmp/<pcap>
+  <cyan>*<off> (удаляется автоматически после анализа)
+  <cyan>*<off> Захват до 60 сек на eth0:1618/udp (остановится по хендшейку)
+
+  <green>[-OK-]<off> Хендшейк замечен на 1-й секунде, добираю ответ и данные
+
+
+
+<cyan><bold>>> Анализ дампа<off>
+<cyan>------------------------------------------------------<off>
+  <green>[-OK-]<off> Захвачено пакетов всего: 5
+
+  <bold>Распределение размеров пакетов:<off>
+       92 байт  x1
+      124 байт  x1
+      164 байт  x1
+      175 байт  x1
+      300 байт  x1
+
+  <bold>Первый байт UDP payload (WG type field):<off>
+    <cyan>HeaderProtectionKey задан: первый байт шифрован, тип пакета не виден, -
+    значит H1-H4 по дампу не проверяются. Raw-байты ниже - справка.<off>
+    пакет #1: 0xde (222) -> тип шифрован HeaderProtection
+    пакет #2: 0x3f (63) -> тип шифрован HeaderProtection
+    пакет #3: 0x07 (7) -> тип шифрован HeaderProtection
+    пакет #4: 0xc1 (193) -> тип шифрован HeaderProtection
+    пакет #5: 0x9a (154) -> тип шифрован HeaderProtection
+
+  <bold>Проверка I1 signature chain:<off>
+  <green>[-OK-]<off>     I1 найден в пакете #1 на offset 0 байт
+    Искомый фрагмент: deadbeef...
+
+  <bold>Итог:<off>
+  <cyan>*<off> S1=12  S2=12  Jc=3: сверка по размеру не применяется (RandomTrailers on)
+  <cyan>*<off> H1-H4: тип пакета скрыт HeaderProtection, по дампу не определить
+  <green>[-OK-]<off> I1 signature chain применён (найден статичный фрагмент)
+
+  <bold>По дампу не проверяется:<off>
+    - H1-H4 и тип пакета: первый байт шифрован HeaderProtection
+    - точные размеры handshake: их размывают RandomTrailers on
+    - S2: размер ответа рукопожатия размывает ContentPaddingAddition
+    - S4 и ContentPaddingAddition: размеры транспорта зависят от полезной нагрузки
+    - DisableCookies: cookie-пакет приходит только под нагрузкой
+
+  <cyan>*<off> Дамп был сохранён как <SB>/tmp/<pcap> и сейчас удаляется
+--- вызовы платформы ---
+CMD flock -n 200
+CMD ip route show default
+CMD awg show awg0 latest-handshakes
+CMD timeout 60 tcpdump -i eth0 -nn -U -s 0 udp port 1618 -w <SB>/tmp/<pcap>
+CMD tcpdump -i eth0 -nn -U -s 0 udp port 1618 -w <SB>/tmp/<pcap>
+CMD awg show awg0 latest-handshakes
+CMD tcpdump -nn -r <SB>/tmp/<pcap>
+CMD tcpdump -nn -r <SB>/tmp/<pcap> -c 100
+CMD tcpdump -nn -r <SB>/tmp/<pcap> -c 10 -x
+rc=0

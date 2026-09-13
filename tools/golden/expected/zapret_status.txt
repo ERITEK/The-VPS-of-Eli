@@ -1,0 +1,24 @@
+# golden: zapret_status
+--- вывод ---
+
+<cyan><bold>>> Статус zapret2<off>
+<cyan>------------------------------------------------------<off>
+  <cyan>*<off> Версия: 2.1
+  <cyan>*<off> Автообновление стратегий: включено
+
+  <bold>awg0<off> (queue 4200): active
+    стратегия: split
+    последний blockcheck: 2026-02-01 10:00
+    активных nft-правил: 3
+
+  <bold>awg1<off> (queue 4201): inactive
+    стратегия: fake
+    последний blockcheck: 2026-02-01 10:05
+    активных nft-правил: 0
+--- вызовы платформы ---
+CMD flock -n 200
+CMD systemctl is-active zapret2-eli@awg0.service
+CMD nft list table inet zeli_awg0
+CMD systemctl is-active zapret2-eli@awg1.service
+CMD nft list table inet zeli_awg1
+rc=1

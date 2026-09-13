@@ -1,0 +1,16 @@
+# golden: sig_status
+--- вывод ---
+
+<cyan><bold>>> Статус Signal Proxy<off>
+<cyan>------------------------------------------------------<off>
+  <green>(*)<off> <bold>Signal Proxy<off>  2 контейнеров
+  Домен: signal.example.com
+
+  <bold>Ссылка для подключения:<off>
+  <cyan>https://signal.tube/#signal.example.com<off>
+
+  <bold>Ручная настройка:<off> Signal -> Настройки -> Прокси -> signal.example.com
+--- вызовы платформы ---
+CMD flock -n 200
+CMD docker ps --format {{.Names}}
+rc=0

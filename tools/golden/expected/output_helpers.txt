@@ -1,0 +1,12 @@
+# golden: output_helpers
+--- вывод ---
+
+<cyan><bold>>> Проверка вывода<off>
+<cyan>------------------------------------------------------<off>
+  <green>[-OK-]<off> текст ok
+  <yellow>[!!!]<off>  текст warn
+  <red>[xXx]<off> текст err
+  <cyan>*<off> текст info
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

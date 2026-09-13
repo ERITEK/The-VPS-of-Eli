@@ -1,0 +1,13 @@
+# golden: env_parser
+--- вывод ---
+PLAIN=[значение] rc=0
+DQ=[двойная "кавычка" и $доллар] rc=0
+BT=[`бэктик`] rc=0
+SQ=[одинарная ' вставка] rc=0
+EMPTY=[] rc=0
+SPACES=[] rc=0
+MISSING=[] rc=1
+NOFILE=[] rc=1
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

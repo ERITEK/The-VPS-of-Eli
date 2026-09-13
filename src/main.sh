@@ -1,0 +1,1020 @@
+# --> ГЛАВНОЕ МЕНЮ <--
+# - точка входа, навигация по разделам -
+
+# --> МЕНЮ: VPN И ПРОКСИ <--
+# - подменю выбора VPN и прокси мессенджеров -
+menu_vpn() {
+    while true; do
+        eli_header
+        eli_banner "VPN и прокси" \
+            "Здесь собраны все инструменты для защиты интернет-соединения.
+
+  AmneziaWG - быстрый VPN-туннель. Шифрует весь трафик и маскирует его
+    так, чтобы провайдер не мог понять что используется VPN.
+    Подходит для ежедневного использования на телефоне и компьютере.
+
+  3X-UI - веб-панель с браузерным интерфейсом для управления прокси.
+    Поддерживает протоколы VLESS, VMess, Trojan, Shadowsocks.
+    Трафик маскируется под обычные HTTPS-сайты.
+
+  Outline - простейший VPN на базе Shadowsocks (проект Outline Foundation).
+    Раздаёшь ключ другу - он вставляет его в приложение и всё работает.
+
+  Прокси - отдельные инструменты для мессенджеров:
+    MTProto (Telegram), SOCKS5 (универсальный), Hysteria 2 (быстрый UDP),
+    Signal TLS Proxy (для Signal мессенджера)"
+
+        echo -e "  ${GREEN}1)${NC} AmneziaWG"
+        echo -e "  ${GREEN}2)${NC} 3X-UI"
+        echo -e "  ${GREEN}3)${NC} Outline"
+        echo -e "  ${GREEN}4)${NC} Прокси мессенджеров"
+        echo ""
+        echo -e "  ${GREEN}5)${NC} zapret2 (обход DPI)"
+        echo -e "  ${GREEN}6)${NC} wg-obfuscator (маскировка WG)"
+        echo -e "  ${GREEN}7)${NC} mimic (UDP -> TCP)"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) menu_awg       || { print_warn "Ошибка в разделе AmneziaWG"; eli_pause; } ;;
+            2) menu_xui       || { print_warn "Ошибка в разделе 3X-UI"; eli_pause; } ;;
+            3) menu_otl       || { print_warn "Ошибка в разделе Outline"; eli_pause; } ;;
+            4) menu_proxy     || { print_warn "Ошибка в разделе Прокси"; eli_pause; } ;;
+            5) menu_zapret    || { print_warn "Ошибка в разделе zapret2"; eli_pause; } ;;
+            6) menu_wgobfs    || { print_warn "Ошибка в разделе wg-obfuscator"; eli_pause; } ;;
+            7) menu_mimic     || { print_warn "Ошибка в разделе mimic"; eli_pause; } ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 7"; eli_pause ;;
+        esac
+    done
+}
+
+# --> МЕНЮ: AWG <--
+# - подменю AmneziaWG: установка и управление -
+menu_awg() {
+    while true; do
+        eli_header
+        eli_banner "AmneziaWG" \
+            "VPN-туннель на базе WireGuard с маскировкой трафика.
+
+  Что делает: шифрует весь интернет трафик между твоим устройством и этим
+    сервером. Провайдер видит только непонятный шум, а не сайты и приложения.
+
+  Установка создаёт первый туннель (интерфейс) и конфиг для подключения.
+  После установки нужно: скачать конфиг клиента или отсканировать QR-код
+    в приложении AmneziaVPN (Android/iOS/Windows/macOS).
+
+  Управление позволяет: создавать новые туннели, добавлять и удалять
+    клиентов, менять DNS, перезапускать сервис.
+
+  Тест обфускации снимает tcpdump и сверяет дамп с параметрами интерфейса:
+    S1/S2 padding, Jc junk-пакеты, H1-H4 mangle и I1 signature chain на реальном
+    handshake. На AWG 3.0 HeaderProtection скрывает тип пакета, а RandomTrailers
+    и ContentPaddingAddition размывают размеры: такие параметры тест отмечает
+    как непроверяемые по дампу и объясняет причину."
+
+        echo -e "  ${GREEN}1)${NC} Установка AmneziaWG"
+        echo -e "  ${GREEN}2)${NC} Управление AmneziaWG"
+        echo -e "  ${GREEN}3)${NC} Тест обфускации"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) awg_install    || { print_warn "Ошибка при установке AWG"; }; eli_pause ;;
+            2) awg_manage     || { print_warn "Ошибка в управлении AWG"; eli_pause; } ;;
+            3) awg_test_obf   || { print_warn "Ошибка в тесте обфускации"; }; eli_pause ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 3"; eli_pause ;;
+        esac
+    done
+}
+
+# --> МЕНЮ: ZAPRET2 <--
+# - подменю zapret2: установка и управление -
+menu_zapret() {
+    while true; do
+        eli_header
+        eli_banner "zapret2 (обход DPI)" \
+            "Десинхронизация DPI для трафика awg клиентов через nfqws2 (nfqueue).
+
+  Что делает: применяет обход глубокой инспекции пакетов (DPI) к форвард трафику
+    выбранного awg интерфейса. Полезно, когда сам VPS стоит за DPI
+    (например ТСПУ на аплинке) и режет YouTube, Discord и прочее.
+
+  Требует KVM или bare-metal и nftables. На OpenVZ/LXC не работает.
+  Привязка выборочная: десинк идёт только к трафику указанного интерфейса,
+    SSH и админ трафик не затрагиваются.
+
+  Сообщения Telegram уже решаются туннелем и MTProto прокси;
+    zapret помогает в первую очередь звонкам (WebRTC/STUN)."
+
+        echo -e "  ${GREEN}1)${NC} Установка zapret2"
+        echo -e "  ${GREEN}2)${NC} Привязать к интерфейсу"
+        echo -e "  ${GREEN}3)${NC} Автоподбор стратегии"
+        echo -e "  ${GREEN}4)${NC} Задать стратегию вручную"
+        echo -e "  ${GREEN}5)${NC} Telegram-звонки (экспериментально)"
+        echo -e "  ${GREEN}6)${NC} Автопроверка стратегий (лог + алерт)"
+        echo -e "  ${GREEN}7)${NC} Статус"
+        echo -e "  ${GREEN}8)${NC} Тест"
+        echo ""
+        echo -e "  ${GREEN}9)${NC} Отключить по интерфейсу"
+        echo -e "  ${GREEN}10)${NC} Удалить полностью [!!!]"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) zapret_install || { print_warn "Ошибка при установке zapret2"; }; eli_pause ;;
+            2) zapret_bind_iface || print_warn "Ошибка привязки"; eli_pause ;;
+            3) zapret_autostrategy || print_warn "Автоподбор не дал результата"; eli_pause ;;
+            4) zapret_set_strategy || print_warn "Ошибка стратегии"; eli_pause ;;
+            5) zapret_telegram_calls || print_warn "Ошибка"; eli_pause ;;
+            6) zapret_autoupdate_toggle || print_warn "Ошибка"; eli_pause ;;
+            7) zapret_status; eli_pause ;;
+            8) zapret_test || print_warn "Ошибка теста"; eli_pause ;;
+            9) zapret_disable_iface || print_warn "Ошибка отключения"; eli_pause ;;
+            10) zapret_remove || print_warn "Ошибка удаления"; eli_pause ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 10"; eli_pause ;;
+        esac
+    done
+}
+
+# --> МЕНЮ: WG-OBFUSCATOR <--
+# - подменю обфускатора: установка и управление -
+menu_wgobfs() {
+    while true; do
+        eli_header
+        eli_banner "wg-obfuscator (маскировка WG)" \
+            "Прячет WireGuard: провайдер видит не VPN, а поток случайных данных
+  или обычный STUN (трафик видеозвонков, его почти нигде не режут).
+  
+  ! - wg-obfuscator прячет сам туннель (WG) от провайдера КЛИЕНТА - !
+  
+  Зачем: когда DPI детектит и режет сам протокол WireGuard, и AmneziaWG уже не спасает.
+
+  Как работает: маленький прокси на сервере и такой же на стороне клиента.
+    Клиентский WireGuard стучится к себе на 127.0.0.1, обфускатор клиента
+    шифрует поток ключом и шлёт на наш публичный порт. Порт самого туннеля
+    наружу закрыт: снаружи виден только обфускатор.
+
+  Требует: отдельный vanilla-WG интерфейс (заголовки AmneziaWG обфускатор
+    ломает). Если такого нет, модуль создаст его сам.
+    Клиенту обязателен свой wg-obfuscator: OpenWrt, Windows, macOS, Android,
+    MikroTik. IPv6 в этой связке не поддерживается вообще."
+
+        echo -e "  ${GREEN}1)${NC} Установка wg-obfuscator"
+        echo -e "  ${GREEN}2)${NC} Привязать к интерфейсу"
+        echo -e "  ${GREEN}3)${NC} Клиентский комплект"
+        echo -e "  ${GREEN}4)${NC} Маскировка"
+        echo -e "  ${GREEN}5)${NC} Статус"
+        echo -e "  ${GREEN}6)${NC} Тест"
+        echo -e "  ${GREEN}7)${NC} Обновить движок"
+        echo ""
+        echo -e "  ${GREEN}8)${NC} Отвязать от интерфейса"
+        echo -e "  ${GREEN}9)${NC} Удалить полностью [!!!]"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) wgo_install || { print_warn "Ошибка при установке wg-obfuscator"; }; eli_pause ;;
+            2) wgo_bind_iface || print_warn "Ошибка привязки"; eli_pause ;;
+            3) wgo_client_kit || print_warn "Ошибка сборки комплекта"; eli_pause ;;
+            4) wgo_set_masking || print_warn "Ошибка смены маскировки"; eli_pause ;;
+            5) wgo_status; eli_pause ;;
+            6) wgo_test || print_warn "Ошибка теста"; eli_pause ;;
+            7) wgo_update || print_warn "Ошибка обновления"; eli_pause ;;
+            8) wgo_unbind || print_warn "Ошибка отвязки"; eli_pause ;;
+            9) wgo_remove || print_warn "Ошибка удаления"; eli_pause ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 9"; eli_pause ;;
+        esac
+    done
+}
+
+# --> МЕНЮ: MIMIC <--
+# - подменю mimic: установка и управление -
+menu_mimic() {
+    while true; do
+        eli_header
+        eli_banner "mimic (UDP -> TCP)" \
+            "Прячет не сигнатуру WireGuard, а сам факт UDP: провайдер видит TCP-сессию.
+
+  ! - mimic нужен там, где UDP режут как класс или душат по QoS - !
+
+  Зачем: когда туннель не блокируют прицельно, а просто давят весь UDP.
+    Мобильный интернет с QoS на UDP, корпоративные сети, отели.
+
+  Как работает: eBPF в ядре. На выходе UDP-пакет превращается в TCP,
+    на входе возвращается обратно. Каждый пакет пухнет на 12 байт.
+    Скорость почти нативная: 2.23 против 2.38 Гбит у чистого WireGuard.
+    Обфускация AmneziaWG остаётся на месте, конфиги клиентов не меняются.
+
+  Требует: выделенный AWG-интерфейс. Клиенты БЕЗ mimic на нём работать
+    перестанут: их ответный трафик съедается в ядре, это принцип работы.
+    Клиенту нужен Linux с ядром 6.1+ и DKMS. Windows, macOS, Android
+    не поддерживаются вообще."
+
+        echo -e "  ${GREEN}1)${NC} Установка mimic"
+        echo -e "  ${GREEN}2)${NC} Привязать к интерфейсу"
+        echo -e "  ${GREEN}3)${NC} Клиентский комплект"
+        echo -e "  ${GREEN}4)${NC} XDP-режим"
+        echo -e "  ${GREEN}5)${NC} Статус"
+        echo -e "  ${GREEN}6)${NC} Тест"
+        echo -e "  ${GREEN}7)${NC} Обновить движок"
+        echo ""
+        echo -e "  ${GREEN}8)${NC} Отвязать от интерфейса"
+        echo -e "  ${GREEN}9)${NC} Удалить полностью [!!!]"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) mim_install || { print_warn "Ошибка при установке mimic"; }; eli_pause ;;
+            2) mim_bind_iface || print_warn "Ошибка привязки"; eli_pause ;;
+            3) mim_client_kit || print_warn "Ошибка сборки комплекта"; eli_pause ;;
+            4) mim_set_xdp || print_warn "Ошибка смены XDP-режима"; eli_pause ;;
+            5) mim_status; eli_pause ;;
+            6) mim_test || print_warn "Ошибка теста"; eli_pause ;;
+            7) mim_update || print_warn "Ошибка обновления"; eli_pause ;;
+            8) mim_unbind || print_warn "Ошибка отвязки"; eli_pause ;;
+            9) mim_remove || print_warn "Ошибка удаления"; eli_pause ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 9"; eli_pause ;;
+        esac
+    done
+}
+
+# --> МЕНЮ: 3X-UI <--
+menu_xui() {
+    while true; do
+        eli_header
+        eli_banner "3X-UI" \
+            "Веб-панель для управления прокси-сервером Xray через браузер.
+
+  Что делает: создаёт прокси-подключения (VLESS, VMess, Trojan, Shadowsocks),
+    которые маскируют VPN-трафик под обычное посещение сайтов.
+    Провайдер и DPI-системы видят обычный HTTPS, а не VPN.
+
+  После установки: открой в браузере URL панели (будет показан),
+    войди с логином и паролем, создай inbound (подключение) и раздай
+    клиентам ссылку для импорта в приложение (v2rayNG, Nekobox, Hiddify).
+
+  Требует: Docker (ставится автоматически в разделе Старт)."
+
+        echo -e "  ${GREEN}1)${NC} Установить 3X-UI"
+        echo -e "  ${GREEN}2)${NC} Статус"
+        echo -e "  ${GREEN}3)${NC} Данные для входа"
+        echo -e "  ${GREEN}4)${NC} Показать inbound'ы"
+        echo -e "  ${GREEN}5)${NC} Бэкап БД"
+        echo ""
+        echo -e "  ${GREEN}6)${NC} Переустановить"
+        echo -e "  ${GREEN}7)${NC} Удалить [!!!]"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) xui_install       || print_warn "Ошибка при установке 3X-UI" ;;
+            2) xui_show_status   || print_warn "Ошибка при показе статуса" ;;
+            3) xui_show_creds    || print_warn "Ошибка при показе данных" ;;
+            4) xui_show_inbounds || print_warn "Ошибка при запросе inbound'ов" ;;
+            5) xui_backup_db     || print_warn "Ошибка при бэкапе" ;;
+            6) xui_reinstall     || print_warn "Ошибка при переустановке" ;;
+            7) xui_delete        || print_warn "Ошибка при удалении" ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 7" ;;
+        esac
+
+        eli_pause
+        eli_header
+    done
+}
+
+# --> МЕНЮ: OUTLINE <--
+menu_otl() {
+    while true; do
+        eli_header
+        eli_banner "Outline" \
+            "Простейший VPN на базе Shadowsocks (проект Outline Foundation).
+
+  Что делает: создаёт зашифрованный туннель. Работает по принципу ключей -
+    ты генерируешь ключ, отправляешь его другу, он вставляет в приложение
+    Outline Client и сразу получает защищённый интернет. Без настроек.
+
+  После установки: скопируй ключ для Outline Manager (будет показан),
+    вставь его в приложение Outline Manager на своём компьютере -
+    через него удобно создавать и удалять ключи для клиентов.
+
+  Требует: Docker (ставится автоматически в разделе Старт).
+  Приложения: Outline Client (Android/iOS/Windows/macOS/Linux)."
+
+        echo -e "  ${GREEN}1)${NC} Установить Outline"
+        echo -e "  ${GREEN}2)${NC} Статус"
+        echo -e "  ${GREEN}3)${NC} Ключ для Outline Manager"
+        echo -e "  ${GREEN}4)${NC} Показать ключи клиентов"
+        echo -e "  ${GREEN}5)${NC} Добавить ключ клиента"
+        echo ""
+        echo -e "  ${GREEN}6)${NC} Переустановить"
+        echo -e "  ${GREEN}7)${NC} Удалить [!!!]"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) otl_install        || print_warn "Ошибка при установке Outline" ;;
+            2) otl_show_status    || print_warn "Ошибка при показе статуса" ;;
+            3) otl_show_manager   || print_warn "Ошибка при показе ключа" ;;
+            4) otl_show_keys      || print_warn "Ошибка при показе ключей" ;;
+            5) otl_add_key        || print_warn "Ошибка при добавлении ключа" ;;
+            6) otl_reinstall      || print_warn "Ошибка при переустановке" ;;
+            7) otl_delete         || print_warn "Ошибка при удалении" ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 7" ;;
+        esac
+
+        eli_pause
+        eli_header
+    done
+}
+
+# --> МЕНЮ: ПРОКСИ <--
+# - хаб с подменю: MTProto, SOCKS5, Hysteria 2, Signal -
+menu_proxy() {
+    while true; do
+        eli_header
+        eli_banner "Прокси" \
+            "Специализированные прокси для мессенджеров и приложений.
+
+  MTProto - прокси специально для Telegram. Маскируется под HTTPS-трафик
+    (Fake TLS). Можно создать несколько штук на разных портах.
+
+  SOCKS5 - универсальный прокси с логином и паролем. Работает с любым
+    приложением, которое поддерживает SOCKS5 (браузеры, Telegram, и т.д.).
+
+  Hysteria 2 - быстрый прокси на базе QUIC/UDP. Хорошо работает на
+    каналах с потерями пакетов. Маскируется под HTTP/3 трафик.
+
+  Signal TLS Proxy - прокси для мессенджера Signal. Требует доменное имя
+    и свободные порты 80 + 443 (Let's Encrypt сертификат)."
+
+        echo -e "  ${GREEN}1)${NC} MTProto (Telegram)"
+        echo -e "  ${GREEN}2)${NC} SOCKS5"
+        echo -e "  ${GREEN}3)${NC} Hysteria 2"
+        echo -e "  ${GREEN}4)${NC} Signal TLS Proxy"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) menu_mtp  || { print_warn "Ошибка в разделе MTProto"; eli_pause; } ;;
+            2) menu_s5   || { print_warn "Ошибка в разделе SOCKS5"; eli_pause; } ;;
+            3) menu_hy2  || { print_warn "Ошибка в разделе Hysteria 2"; eli_pause; } ;;
+            4) menu_sig  || { print_warn "Ошибка в разделе Signal"; eli_pause; } ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 4"; eli_pause ;;
+        esac
+    done
+}
+
+# --> ПОДМЕНЮ: MTPROTO <--
+menu_mtp() {
+    while true; do
+        eli_header
+        eli_banner "MTProto Proxy (Telegram)" \
+            "Прокси специально для Telegram с маскировкой под HTTPS.
+
+  Как работает: Docker-контейнер mtg принимает соединения от Telegram-клиентов
+    и перенаправляет их на серверы Telegram.
+    DPI видит обычный TLS-трафик к указанному домену (Fake TLS).
+
+  Мультиинстанс: несколько прокси на разных портах.
+  Один инстанс = один секрет (mtg v2 by design без мультисекрета).
+    Если нужно несколько 'пользователей' - создай несколько инстансов
+    на разных портах.
+
+  После установки: скопируй ссылку tg://proxy и отправь тому, кому нужен
+    доступ к Telegram. Ссылка вставляется прямо в Telegram-клиент."
+
+        echo -e "  ${GREEN}1)${NC} Добавить инстанс"
+        echo -e "  ${GREEN}2)${NC} Список и ссылки"
+        echo ""
+        echo -e "  ${GREEN}3)${NC} Удалить инстанс [!!!]"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) mtp_add     || print_warn "Ошибка при добавлении MTProto" ;;
+            2) mtp_list    || print_warn "Ошибка при показе списка" ;;
+            3) mtp_remove  || print_warn "Ошибка при удалении MTProto" ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 3" ;;
+        esac
+
+        eli_pause
+        eli_header
+    done
+}
+
+# --> ПОДМЕНЮ: SOCKS5 <--
+menu_s5() {
+    while true; do
+        eli_header
+        eli_banner "SOCKS5 Proxy" \
+            "Универсальный прокси с авторизацией по логину и паролю.
+
+  Как работает: запускается Docker-контейнер, через который можно
+    проксировать трафик любого приложения (браузер, Telegram, и т.д.).
+    Подключение защищено логином и паролем.
+
+  Мультиинстанс: можно создать несколько прокси на разных портах
+    с разными логинами (например отдельный для каждого пользователя).
+
+  После установки: получишь URI вида socks5://user:pass@IP:port -
+    его нужно вставить в настройки прокси приложения."
+
+        echo -e "  ${GREEN}1)${NC} Добавить инстанс"
+        echo -e "  ${GREEN}2)${NC} Список"
+        echo ""
+        echo -e "  ${GREEN}3)${NC} Удалить инстанс [!!!]"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) s5_add    || print_warn "Ошибка при добавлении SOCKS5" ;;
+            2) s5_list   || print_warn "Ошибка при показе списка" ;;
+            3) s5_remove || print_warn "Ошибка при удалении SOCKS5" ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 3" ;;
+        esac
+
+        eli_pause
+        eli_header
+    done
+}
+
+# --> ПОДМЕНЮ: HYSTERIA 2 <--
+menu_hy2() {
+    while true; do
+        eli_header
+        eli_banner "Hysteria 2" \
+            "Быстрый прокси на базе протокола QUIC (тот же что использует YouTube).
+
+  Как работает: работает по UDP, что даёт высокую скорость даже на каналах
+    с потерями пакетов. Маскируется под обычный HTTP/3 трафик.
+    Использует self-signed сертификат (клиент должен разрешить insecure).
+
+  Мультиинстанс: можно создать несколько серверов на разных портах.
+  Мультиюзер: каждый инстанс поддерживает несколько пользователей
+    с раздельными логинами и паролями (userpass аутентификация).
+
+  Клиенты: Hiddify, Nekobox, v2rayNG - импорт по URI.
+  В настройках включить Allow Insecure / Skip Certificate Verify."
+
+        echo -e "  ${GREEN}1)${NC} Добавить инстанс"
+        echo -e "  ${GREEN}2)${NC} Список (инстансы и пользователи)"
+        echo -e "  ${GREEN}3)${NC} Добавить пользователя"
+        echo ""
+        echo -e "  ${GREEN}4)${NC} Удалить пользователя [!!!]"
+        echo -e "  ${GREEN}5)${NC} Удалить инстанс [!!!]"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) hy2_add         || print_warn "Ошибка при добавлении Hysteria 2" ;;
+            2) hy2_list        || print_warn "Ошибка при показе статуса" ;;
+            3) hy2_add_user    || print_warn "Ошибка при добавлении пользователя" ;;
+            4) hy2_remove_user || print_warn "Ошибка при удалении пользователя" ;;
+            5) hy2_remove      || print_warn "Ошибка при удалении Hysteria 2" ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 5" ;;
+        esac
+
+        eli_pause
+        eli_header
+    done
+}
+
+# --> ПОДМЕНЮ: SIGNAL <--
+menu_sig() {
+    while true; do
+        eli_header
+        eli_banner "Signal TLS Proxy" \
+            "Прокси для мессенджера Signal, чтобы он работал в заблокированных регионах.
+
+  Как работает: запускаются Docker-контейнеры (nginx), которые проксируют
+    TLS-соединения к серверам Signal через твой VPS.
+
+  Требования (обязательно!):
+    - Доменное имя, направленное на IP этого сервера (A-запись в DNS)
+    - Свободные порты 80 (для сертификата) и 443 (для прокси)
+    - Если порты заняты другими сервисами - сначала смени их порты
+
+  После установки: получишь ссылку https://signal.tube/#домен -
+    отправь её тому, кому нужен доступ к Signal."
+
+        echo -e "  ${GREEN}1)${NC} Установить"
+        echo -e "  ${GREEN}2)${NC} Статус и ссылка"
+        echo -e "  ${GREEN}3)${NC} Обновить"
+        echo ""
+        echo -e "  ${GREEN}4)${NC} Удалить [!!!]"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) sig_install || print_warn "Ошибка при установке Signal Proxy" ;;
+            2) sig_status  || print_warn "Ошибка при показе статуса Signal" ;;
+            3) sig_update  || print_warn "Ошибка при обновлении Signal" ;;
+            4) sig_remove  || print_warn "Ошибка при удалении Signal" ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 4" ;;
+        esac
+
+        eli_pause
+        eli_header
+    done
+}
+
+# --> МЕНЮ: СВЯЗЬ <--
+# - подменю: TeamSpeak, Mumble -
+menu_comms() {
+    while true; do
+        eli_header
+        eli_banner "Связь" \
+            "Голосовые серверы для общения в реальном времени (как Discord, но свой).
+
+  TeamSpeak 6 - проверенный временем голосовой сервер для команд и друзей.
+    Низкая задержка, хорошее качество звука, каналы и права доступа.
+    Клиенты: Windows, macOS, Linux, Android, iOS.
+
+  Mumble - бесплатный open source голосовой сервер.
+    Очень лёгкий (~30 MB RAM), шифрование из коробки.
+    Клиенты: Windows, macOS, Linux, Android, iOS."
+
+        echo -e "  ${GREEN}1)${NC} TeamSpeak 6"
+        echo -e "  ${GREEN}2)${NC} Mumble"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) menu_ts  || { print_warn "Ошибка в разделе TeamSpeak"; eli_pause; } ;;
+            2) menu_mbl || { print_warn "Ошибка в разделе Mumble"; eli_pause; } ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 2"; eli_pause ;;
+        esac
+    done
+}
+
+# --> МЕНЮ: TEAMSPEAK <--
+menu_ts() {
+    while true; do
+        eli_header
+        eli_banner "TeamSpeak 6" \
+            "Голосовой сервер для общения в реальном времени.
+
+  Что делает: создаёт голосовой сервер, к которому могут подключаться
+    друзья и команда через клиент TeamSpeak. Каналы, права, шифрование.
+
+  При установке: скачивается последняя версия с GitHub, создаётся
+    системный сервис. При первом запуске генерируется привилегированный
+    ключ (token) - его нужно ввести в клиенте чтобы стать админом.
+
+  После установки: скачай клиент TeamSpeak, подключись по адресу
+    IP:порт и введи ключ администратора (будет показан на экране)."
+
+        echo -e "  ${GREEN}1)${NC} Установить TeamSpeak 6"
+        echo -e "  ${GREEN}2)${NC} Статус"
+        echo -e "  ${GREEN}3)${NC} Данные для подключения"
+        echo -e "  ${GREEN}4)${NC} Бэкап БД"
+        echo -e "  ${GREEN}5)${NC} Обновить"
+        echo ""
+        echo -e "  ${GREEN}6)${NC} Переустановить"
+        echo -e "  ${GREEN}7)${NC} Удалить [!!!]"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) ts_install     || print_warn "Ошибка при установке TeamSpeak" ;;
+            2) ts_show_status || print_warn "Ошибка при показе статуса" ;;
+            3) ts_show_creds  || print_warn "Ошибка при показе данных" ;;
+            4) ts_backup_db   || print_warn "Ошибка при бэкапе" ;;
+            5) ts_update      || print_warn "Ошибка при обновлении" ;;
+            6) ts_reinstall   || print_warn "Ошибка при переустановке" ;;
+            7) ts_delete      || print_warn "Ошибка при удалении" ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 7" ;;
+        esac
+
+        eli_pause
+        eli_header
+    done
+}
+
+# --> МЕНЮ: MUMBLE <--
+menu_mbl() {
+    while true; do
+        eli_header
+        eli_banner "Mumble" \
+            "Бесплатный голосовой сервер с открытым исходным кодом.
+
+  Что делает: то же что TeamSpeak, но полностью бесплатный и лёгкий.
+    Шифрование всех соединений, низкая задержка, минимум ресурсов.
+
+  После установки: скачай клиент Mumble, подключись по адресу IP:порт.
+    Для администрирования: подключись как SuperUser с паролем,
+    который задашь при установке."
+
+        echo -e "  ${GREEN}1)${NC} Установить Mumble"
+        echo -e "  ${GREEN}2)${NC} Статус"
+        echo -e "  ${GREEN}3)${NC} Данные для подключения"
+        echo -e "  ${GREEN}4)${NC} Бэкап БД"
+        echo -e "  ${GREEN}5)${NC} Обновить"
+        echo ""
+        echo -e "  ${GREEN}6)${NC} Удалить [!!!]"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) mbl_install     || print_warn "Ошибка при установке Mumble" ;;
+            2) mbl_show_status || print_warn "Ошибка при показе статуса" ;;
+            3) mbl_show_creds  || print_warn "Ошибка при показе данных" ;;
+            4) mbl_backup      || print_warn "Ошибка при бэкапе" ;;
+            5) mbl_update      || print_warn "Ошибка при обновлении" ;;
+            6) mbl_delete      || print_warn "Ошибка при удалении" ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 6" ;;
+        esac
+
+        eli_pause
+        eli_header
+    done
+}
+
+# --> МЕНЮ: ОБСЛУЖИВАНИЕ <--
+# - подменю: Unbound, диагностика, prayer, SSH, UFW, обновления, routine -
+menu_maint() {
+    while true; do
+        eli_header
+        eli_banner "Обслуживание и диагностика" \
+            "Инструменты для поддержания сервера в рабочем состоянии.
+
+  Unbound DNS - свой DNS-резолвер для VPN-туннелей AmneziaWG.
+    Клиенты VPN будут резолвить домены через твой сервер, а не через
+    Google или Cloudflare. Ставится после создания AWG интерфейсов.
+
+  Диагностика - полная проверка сервера: железо, канал, безопасность,
+    VPN, ядро, диск, сервисы. Результат: TXT + HTML отчёт.
+
+  Prayer of Eli - аудит стека: находит расхождения между тем что
+    записано в книге и тем что реально работает, восстанавливает
+    потерянные env файлы, обновляет книгу.
+
+  SSH, UFW, обновления, бэкапы, Telegram мониторинг - внутри."
+
+        echo -e "  ${GREEN}1)${NC} Диагностика"
+        echo -e "  ${GREEN}2)${NC} Prayer of Eli (аудит и восстановление)"
+        echo ""
+        echo -e "  ${GREEN}3)${NC} Unbound DNS резолвер"
+        echo -e "  ${GREEN}4)${NC} SSH"
+        echo -e "  ${GREEN}5)${NC} Firewall (UFW)"
+        echo ""
+        echo -e "  ${GREEN}6)${NC} Обновления"
+        echo -e "  ${GREEN}7)${NC} Автообслуживание (cron, journald, logrotate)"
+        echo -e "  ${GREEN}8)${NC} Бэкап / восстановление стека"
+        echo -e "  ${GREEN}9)${NC} Telegram мониторинг"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) diag_run        || { print_warn "Ошибка при диагностике"; eli_pause; } ;;
+            2) prayer_run      || { print_warn "Ошибка в Prayer of Eli"; eli_pause; } ;;
+            3) menu_unbound    || { print_warn "Ошибка в разделе Unbound"; eli_pause; } ;;
+            4) menu_ssh        || { print_warn "Ошибка в разделе SSH"; eli_pause; } ;;
+            5) menu_ufw        || { print_warn "Ошибка в разделе UFW"; eli_pause; } ;;
+            6) menu_update     || { print_warn "Ошибка в разделе обновлений"; eli_pause; } ;;
+            7) routine_run     || { print_warn "Ошибка при автообслуживании"; eli_pause; } ;;
+            8) menu_backup     || { print_warn "Ошибка в разделе бэкапов"; eli_pause; } ;;
+            9) menu_tgbot      || { print_warn "Ошибка в разделе Telegram"; eli_pause; } ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 9"; eli_pause ;;
+        esac
+    done
+}
+
+# --> МЕНЮ: UNBOUND <--
+menu_unbound() {
+    while true; do
+        eli_header
+        eli_banner "Unbound DNS" \
+            "Свой DNS-резолвер для клиентов AmneziaWG.
+
+  Зачем: без Unbound DNS-запросы клиентов VPN идут напрямую на публичные
+    серверы (Google/Cloudflare). Провайдер клиента их не видит (VPN),
+    но Google/CF видят все запрашиваемые домены.
+
+  Два режима:
+    Рекурсивный - VPS сам резолвит домены от корневых серверов.
+      Никто снаружи не видит полный список запросов. Приватнее.
+      Первый запрос чуть медленнее (100-500ms), дальше кэш.
+    Форвард - пересылка на Google/CF/Quad9. Быстрее, менее приватно.
+
+  Слушает на IP каждого AWG-туннеля (10.8.0.1 и т.д.) и на localhost.
+  Когда ставить: после создания хотя бы одного AWG интерфейса.
+    Затем в настройках AWG выбери DNS -> Unbound."
+
+        echo -e "  ${GREEN}1)${NC} Установить / переконфигурировать Unbound"
+        echo -e "  ${GREEN}2)${NC} Статус"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) unbound_install || print_warn "Ошибка при установке Unbound" ;;
+            2) unbound_status  || print_warn "Ошибка при показе статуса" ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 2" ;;
+        esac
+
+        eli_pause
+        eli_header
+    done
+}
+
+# --> МЕНЮ: SSH <--
+menu_ssh() {
+    while true; do
+        eli_header
+        eli_banner "Управление SSH" \
+            "Настройка удалённого доступа к серверу.
+
+  SSH - это протокол, через который ты подключаешься к серверу (putty,
+    terminal). Здесь можно сменить порт (защита от сканеров), ограничить
+    вход по ключу (без пароля) и настроить автоблокировку брутфорса.
+
+  Все изменения проверяются перед применением (sshd -t). Если конфиг
+    содержит ошибку - изменения откатываются автоматически.
+
+  ВНИМАНИЕ: при смене порта или отключении парольного входа убедись что
+    у тебя есть SSH-ключ и ты помнишь новый порт, иначе потеряешь доступ!"
+
+        echo -e "  ${GREEN}1)${NC} Статус"
+        echo ""
+        echo -e "  ${GREEN}2)${NC} Сменить порт [!!!]"
+        echo -e "  ${GREEN}3)${NC} PermitRootLogin"
+        echo -e "  ${GREEN}4)${NC} Сгенерировать SSH ключ"
+        echo -e "  ${GREEN}5)${NC} Настроить fail2ban"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) ssh_show_status  || print_warn "Ошибка при показе статуса" ;;
+            2) ssh_change_port  || print_warn "Ошибка при смене порта" ;;
+            3) ssh_root_login   || print_warn "Ошибка при настройке root" ;;
+            4) ssh_generate_key || print_warn "Ошибка при генерации ключа" ;;
+            5) ssh_fail2ban     || print_warn "Ошибка при настройке fail2ban" ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 5" ;;
+        esac
+
+        eli_pause
+        eli_header
+    done
+}
+
+# --> МЕНЮ: UFW <--
+menu_ufw() {
+    while true; do
+        eli_header
+        eli_banner "Firewall (UFW)" \
+            "Файрвол - защита сервера от нежелательных подключений.
+
+  Что делает: блокирует все входящие соединения кроме тех портов,
+    которые ты явно разрешил (SSH, VPN, панели и т.д.).
+
+  Скрипт автоматически добавляет правила при установке сервисов.
+    Здесь можно вручную добавить/удалить порт или проверить,
+    все ли активные порты покрыты правилами.
+
+  ВНИМАНИЕ: перед включением убедись что порт SSH добавлен в правила,
+    иначе потеряешь доступ к серверу!"
+
+        local ufw_state=""
+        if command -v ufw &>/dev/null; then
+            ufw_state=$(ufw status 2>/dev/null || true)
+            if [[ "$ufw_state" == *"Status: active"* ]]; then
+                ufw_state="${GREEN}(*)${NC} активен"
+            else
+                ufw_state="${RED}( )${NC} неактивен"
+            fi
+        else
+            ufw_state="${RED}( )${NC} не установлен"
+        fi
+        echo -e "  UFW: ${ufw_state}"
+        echo ""
+
+        echo -e "  ${GREEN}1)${NC} Статус и правила"
+        echo -e "  ${GREEN}2)${NC} Проверить активные порты vs UFW"
+        echo ""
+        echo -e "  ${GREEN}3)${NC} Включить / выключить UFW"
+        echo -e "  ${GREEN}4)${NC} Добавить порт"
+        echo -e "  ${GREEN}5)${NC} Удалить правило [!!!]"
+        echo ""
+        echo -e "  ${GREEN}6)${NC} Сбросить все правила [!!!]"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) ufw_show_status || print_warn "Ошибка при показе статуса" ;;
+            2) ufw_check_ports || print_warn "Ошибка при проверке портов" ;;
+            3) ufw_toggle      || print_warn "Ошибка при переключении UFW" ;;
+            4) ufw_add_port    || print_warn "Ошибка при добавлении порта" ;;
+            5) ufw_delete_rule || print_warn "Ошибка при удалении правила" ;;
+            6) ufw_reset       || print_warn "Ошибка при сбросе правил" ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 6" ;;
+        esac
+
+        eli_pause
+        eli_header
+    done
+}
+
+# --> МЕНЮ: ОБНОВЛЕНИЯ <--
+menu_update() {
+    while true; do
+        eli_header
+        eli_banner "Обновления" \
+            "Проверка и установка обновлений для всех компонентов.
+
+  Каждый компонент обновляется независимо: можно обновить только систему,
+    только 3X-UI, только TeamSpeak и т.д. Или всё сразу одной кнопкой.
+
+  Перед обновлением автоматически создаётся бэкап базы данных.
+  После обновления системы может потребоваться перезагрузка (reboot)."
+
+        echo -e "  ${GREEN}1)${NC} Проверить наличие обновлений"
+        echo -e "  ${GREEN}2)${NC} Обновить систему (apt)"
+        echo -e "  ${GREEN}3)${NC} Обновить 3X-UI"
+        echo -e "  ${GREEN}4)${NC} Обновить TeamSpeak 6"
+        echo -e "  ${GREEN}5)${NC} Обновить Outline"
+        echo -e "  ${GREEN}6)${NC} Обновить AmneziaWG"
+        echo ""
+        echo -e "  ${GREEN}7)${NC} Обновить всё"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) update_scan    || print_warn "Ошибка при проверке обновлений" ;;
+            2) update_apt     || print_warn "Ошибка при обновлении apt" ;;
+            3) update_xui     || print_warn "Ошибка при обновлении 3X-UI" ;;
+            4) update_ts      || print_warn "Ошибка при обновлении TeamSpeak" ;;
+            5) update_otl     || print_warn "Ошибка при обновлении Outline" ;;
+            6) update_awg     || print_warn "Ошибка при обновлении AWG" ;;
+            7) update_all     || print_warn "Ошибка при обновлении всего" ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 7" ;;
+        esac
+
+        eli_pause
+        eli_header
+    done
+}
+
+# --> МЕНЮ: БЭКАП <--
+menu_backup() {
+    while true; do
+        eli_header
+        eli_banner "Бэкап и восстановление" \
+            "Сохранение и восстановление всех настроек стека в один архив.
+
+  Что сохраняется: ключи и конфиги AWG, база 3X-UI, ключи Outline,
+    база TeamSpeak, настройки Mumble, env-файлы всех прокси,
+    SSH конфиг, правила файрвола, crontab, книга (book_of_Eli).
+
+  Бэкап - один .tar.gz файл, который можно скачать через scp.
+  Восстановление - распаковывает архив и раскладывает файлы по местам,
+    перезапускает сервисы. Работает на чистом сервере после boot_run."
+
+        echo -e "  ${GREEN}1)${NC} Создать бэкап"
+        echo -e "  ${GREEN}2)${NC} Восстановить из бэкапа"
+        echo -e "  ${GREEN}3)${NC} Список бэкапов"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) backup_create   || print_warn "Ошибка при создании бэкапа" ;;
+            2) backup_restore  || print_warn "Ошибка при восстановлении" ;;
+            3) backup_list     || print_warn "Ошибка при показе списка" ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 3" ;;
+        esac
+
+        eli_pause
+        eli_header
+    done
+}
+
+# --> МЕНЮ: TELEGRAM МОНИТОРИНГ <--
+menu_tgbot() {
+    while true; do
+        eli_header
+        eli_banner "Telegram мониторинг" \
+            "Автоматические уведомления в Telegram при проблемах на сервере.
+
+  Как работает: каждые N минут скрипт проверяет все сервисы, диск и RAM.
+    Если что-то упало или диск заполнен - бот отправит сообщение в Telegram.
+    Если всё в порядке - молчит, не спамит.
+
+  Для настройки нужно: создать бота через @BotFather в Telegram,
+    получить токен бота и свой chat_id (через @userinfobot).
+
+  Это внутренний мониторинг. Для проверки доступности сервера снаружи
+    (жив ли сервер вообще) используй uptimerobot.com - это бесплатно."
+
+        echo -e "  ${GREEN}1)${NC} Настроить бота"
+        echo -e "  ${GREEN}2)${NC} Статус"
+        echo -e "  ${GREEN}3)${NC} Тестовое сообщение"
+        echo ""
+        echo -e "  ${GREEN}4)${NC} Отключить [!!!]"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) tgbot_setup   || print_warn "Ошибка при настройке" ;;
+            2) tgbot_status  || print_warn "Ошибка при показе статуса" ;;
+            3) tgbot_test    || print_warn "Ошибка при тесте" ;;
+            4) tgbot_disable || print_warn "Ошибка при отключении" ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 4" ;;
+        esac
+
+        eli_pause
+        eli_header
+    done
+}
+
+# --> ТОЧКА ВХОДА: ГЛАВНОЕ МЕНЮ <--
+eli_main() {
+    eli_header
+
+    while true; do
+        echo ""
+        echo -e "  ${GREEN}1)${NC} Старт (первичная настройка VPS)"
+        echo -e "  ${GREEN}2)${NC} VPN и прокси (AmneziaWG, 3X-UI, Outline, MTProto, Signal)"
+        echo -e "  ${GREEN}3)${NC} Связь (TeamSpeak, Mumble)"
+        echo -e "  ${GREEN}4)${NC} Обслуживание и диагностика"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Выход"
+        echo ""
+        eli_read_choice choice
+
+        case "$choice" in
+            1) boot_run   || { print_warn "Ошибка в разделе Старт"; }; eli_pause ;;
+            2) menu_vpn   || { print_warn "Ошибка в разделе VPN"; eli_pause; } ;;
+            3) menu_comms || { print_warn "Ошибка в разделе Связь"; eli_pause; } ;;
+            4) menu_maint || { print_warn "Ошибка в разделе Обслуживание"; eli_pause; } ;;
+            0) echo ""; echo "  Выход."; echo ""; exit 0 ;;
+            *) print_warn "Введите число от 0 до 4"; eli_pause ;;
+        esac
+
+        eli_header
+    done
+}

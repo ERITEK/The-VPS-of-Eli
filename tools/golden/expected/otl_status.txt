@@ -1,0 +1,15 @@
+# golden: otl_status
+--- вывод ---
+
+<cyan><bold>>> Статус Outline<off>
+<cyan>------------------------------------------------------<off>
+  <green>[-OK-]<off> Контейнер shadowbox: запущен
+  CPU: 0.42%  RAM: 38.5MiB / 512MiB
+  <cyan>*<off> IP: 203.0.113.9, API: 8443, Keys: 8444
+  <red>[xXx]<off> API не отвечает
+--- вызовы платформы ---
+CMD flock -n 200
+CMD docker ps --format {{.Names}}
+CMD docker stats shadowbox --no-stream --format CPU: {{.CPUPerc}}  RAM: {{.MemUsage}}
+CMD curl -fsk --connect-timeout 5 https://203.0.113.9:8443/abc123/access-keys
+rc=0

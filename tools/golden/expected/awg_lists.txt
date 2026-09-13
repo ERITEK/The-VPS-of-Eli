@@ -1,0 +1,11 @@
+# golden: awg_lists
+--- вывод ---
+iface_env: <SB>/etc/awg-setup/iface_awg0.env
+iface_list: awg0 awg1
+clients_awg0: laptop phone
+clients_awg1: tablet
+next_free_ip_awg0: 10.8.0.4
+exists_phone: да
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

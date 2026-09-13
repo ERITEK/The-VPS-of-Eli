@@ -1,0 +1,16 @@
+# golden: ts_status
+--- вывод ---
+
+<cyan><bold>>> Статус TeamSpeak 6<off>
+<cyan>------------------------------------------------------<off>
+  <red>[xXx]<off> Сервис: не запущен
+  <cyan>*<off> Адрес: 203.0.113.9:9987
+  <cyan>*<off> Версия: 6.0.0
+  <green>[-OK-]<off> Voice 9987/udp: OK
+  <green>[-OK-]<off> FT 30033/tcp: OK
+--- вызовы платформы ---
+CMD flock -n 200
+CMD systemctl is-active --quiet teamspeak
+CMD ss -ulnp
+CMD ss -tlnp
+rc=0
