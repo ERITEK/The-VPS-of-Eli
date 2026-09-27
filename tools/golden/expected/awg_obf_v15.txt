@@ -4,7 +4,7 @@
 <cyan><bold>>> Тест обфускации AmneziaWG<off>
 <cyan>------------------------------------------------------<off>
 
-  <bold>Интерфейс:<off>      <cyan>awg0<off>
+  <bold>Интерфейс:<off>      <cyan>awg2<off>
   <bold>Порт:<off>           <cyan>45903/udp<off>
   <bold>Версия AWG:<off>     <cyan>1.5<off>
   <bold>Внешний iface:<off>  <cyan>eth0<off>
@@ -58,32 +58,31 @@
       700 байт  x1    <off><- data-трафик (после рукопожатия)<off>
 
   <bold>Первый байт UDP payload (WG type field):<off>
-    пакет #1: 0x00 (0) -> обфусцирован (не равен 1-4)
-    пакет #2: 0x00 (0) -> обфусцирован (не равен 1-4)
-    пакет #3: 0xb6 (182) -> обфусцирован (не равен 1-4)
-    пакет #4: 0x34 (52) -> обфусцирован (не равен 1-4)
-    пакет #5: 0x6a (106) -> обфусцирован (не равен 1-4)
+    пакет #7: 0x00 (0) -> обфусцирован (не равен 1-4)
+    пакет #8: 0x7f (127) -> обфусцирован (не равен 1-4)
+    пакет #9: 0x61 (97) -> обфусцирован (не равен 1-4)
+    пакет #10: 0x0e (14) -> обфусцирован (не равен 1-4)
 
   <bold>Проверка I1 signature chain:<off>
-  <green>[-OK-]<off>     I1 найден в пакете #1 на offset 0 байт
+  <green>[-OK-]<off>     I1 найден в пакете #7 на offset 0 байт
     Искомый фрагмент: 000100002112a442...
 
   <bold>Итог:<off>
   <green>[-OK-]<off> S1 padding работает (пакет 294 байт)
   <green>[-OK-]<off> S2 padding работает (пакет 239 байт)
   <green>[-OK-]<off> Jc junk пакеты присутствуют (4 до рукопожатия, ожидалось 4)
-  <green>[-OK-]<off> H1-H4 mangle работает (первые байты не равны 1-4)
+  <green>[-OK-]<off> H1-H4 mangle работает (первые байты payload не vanilla-типа)
   <green>[-OK-]<off> I1 signature chain применён (найден статичный фрагмент)
 
   <cyan>*<off> Дамп был сохранён как <SB>/tmp/<pcap> и сейчас удаляется
 --- вызовы платформы ---
+CMD awg show awg2 latest-handshakes
+CMD awg show awg2 latest-handshakes
 CMD flock -n 200
 CMD ip route show default
-CMD awg show awg0 latest-handshakes
-CMD timeout 60 tcpdump -i eth0 -nn -U -s 0 udp port 45903 -w <SB>/tmp/<pcap>
 CMD tcpdump -i eth0 -nn -U -s 0 udp port 45903 -w <SB>/tmp/<pcap>
-CMD awg show awg0 latest-handshakes
 CMD tcpdump -nn -r <SB>/tmp/<pcap>
 CMD tcpdump -nn -r <SB>/tmp/<pcap> -c 100
-CMD tcpdump -nn -r <SB>/tmp/<pcap> -c 10 -x
+CMD tcpdump -nn -r <SB>/tmp/<pcap> -c 100 -x
+CMD timeout 60 tcpdump -i eth0 -nn -U -s 0 udp port 45903 -w <SB>/tmp/<pcap>
 rc=0

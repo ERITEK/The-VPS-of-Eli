@@ -26,10 +26,12 @@ fi
 # - защита от параллельного запуска: PID держателя пишется в файл блокировки, -
 # - чтобы второй запуск сказал, кого ждать, а не только факт занятости -
 LOCKFILE="/var/run/eli-stack.lock"
-# - PID держателя читается ДО открытия: exec с ">" обнуляет файл блокировки -
+# - PID держателя читается до захвата, файл открывается без обнуления (>>): -
+# - неудачный запуск не стирает запись живого держателя, запись PID -
+# - выполняется только после успешного flock -
 ELI_LOCK_PID=""
 [[ -f "$LOCKFILE" ]] && ELI_LOCK_PID=$(tr -dc '0-9' < "$LOCKFILE" 2>/dev/null)
-exec 200>"$LOCKFILE"
+exec 200>>"$LOCKFILE"
 if ! flock -n 200; then
     if [[ -n "$ELI_LOCK_PID" ]] && kill -0 "$ELI_LOCK_PID" 2>/dev/null; then
         ELI_LOCK_CMD=$(ps -o args= -p "$ELI_LOCK_PID" 2>/dev/null | head -1)
@@ -44,7 +46,7 @@ if ! flock -n 200; then
 fi
 printf '%s\n' "$$" > "$LOCKFILE"
 
-ELI_VERSION="1.0.2"
+ELI_VERSION="1.0.3"
 
 # --> ФУНКЦИИ ВЫВОДА <--
 # - единый набор для всего скрипта -
@@ -89,15 +91,22 @@ eli_banner() {
 }
 
 # --> ФУНКЦИИ ВВОДА <--
-# - Ввод всегда идёт через /dev/tty, а не через текущие stdout/stderr -
-# - Это важно для диагностики: там вывод временно уходит в FIFO/tee -
-# - Не используем read -e с цветным prompt: readline неверно считает ширину ANSI-кодов -
-# - из-за чего Backspace и перерисовка строки дают мусор в терминале -
+# - ввод всегда через /dev/tty: stdout/stderr здесь временно уходит в FIFO/tee диагностики -
+# - read -e не используется: readline неверно считает ширину ANSI-промпта, Backspace мусорит -
 eli_tty_reset() {
     # - право доступа на /dev/tty есть и без управляющего терминала: проверяем открытием -
     if { : < /dev/tty; } 2>/dev/null; then
         stty sane -ixon -ixoff < /dev/tty 2>/dev/null || true
     fi
+    return 0
+}
+
+eli_tty_restore() {
+    # - сохранённый режим возвращается один раз: повторный вызов - пустая операция -
+    if [[ -n "${ELI_TTY_SAVED_STTY:-}" ]] && { : < /dev/tty; } 2>/dev/null; then
+        stty "${ELI_TTY_SAVED_STTY}" < /dev/tty 2>/dev/null || true
+    fi
+    ELI_TTY_SAVED_STTY=""
     return 0
 }
 
@@ -113,7 +122,19 @@ eli_read_line() {
         printf '%b' "$__eli_prompt" > /dev/tty
 
         __eli_old_stty=$(stty -g < /dev/tty 2>/dev/null || true)
-        stty -echo -icanon min 1 time 0 < /dev/tty 2>/dev/null || true
+        # - посимвольный режим включает сам read -s -n: он запоминает режим терминала на входе -
+        # - и возвращает его при любом исходе, включая сигнал; ручной stty до read вреден -
+        # - ловушки остаются страховкой на аварийный выход между чтениями -
+        if [[ -n "$__eli_old_stty" ]]; then
+            ELI_TTY_SAVED_STTY="$__eli_old_stty"
+            # - ловушки вызывающего сохраняются до постановки своих и возвращаются -
+            # - после чтения: снять обязаны только свои; имя без local, тела ловушек -
+            # - выполняются после возврата функции -
+            ELI_SAVED_TRAPS="$(trap -p EXIT; trap -p INT; trap -p TERM)"
+            trap 'eli_tty_restore' EXIT
+            trap 'eli_tty_restore; trap - EXIT INT TERM; eval "$ELI_SAVED_TRAPS"; kill -INT $$' INT
+            trap 'eli_tty_restore; trap - EXIT INT TERM; eval "$ELI_SAVED_TRAPS"; kill -TERM $$' TERM
+        fi
 
         while IFS= read -r -s -n 1 __eli_ch < /dev/tty; do
             case "$__eli_ch" in
@@ -155,6 +176,11 @@ eli_read_line() {
         done
 
         [[ -n "$__eli_old_stty" ]] && stty "$__eli_old_stty" < /dev/tty 2>/dev/null || eli_tty_reset
+        ELI_TTY_SAVED_STTY=""
+        if [[ -n "$__eli_old_stty" ]]; then
+            trap - EXIT INT TERM
+            eval "$ELI_SAVED_TRAPS"
+        fi
     else
         eli_tty_reset
         printf '%b' "$__eli_prompt" >&2

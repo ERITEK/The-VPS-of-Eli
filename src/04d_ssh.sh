@@ -66,7 +66,7 @@ ssh_change_port() {
             print_warn "Уже текущий"
             continue
         fi
-        if ss -H -tln 2>/dev/null | grep -Eq "[:.]${new_port}[[:space:]]"; then
+        if eli_port_busy "$new_port" tcp; then
             print_err "Занят"
             continue
         fi
@@ -131,16 +131,30 @@ ssh_change_port() {
         return 1
     fi
     eli_safety_disarm "eli-ssh-rollback"
+    # - откат мог сработать во время ожидания ответа: эффективный порт -
+    # - сверяется снова, иначе правило UFW снимается с действующего порта -
+    local eff_final
+    eff_final=$(ssh_get_port)
+    if [[ "$eff_final" != "$new_port" ]]; then
+        if command -v ufw &>/dev/null; then
+            ufw delete allow "${new_port}/tcp" 2>/dev/null || true
+        fi
+        print_err "Откат таймера уже выполнен: sshd слушает ${eff_final}, ожидался ${new_port}; UFW-правило ${new_port} снято, книга не изменена"
+        return 1
+    fi
     if command -v ufw &>/dev/null; then
         ufw delete allow "${current_port}/tcp" 2>/dev/null || true
     fi
     print_ok "SSH порт: ${new_port}"
-    # - fail2ban джейл следит за актуальным портом -
+    # - fail2ban джейл следит за актуальным портом: правка подтверждается -
+    # - строкой в файле, иначе джейл молча остаётся на снятом порту -
     local _jail="/etc/fail2ban/jail.d/ssh-hardening.local"
     if [[ -f "$_jail" ]]; then
         sed -i "s/^port[[:space:]]*=.*/port = ${new_port}/" "$_jail"
-        systemctl restart fail2ban 2>/dev/null || true
-        print_ok "fail2ban jail: порт ${new_port}"
+        if eli_fact_line "$_jail" "^port[[:space:]]*= ${new_port}$" "Джейл fail2ban: порт ${new_port}"; then
+            systemctl restart fail2ban 2>/dev/null || true
+            print_ok "fail2ban jail: порт ${new_port}"
+        fi
     fi
     book_write ".system.ssh_port" "$new_port" number
     print_warn "Переподключайся: ssh -p ${new_port} root@IP"
@@ -204,7 +218,15 @@ ssh_root_login() {
 
 ssh_fail2ban() {
     print_section "Настройка Fail2ban"
-    command -v fail2ban-client &>/dev/null || apt-get install -y -qq fail2ban || true
+    # - индекс обновляется перед установкой, результат проверяется повторной -
+    # - проверкой бинаря: отказ виден здесь, а не в конце настройки -
+    if ! command -v fail2ban-client &>/dev/null; then
+        apt-get update -qq >/dev/null 2>&1 || true
+        if ! apt-get install -y -qq fail2ban || ! command -v fail2ban-client &>/dev/null; then
+            print_err "Fail2ban не установлен: проверь apt-get update и повтори"
+            return 1
+        fi
+    fi
     local ssh_port; ssh_port=$(ssh_get_port)
     local maxretry="5" bantime="3600" findtime="600"
     local _in=""
@@ -266,14 +288,21 @@ maxretry = ${maxretry}
 bantime  = ${bantime}
 findtime = ${findtime}
 EOF
+    # - джейл подтверждается строкой в файле: иначе служба поднимается -
+    # - с прежним портом, а настройка печатает успех -
+    eli_fact_line /etc/fail2ban/jail.d/ssh-hardening.local "^port[[:space:]]*= ${ssh_port}$" "Джейл fail2ban" || return 1
     systemctl enable fail2ban 2>/dev/null || true
     systemctl restart fail2ban 2>/dev/null || true
-    sleep 2
-    if systemctl is-active --quiet fail2ban; then
-        print_ok "Fail2ban запущен"
-    else
-        print_err "Не запустился"
+    if ! eli_fact_unit fail2ban 5; then
+        return 1
     fi
+    # - служба активна, но джейл может не подняться (опечатка, занятый порт): -
+    # - статус джейла спрашивается у клиента fail2ban -
+    if ! fail2ban-client status sshd 2>/dev/null | grep -q "Status"; then
+        print_err "Fail2ban: джейл sshd не поднялся: fail2ban-client status sshd"
+        return 1
+    fi
+    print_ok "Fail2ban запущен (джейл sshd)"
     return 0
 }
 
@@ -297,11 +326,19 @@ ssh_generate_key() {
         ask_yn "Ключ существует, перезаписать?" "n" ow
         [[ "$ow" != "yes" ]] && return 0
     fi
+    local gen_rc=0
     if [[ "$kt" == "ed25519" ]]; then
-        ssh-keygen -t ed25519 -f "$kp" -C "$comment" -N ""
+        ssh-keygen -t ed25519 -f "$kp" -C "$comment" -N "" || gen_rc=$?
     else
-        ssh-keygen -t rsa -b 4096 -f "$kp" -C "$comment" -N ""
+        ssh-keygen -t rsa -b 4096 -f "$kp" -C "$comment" -N "" || gen_rc=$?
     fi
+    if (( gen_rc != 0 )); then
+        print_err "ssh-keygen отказал (код ${gen_rc}): проверь ${kd} и повтори"
+        return 1
+    fi
+    # - открытый ключ подтверждается содержимым: пустой файл иначе даёт -
+    # - молча "Ключ уже в authorized_keys" или пустую строку в файле -
+    eli_fact_line "${kp}.pub" '^(ssh-|ecdsa-)' "Открытый ключ ${kp}.pub" || return 1
     chmod 600 "$kp"
     chmod 644 "${kp}.pub"
     print_ok "Ключ: ${kp}"
@@ -313,12 +350,21 @@ ssh_generate_key() {
     ask_yn "Добавить в authorized_keys?" "y" add
     if [[ "$add" == "yes" ]]; then
         local ak="${kd}/authorized_keys"
-        local pub; pub=$(cat "${kp}.pub")
+        local pub; pub=$(cat "${kp}.pub" 2>/dev/null)
+        if [[ -z "$pub" ]]; then
+            print_err "Открытый ключ пуст: в ${ak} не добавлен"
+            return 1
+        fi
         if grep -qF "$pub" "$ak" 2>/dev/null; then
             print_info "Ключ уже в authorized_keys"
         else
             echo "$pub" >> "$ak"
             chmod 600 "$ak"
+            # - факт: строка ключа читается в файле тем же сравнением, которым писалась -
+            if ! grep -qF "$pub" "$ak" 2>/dev/null; then
+                print_err "Ключ не записался в ${ak}: проверь права на ${kd}"
+                return 1
+            fi
             print_ok "Добавлен"
         fi
     fi

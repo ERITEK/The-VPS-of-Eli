@@ -3,7 +3,7 @@
 
 <cyan><bold>>> Статус Signal Proxy<off>
 <cyan>------------------------------------------------------<off>
-  <green>(*)<off> <bold>Signal Proxy<off>  2 контейнеров
+  <green>(*)<off> <bold>Signal Proxy<off>  3 контейнеров
   Домен: signal.example.com
 
   <bold>Ссылка для подключения:<off>
@@ -12,5 +12,6 @@
   <bold>Ручная настройка:<off> Signal -> Настройки -> Прокси -> signal.example.com
 --- вызовы платформы ---
 CMD flock -n 200
+CMD docker ps --format {{.Names}}
 CMD docker ps --format {{.Names}}
 rc=0

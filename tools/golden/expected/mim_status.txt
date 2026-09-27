@@ -15,4 +15,5 @@
 CMD flock -n 200
 CMD systemctl is-active mimic@eth0.service
 CMD systemctl is-active awg-quick@awg0
+CMD awg show awg0 listen-port
 rc=0

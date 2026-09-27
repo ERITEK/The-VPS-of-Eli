@@ -111,6 +111,16 @@ update_xui() {
     ask_yn "Обновить 3X-UI?" "y" confirm
     [[ "$confirm" != "yes" ]] && return 0
 
+    # - панель останавливается до копий БД: снимок и восстановление идут -
+    # - только в остановленную базу; незавершённый стоп виден отказом -
+    if systemctl is-active --quiet "${XUI_SERVICE:-x-ui}" 2>/dev/null; then
+        systemctl stop "${XUI_SERVICE:-x-ui}" 2>/dev/null || true
+        if ! eli_fact_unit "${XUI_SERVICE:-x-ui}" 5 inactive; then
+            print_err "Панель не остановилась: обновление отменено"
+            return 1
+        fi
+    fi
+
     # - бэкап БД -
     if [[ -f "${XUI_DB:-/usr/local/x-ui/db/x-ui.db}" ]]; then
         mkdir -p "${XUI_BACKUP_DIR:-/etc/3xui/backups}"
@@ -122,10 +132,11 @@ update_xui() {
     fi
 
     # - прямое скачивание tar.gz -
-    # - upstream install.sh имеет prompts (port/SSL), которые зависнут -
+    # - штатный установщик имеет интерактивные prompts (port/SSL), которые зависнут -
     # - сохраняем настройки/базу и обновляем только бинарь -
     if ! _xui_fetch_release_info; then
         print_err "Последний релиз 3X-UI: $(eli_github_reason)"
+        systemctl restart "${XUI_SERVICE:-x-ui}" 2>/dev/null || true
         return 1
     fi
     print_info "Новая версия: ${XUI_TAG}"
@@ -139,6 +150,7 @@ update_xui() {
             print_err "Копия БД не создана - обновление остановлено"
             print_info "Проверь доступ к ${XUI_DB} и место в /tmp"
             rm -f "$db_backup"
+            systemctl restart "${XUI_SERVICE:-x-ui}" 2>/dev/null || true
             return 1
         fi
     fi
@@ -146,6 +158,7 @@ update_xui() {
     if ! _xui_fetch_and_extract; then
         print_err "Не удалось скачать/распаковать 3X-UI"
         [[ -n "$db_backup" && -f "$db_backup" ]] && rm -f "$db_backup"
+        systemctl restart "${XUI_SERVICE:-x-ui}" 2>/dev/null || true
         return 1
     fi
 
@@ -158,25 +171,25 @@ update_xui() {
         else
             print_err "Не удалось вернуть БД из копии"
             print_info "Копия оставлена: ${db_backup}"
+            systemctl restart "${XUI_SERVICE:-x-ui}" 2>/dev/null || true
             return 1
         fi
     fi
 
     if ! _xui_install_cli_and_unit; then
         print_err "Не удалось установить CLI/unit"
+        systemctl restart "${XUI_SERVICE:-x-ui}" 2>/dev/null || true
         return 1
     fi
 
     _xui_fix_nofile 2>/dev/null || true
     systemctl restart "${XUI_SERVICE:-x-ui}" 2>/dev/null || true
-    sleep 3
-    if systemctl is-active --quiet "${XUI_SERVICE:-x-ui}" 2>/dev/null; then
-        local new_ver; new_ver=$("${XUI_BIN:-/usr/local/x-ui/x-ui}" -v 2>/dev/null | head -1 || echo "?")
-        print_ok "3X-UI обновлён: ${new_ver} (${XUI_TAG})"
-        book_write ".3xui.version" "${new_ver}"
-    else
-        print_err "3X-UI не запустился после обновления"
+    if ! eli_fact_unit "${XUI_SERVICE:-x-ui}" 5; then
+        return 1
     fi
+    local new_ver; new_ver=$("${XUI_BIN:-/usr/local/x-ui/x-ui}" -v 2>/dev/null | head -1 || echo "?")
+    print_ok "3X-UI обновлён: ${new_ver} (${XUI_TAG})"
+    book_write ".3xui.version" "${new_ver}"
     return 0
 }
 

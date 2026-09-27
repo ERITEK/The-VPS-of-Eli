@@ -59,10 +59,9 @@ _awg_ask_version() {
 }
 
 # --> AWG: БЮДЖЕТ ДОБИВКИ ПО MTU <--
-# - потолок внешнего пакета 1492 байта: PPPoE, самый узкий из типовых каналов -
-# - обвязка пакета данных 60 байт: 20 IPv4 + 8 UDP + 32 заголовок и тег WG/AWG -
-# - добивка транспорта (S4) и ContentPaddingAddition идут поверх обвязки, поэтому -
-# - их сумма ограничена остатком до потолка: MTU + 60 + S4 + CPA <= 1492 -
+# - потолок внешнего пакета 1492 (PPPoE); обвязка пакета данных 60 байт -
+# - (20 IPv4 + 8 UDP + 32 заголовок и тег); добивка S4 и CPA идут поверх обвязки: -
+# - MTU + 60 + S4 + CPA <= 1492 -
 AWG_WIRE_MAX=1492
 AWG_WIRE_BASE=60
 
@@ -92,13 +91,10 @@ _awg_pad_check() {
 }
 
 # --> AWG: ГЕНЕРАЦИЯ ОБФУСКАЦИИ <--
-# - общие параметры Jc/Jmin/Jmax/S1/S2 с учётом MTU -
-# - arg1: auto (yes/no), arg2: MTU (по умолчанию 1320), arg3: нижняя граница S1/S2 -
-# - arg3 нужен для AWG 3.0: HeaderProtectionKey требует S1-S4 >= 12 -
-# - AWG handshake overhead: init=148 байт, response=92 байт, IP+UDP headers=28 байт -
-# - Jmax <= MTU - 176 (148 + 28), S1 <= MTU - 148, S2 <= MTU - 92 -
-# - это бюджет рукопожатия; бюджет добивки транспорта считается отдельно (выше) -
-# - S1 != S2, S1 + 56 != S2, S2 + 56 != S1 (симметричное правило ядра) -
+# - общие параметры Jc/Jmin/Jmax/S1/S2 с учётом MTU; arg1: auto, arg2: MTU (дефолт 1320), -
+# - arg3: нижняя граница S1/S2 (AWG 3.0: HPK требует S1-S4 >= 12) -
+# - бюджет рукопожатия (init=148, response=92, IP+UDP=28): Jmax <= MTU-176, S1 <= MTU-148, -
+# - S2 <= MTU-92; S1 != S2, S1+56 != S2, S2+56 != S1 -
 _awg_gen_obf_common() {
     local auto="$1"
     local mtu="${2:-1320}"
@@ -147,7 +143,7 @@ _awg_gen_obf_common() {
         # - Jc: 1-128 -
         while true; do
             ask "Jc (1-128)" "8" OBF_JC
-            [[ "$OBF_JC" =~ ^(0|[1-9][0-9]*)$ ]] && (( OBF_JC >= 1 && OBF_JC <= 128 )) && break
+            [[ "$OBF_JC" =~ ^(0|[1-9][0-9]*)$ ]] && _awg_num_leq "1" "$OBF_JC" && _awg_num_leq "$OBF_JC" "128" && break
             print_err "Jc должен быть целым от 1 до 128"
         done
         # - Jmin < Jmax, Jmin >= 8, Jmax <= jmax_limit -
@@ -155,7 +151,7 @@ _awg_gen_obf_common() {
             ask "Jmin (8-${jmax_limit})" "64" OBF_JMIN
             ask "Jmax (>Jmin, <=${jmax_limit})" "$(( jmax_limit > 1000 ? 1000 : jmax_limit ))" OBF_JMAX
             if [[ "$OBF_JMIN" =~ ^(0|[1-9][0-9]*)$ && "$OBF_JMAX" =~ ^(0|[1-9][0-9]*)$ ]] \
-               && (( OBF_JMIN >= 8 && OBF_JMIN < OBF_JMAX && OBF_JMAX <= jmax_limit )); then
+               && _awg_num_leq "8" "$OBF_JMIN" && ! _awg_num_leq "$OBF_JMAX" "$OBF_JMIN" && _awg_num_leq "$OBF_JMAX" "$jmax_limit"; then
                 break
             fi
             print_err "Нужно 8 <= Jmin < Jmax <= ${jmax_limit}. Повторите ввод"
@@ -163,13 +159,13 @@ _awg_gen_obf_common() {
         # - S1 в диапазоне s_floor..s1_limit, рекомендуется 15-150 -
         while true; do
             ask "S1 (${s_floor}-${s1_limit}, рекомендуется 15-150)" "20" OBF_S1
-            [[ "$OBF_S1" =~ ^(0|[1-9][0-9]*)$ ]] && (( OBF_S1 >= s_floor && OBF_S1 <= s1_limit )) && break
+            [[ "$OBF_S1" =~ ^(0|[1-9][0-9]*)$ ]] && _awg_num_leq "$s_floor" "$OBF_S1" && _awg_num_leq "$OBF_S1" "$s1_limit" && break
             print_err "S1 должно быть целым от ${s_floor} до ${s1_limit}"
         done
         # - S2 с симметричной проверкой -
         while true; do
             ask "S2 (${s_floor}-${s2_limit}, S1±56 != S2)" "35" OBF_S2
-            if ! [[ "$OBF_S2" =~ ^(0|[1-9][0-9]*)$ ]] || (( OBF_S2 < s_floor || OBF_S2 > s2_limit )); then
+            if ! [[ "$OBF_S2" =~ ^(0|[1-9][0-9]*)$ ]] || ! _awg_num_leq "$s_floor" "$OBF_S2" || ! _awg_num_leq "$OBF_S2" "$s2_limit"; then
                 print_err "S2 должно быть целым от ${s_floor} до ${s2_limit}"
                 continue
             fi
@@ -299,11 +295,9 @@ _awg_cps_preset_dns() {
 }
 
 # --> AWG: ПУЛ ШАБЛОНОВ STUN <--
-# - STUN Binding Request (RFC 5389) с SOFTWARE attribute, имитирует реальные клиенты -
-# - NOFP: 32 байта, без FINGERPRINT. FP: 40 байт, с рандомным FINGERPRINT -
-# - FINGERPRINT в STUN это CRC32, AWG не умеет считать CRC на лету поэтому рандомный -
-# - глубокий DPI с проверкой CRC отбракует, статистический DPI пропустит -
-# - BARE: голые 20 байт, без атрибутов, так шлют современные браузеры -
+# - STUN Binding Request (RFC 5389) с SOFTWARE attribute, имитация реальных клиентов -
+# - NOFP: 32 байта без FINGERPRINT; FP: 40 с рандомным (CRC32 AWG на лету не считает: -
+# - глубокий DPI отбракует, статистический пропустит); BARE: голые 20 байт, как у браузеров -
 AWG_CPS_STUN_POOL_BARE=(
     "<b 0x000100002112a442><r 12>"
 )
@@ -469,7 +463,7 @@ _awg_port_in_burned() {
 # - порт занят сокетом системы или другим интерфейсом? 0 = да -
 _awg_port_in_use() {
     local p="$1" f
-    ss -H -uln 2>/dev/null | grep -Eq "[:.]${p}[[:space:]]" && return 0
+    eli_port_busy "$p" udp && return 0
     for f in "${AWG_SETUP_DIR}"/iface_*.env; do
         [[ -f "$f" ]] || continue
         [[ "$(eli_source_env "$f" SERVER_PORT || true)" == "$p" ]] && return 0
@@ -485,19 +479,21 @@ _awg_conf_set_port() {
     grep -q "^ListenPort = ${new_port}\$" "$file"
 }
 
-# - случайный свободный UDP-порт: вне портов существующих интерфейсов, -
-# - вне burned-списка (порт помечается при ротации и остывает TTL дней) -
-# - типичные порты VPN-скриптов (1618 и прочие ниже 20000) не предлагаются -
-# - намеренно: у дефолтных портов установщиков плохая репутация у DPI-эвристик -
+# - случайный свободный UDP-порт: вне портов интерфейсов и burned-списка (порт -
+# - остывает TTL дней); порты VPN-скриптов (ниже 20000) не предлагаются: у дефолтов -
+# - установщиков плохая репутация у DPI-эвристик -
 _awg_default_port() {
+    # - свободный порт ищется до 10 попыток: занятые и выгоревшие -
+    # - кандидаты пропускаются; без результата - отказ без значения -
     local p attempt
     for attempt in 1 2 3 4 5 6 7 8 9 10; do
-        p=$(rand_port 20000 60000)
+        p=$(rand_port 20000 60000) || return 1
         _awg_port_in_use "$p" && continue
         _awg_port_in_burned "$p" && continue
-        break
+        printf '%s\n' "$p"
+        return 0
     done
-    echo "$p"
+    return 1
 }
 
 # - переписать Endpoint в клиентском conf на новый порт: только строки Endpoint, -
@@ -510,10 +506,8 @@ _awg_repoint_client_conf() {
 }
 
 # --> AWG: ВАЛИДАЦИЯ CPS-СТРОК <--
-# - проверяет корректность CPS для I1..I5, вызывается при manual-вводе -
-# - разрешённые теги: <b 0xHEX>, <r N>, <rd N>, <rc N>, <t> -
-# - <c> явно запрещён: не реализован в amneziawg-go -
-# - возвращает 0 если OK, 1 если ошибка (сообщение в stderr) -
+# - проверяет CPS для I1..I5 при manual-вводе; разрешённые теги: <b 0xHEX>, <r N>, <rd N>, <rc N>, <t> -
+# - <c> запрещён: не реализован в amneziawg-go; rc: 0 = OK, 1 = ошибка (сообщение в stderr) -
 _awg_cps_validate() {
     local s="$1"
     [[ -z "$s" ]] && return 0
@@ -552,7 +546,7 @@ _awg_cps_validate() {
                 ;;
             "r "*|"rd "*|"rc "*)
                 local n="${tag##* }"
-                if ! [[ "$n" =~ ^(0|[1-9][0-9]*)$ ]] || (( n < 1 )); then
+                if ! [[ "$n" =~ ^(0|[1-9][0-9]*)$ ]] || ! _awg_num_leq "1" "$n"; then
                     echo "CPS: <${tag}> - N должно быть положительным целым" >&2
                     return 1
                 fi
@@ -632,12 +626,9 @@ _awg_cps_random() {
 }
 
 # --> AWG: ГЕНЕРАЦИЯ I1-I5 <--
-# - auto: меню выбора пресета (DNS / STUN / SIP), дефолт STUN -
-# - STUN: дополнительный вопрос про FINGERPRINT (рандомный CRC32) -
-# - SIP: предупреждение, если MTU ниже максимума меню (работает на любом MTU>=1280) -
-# - DNS: warning что уязвимо к современному DPI -
-# - I1 обязателен для 1.5/2.0, I2-I5 - случайные CPS для энтропии -
-# - MTU берётся из переменной окружения TUNNEL_MTU_CURRENT (устанавливается в install flow) -
+# - auto: меню пресетов (DNS/STUN/SIP), дефолт STUN; STUN: вопрос про FINGERPRINT (CRC32) -
+# - SIP: предупреждение при MTU ниже максимума меню; DNS: warning об уязвимости к DPI -
+# - I1 обязателен для 1.5/2.0, I2-I5 - случайные CPS; MTU из TUNNEL_MTU_CURRENT (install flow) -
 _awg_gen_i_packets() {
     local auto="$1"
     local mtu="${TUNNEL_MTU_CURRENT:-0}"
@@ -773,10 +764,9 @@ _awg_gen_i_packets() {
     fi
 }
 
-# - выбор домена для DNS-пресета из пула с региональной группировкой -
-# - маркеры ###Заголовок выводятся как разделители без номеров -
-# - сквозная нумерация только для доменов, дефолт www.cloudflare.com -
-# - результат кладёт в AWG_DNS_SELECTED -
+# - выбор домена для DNS-пресета: маркеры ###Заголовок - разделители без номеров, -
+# - сквозная нумерация только для доменов, дефолт www.cloudflare.com, результат -
+# - в AWG_DNS_SELECTED -
 _awg_choose_dns_domain() {
     AWG_DNS_SELECTED=""
     echo ""
@@ -874,8 +864,12 @@ _awg_gen_obf_v1() {
                 print_err "H1-H4 должны быть целыми числами"
                 continue
             fi
-            if (( OBF_H1 < 5 || OBF_H2 < 5 || OBF_H3 < 5 || OBF_H4 < 5 )); then
+            if ! _awg_num_leq "5" "$OBF_H1" || ! _awg_num_leq "5" "$OBF_H2" || ! _awg_num_leq "5" "$OBF_H3" || ! _awg_num_leq "5" "$OBF_H4"; then
                 print_err "H1-H4 должны быть >= 5 (значения 1..4 зарезервированы vanilla WG)"
+                continue
+            fi
+            if ! _awg_num_leq "$OBF_H1" "2147483647" || ! _awg_num_leq "$OBF_H2" "2147483647" || ! _awg_num_leq "$OBF_H3" "2147483647" || ! _awg_num_leq "$OBF_H4" "2147483647"; then
+                print_err "H1-H4 должны быть <= 2147483647 (рекомендуемый потолок)"
                 continue
             fi
             if [[ "$OBF_H1" == "$OBF_H2" || "$OBF_H1" == "$OBF_H3" || "$OBF_H1" == "$OBF_H4" \
@@ -913,17 +907,11 @@ _awg_ranges_overlap() {
     return 1
 }
 
-# - AWG 2.0: S3/S4 + ranged H1-H4 + I1-I5 -
-# - arg1: auto, arg2: MTU -
-# - S3 (cookie packet padding): рекомендованный и технический диапазон 0-64 -
-# - S4 (transport packet padding): рекомендованный и технический диапазон 0-32 -
-# - S3 != S4, S3 + 56 != S4, S4 + 56 != S3 (симметрично правилу S1/S2) -
-# - H1-H4 ranged: 4 равные зоны по ~500M в пространстве [5, 2^31-1] -
-# - в каждой зоне под-диапазон ширины 100-1000, зоны не пересекаются 'задумано' -
-# - arg3: нижняя граница S1-S4 (AWG 3.0 передаёт 12 из за требования HeaderProtection) -
-# - arg4: "hp" - активен HeaderProtection (AWG 3.0): в manual H1-H4 вводятся -
-# - одиночными значениями (включая 1..4 vanilla, дефолт 1,2,3,4) или диапазонами; -
-# - диапазоны вместе с RandomTrailers дают мисдетект коротких пакетов -
+# - AWG 2.0: S3/S4 + ranged H1-H4 + I1-I5; arg1: auto, arg2: MTU; arg3: floor S1-S4 -
+# - (AWG 3.0 передаёт 12: HeaderProtection); arg4 "hp": в manual H1-H4 одиночными -
+# - (дефолт 1,2,3,4) или диапазонами - с RT дают мисдетект коротких пакетов -
+# - S3 (cookie padding): 0-64, S4 (транспорт): 0-32, симметрия S1/S2 (+56); H1-H4: -
+# - 4 зоны по ~500M в [5, 2^31-1], под-диапазон 100-1000 ("задумано") -
 _awg_gen_obf_v2() {
     local auto="$1"
     local mtu="${2:-1320}"
@@ -937,6 +925,7 @@ _awg_gen_obf_v2() {
 
     # - локальный хелпер: случайный under-диапазон ширины 100-1000 в пределах [lo, hi] -
     _awg_h_subrange() {
+        local _h _pair _si _si_f
         local lo="$1" hi="$2" span start
         span=$(rand_range 100 1000)
         start=$(rand_range "$lo" $(( hi - span )))
@@ -948,9 +937,8 @@ _awg_gen_obf_v2() {
         local s3_lo=$(( s_floor > 1 ? s_floor : 1 ))
         OBF_S3=$(rand_range "$s3_lo" "$s3_limit")
         # - S4: от max(floor, 1) до 32, 0 исключён как у S3 (0 = отсутствие паддинга, палится); -
-        # - исключения S3, S3-56, S3+56 (симметрично правилу S1/S2) -
-        # - потолок S4 урезается бюджетом добивки, минус минимум под ContentPaddingAddition (4 байта): -
-        # - при MTU 1400 остаётся 28, при 1320 и ниже потолок упирается в собственные 32 -
+        # - исключения S3, S3-56, S3+56; потолок урезает бюджет добивки минус 4 байта CPA: -
+        # - при MTU 1400 остаётся 28, при 1320 и ниже упирается в собственные 32 -
         local s4_cap="$s4_limit"
         local _pad_budget; _pad_budget=$(_awg_pad_budget "$mtu")
         local _s4_max=$(( _pad_budget - 4 ))
@@ -1008,12 +996,12 @@ _awg_gen_obf_v2() {
         echo -e "  ${CYAN}S3 != S4, S3+56 != S4, S4+56 != S3 (симметричное правило).${NC}"
         while true; do
             ask "S3 (${s_floor}-${s3_limit})" "20" OBF_S3
-            [[ "$OBF_S3" =~ ^(0|[1-9][0-9]*)$ ]] && (( OBF_S3 >= s_floor && OBF_S3 <= s3_limit )) && break
+            [[ "$OBF_S3" =~ ^(0|[1-9][0-9]*)$ ]] && _awg_num_leq "$s_floor" "$OBF_S3" && _awg_num_leq "$OBF_S3" "$s3_limit" && break
             print_err "S3 должно быть целым от ${s_floor} до ${s3_limit}"
         done
         while true; do
             ask "S4 (${s_floor}-${s4_limit})" "15" OBF_S4
-            if ! [[ "$OBF_S4" =~ ^(0|[1-9][0-9]*)$ ]] || (( OBF_S4 < s_floor || OBF_S4 > s4_limit )); then
+            if ! [[ "$OBF_S4" =~ ^(0|[1-9][0-9]*)$ ]] || ! _awg_num_leq "$s_floor" "$OBF_S4" || ! _awg_num_leq "$OBF_S4" "$s4_limit"; then
                 print_err "S4 должно быть целым от ${s_floor} до ${s4_limit}"
                 continue
             fi
@@ -1054,17 +1042,21 @@ _awg_gen_obf_v2() {
                 for _h in OBF_H1 OBF_H2 OBF_H3 OBF_H4; do
                     local -n _hv="$_h"
                     if [[ "$_hv" =~ ^(0|[1-9][0-9]*)$ ]]; then
-                        if (( _hv < 1 || _hv > 4294967295 )); then
+                        if [[ "$_hv" == "0" ]] || ! _awg_num_leq "$_hv" "4294967295"; then
                             print_err "${_h}: число в границах 1..4294967295"
                             _fmt_ok="no"; unset -n _hv; break
                         fi
                     elif [[ "$_hv" =~ ^(0|[1-9][0-9]*)-(0|[1-9][0-9]*)$ ]]; then
                         _lo="${_hv%-*}"; _hi="${_hv#*-}"
-                        if (( _lo < 5 )); then
+                        if ! _awg_num_leq "5" "$_lo"; then
                             print_err "${_h}: в диапазоне min >= 5 (границы 1..4 задевают vanilla WG)"
                             _fmt_ok="no"; unset -n _hv; break
                         fi
-                        if (( _lo > _hi )); then
+                        if ! _awg_num_leq "$_hi" "4294967295"; then
+                            print_err "${_h}: max должен быть <= 4294967295 (u32)"
+                            _fmt_ok="no"; unset -n _hv; break
+                        fi
+                        if ! _awg_num_leq "$_lo" "$_hi"; then
                             print_err "${_h}: min (${_lo}) должен быть <= max (${_hi})"
                             _fmt_ok="no"; unset -n _hv; break
                         fi
@@ -1100,7 +1092,7 @@ _awg_gen_obf_v2() {
                 (( _att++ ))
                 [[ $_att -ge $_max_att ]] && { _give_up=1; break; }
             done
-            # - невалидные H1-H4 в конфиг не уходят: фоллбек на рекомендованные апстримом -
+            # - невалидные H1-H4 в конфиг не уходят: фоллбек на 1, 2, 3, 4 -
             if [[ $_give_up -eq 1 ]]; then
                 print_warn "Слишком много невалидных вводов, фиксирую H1-H4 = 1, 2, 3, 4"
                 OBF_H1=1; OBF_H2=2; OBF_H3=3; OBF_H4=4
@@ -1128,11 +1120,15 @@ _awg_gen_obf_v2() {
                     _fmt_ok="no"; unset -n _hv; break
                 fi
                 _lo="${_hv%-*}"; _hi="${_hv#*-}"
-                if (( _lo < 5 )); then
+                if ! _awg_num_leq "5" "$_lo"; then
                     print_err "${_h}: min должен быть >= 5 (1..4 зарезервированы vanilla WG)"
                     _fmt_ok="no"; unset -n _hv; break
                 fi
-                if (( _lo > _hi )); then
+                if ! _awg_num_leq "$_hi" "2147483647"; then
+                    print_err "${_h}: max должен быть <= 2147483647 (потолок зон H)"
+                    _fmt_ok="no"; unset -n _hv; break
+                fi
+                if ! _awg_num_leq "$_lo" "$_hi"; then
                     print_err "${_h}: min (${_lo}) должен быть <= max (${_hi})"
                     _fmt_ok="no"; unset -n _hv; break
                 fi
@@ -1184,11 +1180,20 @@ _awg_gen_obf_v2() {
     TUNNEL_MTU_CURRENT="$mtu" _awg_gen_i_packets "$auto"
 }
 
+# --> AWG: СРАВНЕНИЕ ЧИСЕЛ БЕЗ ПЕРЕПОЛНЕНИЯ <--
+# - десятичные строки сравниваются по длине и лексикографически: -
+# - арифметика bash 64-битная, заворачивается и пропускает 2^64+N -
+_awg_num_leq() {
+    local a="$1" b="$2"
+    (( ${#a} < ${#b} )) && return 0
+    (( ${#a} > ${#b} )) && return 1
+    [[ "$a" == "$b" || "$a" < "$b" ]]
+}
+
 # --> AWG: ЗАПРОС U16 ЗНАЧЕНИЯ ИЛИ ДИАПАЗОНА <--
-# - arg1: приглашение ввода, arg2: дефолт (пустой = разрешён пропуск), arg3: имя переменной -
-# - парсер tools молча режет значения выше 65535 в u16_range, поэтому валидируем сами -
-# - пробелы вокруг дефиса нормализуем: юзер может ввести "100 - 300" -
-# - результат: пусто (пропуск), число или min-max -
+# - arg1: приглашение, arg2: дефолт (пусто = разрешён пропуск), arg3: имя переменной -
+# - парсер tools молча режет >65535 в u16_range - валидируем сами; пробелы вокруг -
+# - дефиса нормализуем ("100 - 300"); результат: пусто, число или min-max -
 _awg_ask_u16_range() {
     local prompt="$1" def="$2" _var="$3"
     local _v _lo _hi
@@ -1200,7 +1205,7 @@ _awg_ask_u16_range() {
             return 0
         fi
         if [[ "$_v" =~ ^(0|[1-9][0-9]*)$ ]]; then
-            if (( _v <= 65535 )); then
+            if _awg_num_leq "$_v" "65535"; then
                 printf -v "$_var" '%s' "$_v"
                 return 0
             fi
@@ -1209,7 +1214,7 @@ _awg_ask_u16_range() {
         fi
         if [[ "$_v" =~ ^(0|[1-9][0-9]*)-(0|[1-9][0-9]*)$ ]]; then
             _lo="${_v%-*}"; _hi="${_v#*-}"
-            if (( _lo <= _hi && _hi <= 65535 )); then
+            if _awg_num_leq "$_lo" "$_hi" && _awg_num_leq "$_hi" "65535"; then
                 printf -v "$_var" '%s' "$_v"
                 return 0
             fi
@@ -1221,16 +1226,10 @@ _awg_ask_u16_range() {
 }
 
 # --> AWG: ГЕНЕРАЦИЯ ОБФУСКАЦИИ AWG 3.0 <--
-# - база 2.0 (ranged H, S3/S4, I1-I5) с floor S >= 12 -
-# - RandomTrailers в auto выключен: RT с ranged H1-H3 молча роняет -
-# - транспортные пакеты, ширина диапазона модулирует степень - вплоть до -
-# - коллапса канала; паника на cookie reply устранена в свежих релизах -
-# - движка, но фича остаётся молодой: с RT канал медленнее, чем без него -
-# - HeaderProtectionKey (base64, общий для сервера и клиента, требует S1-S4 >= 12) -
-# - ContentPaddingAddition (u16 диапазон, клиентская сторона) -
-# - RandomTrailers (on/off), DisableCookies (on/off), AdvancedSecurity (on/off) -
-# - PersistentKeepalive (число или min-max), тайминги только в manual -
-# - u16-значения валидируем сами: парсер tools молча режет > 65535 -
+# - база 2.0 с floor S >= 12; HPK (base64, общий для сервера и клиента), ContentPaddingAddition -
+# - (u16 диапазон, клиент), RandomTrailers, DisableCookies, AdvancedSecurity, PersistentKeepalive; -
+# - тайминги только в manual -
+# - RT в auto выключен: ranged H + RT молча роняет транспортные пакеты; u16 валидируем сами -
 _awg_gen_obf_v3() {
     local auto="$1"
     local mtu="${2:-1320}"
@@ -1240,11 +1239,45 @@ _awg_gen_obf_v3() {
     OBF_REKEY_AFTER_TIME=""; OBF_REKEY_TIMEOUT=""; OBF_REJECT_AFTER_TIME=""
     OBF_KEEPALIVE_TIMEOUT=""; OBF_MAX_HANDSHAKE_ATTEMPTS=""
 
+    # - RandomTrailers спрашивается первым: набор хвостов фиксированный -
+    # - (S=12, H=1..4, добивка 0) и не проходит правила свободного ввода -
+    if [[ "$auto" != "yes" ]]; then
+        echo ""
+        echo -e "  ${CYAN}RandomTrailers - случайные хвосты пакетам маскируют размер трафика.${NC}"
+        echo -e "  ${YELLOW}Внимание: фича 3.1 сырая в текущих релизах. С ranged H1-H4 молча${NC}"
+        echo -e "  ${YELLOW}роняет короткие пакеты (amneziawg-go#186, открыт): чем шире${NC}"
+        echo -e "  ${YELLOW}диапазоны, тем хуже, вплоть до нуля. В go до 2026-08-13 была ещё${NC}"
+        echo -e "  ${YELLOW}и паника на cookie reply (#178). Live: любой RT on медленнее RT off.${NC}"
+        echo -e "  ${CYAN}При включении хвостов S1-S4 ставятся в 12, H1-H4 - в 1/2/3/4, а добивка - в 0:${NC}"
+        echo -e "  ${CYAN}иначе фича не работает. Хвосты идут поверх бюджета добивки, внешний пакет${NC}"
+        echo -e "  ${CYAN}может превысить ${AWG_WIRE_MAX}, а канал становится медленнее и шумнее.${NC}"
+        local _rt=""
+        ask_yn "RandomTrailers" "n" _rt
+        OBF_RTRAILERS=$([[ "$_rt" == "yes" ]] && echo on || echo off)
+    fi
+
     # - базовые параметры 2.0 с нижней границей S1-S4 = 12 (требование HeaderProtection) -
-    _awg_gen_obf_v2 "$auto" "$mtu" 12 "hp"
+    if [[ "$OBF_RTRAILERS" == "on" ]]; then
+        # - набор хвостов задан протоколом: padding S равен размеру nonce -
+        # - header-protection (12), ranged H с хвостами роняет короткие пакеты, -
+        # - поэтому значения ставятся мимо правил свободного ввода -
+        _awg_gen_obf_v2 "yes" "$mtu" 12 "hp"
+        OBF_S1=12; OBF_S2=12; OBF_S3=12; OBF_S4=12
+        OBF_H1=1; OBF_H2=2; OBF_H3=3; OBF_H4=4
+        OBF_CPA=0
+        print_info "RandomTrailers on: S1-S4 = 12, H1-H4 = 1/2/3/4, ContentPaddingAddition = 0"
+    else
+        _awg_gen_obf_v2 "$auto" "$mtu" 12 "hp"
+    fi
 
     if [[ "$auto" == "yes" ]]; then
         OBF_HPK=$(wg genkey)
+        # - факт: без валидного ключа HeaderProtection не пишется, а отчёт -
+        # - вызывающего печатает "ключ задан" -
+        if [[ ! "${OBF_HPK:-}" =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
+            print_err "HeaderProtectionKey не сгенерирован: проверь wg genkey"
+            return 1
+        fi
         # - ContentPaddingAddition: компактный диапазон, ловит статистику размеров -
         # - верхняя граница урезается остатком бюджета добивки после S4 -
         local _cpa_lo; _cpa_lo=$(rand_range 4 16)
@@ -1256,7 +1289,7 @@ _awg_gen_obf_v3() {
         OBF_CPA="${_cpa_lo}-${_cpa_hi}"
         # - добивка урезана бюджетом: строка ниже показывает итоговый внешний пакет -
         _awg_pad_check "$mtu" "${OBF_S4:-0}" "$OBF_CPA" || true
-        # - RT off по умолчанию: причину см. в шапке функции -
+        # - RT off по умолчанию: RT с ranged H молча роняет транспортные пакеты -
         OBF_RTRAILERS="off"
         OBF_NOCOOKIES="off"
         OBF_ADVSEC="off"
@@ -1264,13 +1297,21 @@ _awg_gen_obf_v3() {
         echo ""
         echo -e "  ${CYAN}HeaderProtection - шифрование заголовков ключом ChaCha20 (32 байта).${NC}"
         echo -e "  ${CYAN}Ключ должен быть одинаковым на сервере и у всех клиентов.${NC}"
+        local _hpk_try=0
         while true; do
             ask "HeaderProtectionKey (Enter = сгенерировать)" "" OBF_HPK
             # - пустой ввод: ключ генерируется после Enter и в промпте не отображается -
             [[ -z "$OBF_HPK" ]] && OBF_HPK=$(wg genkey)
             if [[ ${#OBF_HPK} -eq 44 && "$OBF_HPK" =~ ^[A-Za-z0-9+/]+={1,2}$ ]]; then break; fi
+            # - без wg ключ не появится: после трёх неудач выходим, а не крутимся -
+            _hpk_try=$(( _hpk_try + 1 ))
+            if (( _hpk_try >= 3 )); then
+                print_err "HeaderProtectionKey не задан за 3 попытки: проверь wg genkey"
+                return 1
+            fi
             print_err "Ключ должен быть base64 из 44 символов (формат wg genkey)"
         done
+        if [[ "$OBF_RTRAILERS" != "on" ]]; then
         echo -e "  ${CYAN}ContentPaddingAddition - случайная добивка каждого пакета, число или диапазон min-max (0-65535).${NC}"
         echo -e "  ${CYAN}Для каждого пакета размер добивки выбирается случайно внутри диапазона${NC}"
         echo -e "  ${CYAN}(например 5-26 = +5..+26 байт). Добивка идёт поверх обвязки пакета, поэтому${NC}"
@@ -1286,25 +1327,6 @@ _awg_gen_obf_v3() {
             fi
             break
         done
-        echo -e "  ${CYAN}RandomTrailers - случайные хвосты пакетам маскируют размер трафика.${NC}"
-        echo -e "  ${YELLOW}Внимание: фича 3.1 сырая в текущих релизах. С ranged H1-H4 молча${NC}"
-        echo -e "  ${YELLOW}роняет короткие пакеты (amneziawg-go#186, открыт): чем шире${NC}"
-        echo -e "  ${YELLOW}диапазоны, тем хуже, вплоть до нуля. В go до 2026-08-13 была ещё${NC}"
-        echo -e "  ${YELLOW}и паника на cookie reply (#178). Live: любой RT on медленнее RT off.${NC}"
-        echo -e "  ${CYAN}При включении хвостов S1-S4 ставятся в 12, H1-H4 - в 1/2/3/4, а добивка - в 0:${NC}"
-        echo -e "  ${CYAN}иначе фича не работает. Хвосты идут поверх бюджета добивки, внешний пакет${NC}"
-        echo -e "  ${CYAN}может превысить ${AWG_WIRE_MAX}, а канал становится медленнее и шумнее.${NC}"
-        local _rt=""
-        ask_yn "RandomTrailers" "n" _rt
-        OBF_RTRAILERS=$([[ "$_rt" == "yes" ]] && echo on || echo off)
-        # - RandomTrailers работает только при нулевой добивке, padding S должен равняться -
-        # - размеру nonce header-protection (12), а ranged H1-H4 с хвостами роняет короткие -
-        # - пакеты: при хвостах ставим S=12, H=1..4 и добивку в 0 -
-        if [[ "$OBF_RTRAILERS" == "on" ]]; then
-            OBF_S1=12; OBF_S2=12; OBF_S3=12; OBF_S4=12
-            OBF_H1=1; OBF_H2=2; OBF_H3=3; OBF_H4=4
-            OBF_CPA=0
-            print_info "RandomTrailers on: S1-S4 = 12, H1-H4 = 1/2/3/4, ContentPaddingAddition = 0"
         fi
         echo -e "  ${CYAN}DisableCookies - отключение cookie-защиты от перегрузки. Не рекомендуется:${NC}"
         echo -e "  ${CYAN}без cookies сервер отвечает на мусорные handshake полными ответами.${NC}"
@@ -1327,7 +1349,7 @@ _awg_gen_obf_v3() {
     echo -e "  ${CYAN}0 = отключить keepalive (только для клиентов с белым IP).${NC}"
     _awg_ask_u16_range "PersistentKeepalive" "25" OBF_KEEPALIVE
 
-    # - тайминги протокола: только manual, пусто = дефолты апстрима -
+    # - тайминги протокола: только manual, пусто = дефолты протокола -
     if [[ "$auto" != "yes" ]]; then
         local _tim=""
         ask_yn "Настроить тайминги протокола (Rekey/Reject и т.д.)?" "n" _tim
@@ -1483,11 +1505,58 @@ _awg_show_qr() {
     echo ""
 }
 
+# --> AWG: ВРЕМЕННОЕ ПРАВИЛО UFW НА ВРЕМЯ РАЗДАЧИ <--
+# - правило помечается комментарием, номер строки ищется по метке: снятие -
+# - по номеру не задевает правило пользователя на тот же порт -
+
+# - номер строки своего правила в нумерованном списке; пусто - правила нет -
+_awg_dl_rule_num() {
+    ufw status numbered 2>/dev/null | sed -n 's/^ *\[ *\([0-9][0-9]*\)\].*AWG conf dl temp.*/\1/p' | head -1
+}
+
+# - порт уже открыт правилом UFW (пользователя или прошлого прогона): своё правило -
+# - не заводится, чужое не трогается; снимок вывода вместо grep -q: под pipefail -
+# - закрытие пайпа по совпадению даёт SIGPIPE и ложное "правила нет" -
+_awg_dl_port_open() {
+    local port="$1" rules=""
+    rules=$(ufw show added 2>/dev/null || true)
+    grep -Eq "(^|[[:space:]])${port}/tcp([[:space:]]|$)" <<< "$rules"
+}
+
+# - открытие порта: факт - метка видна в списке правил; при провале ссылку -
+# - не выдаём, иначе скачивание упрётся в фильтр и пользователь увидит -
+# - только таймаут раздачи -
+_awg_dl_open() {
+    local port="$1"
+    ufw allow "${port}/tcp" comment "AWG conf dl temp" >/dev/null 2>&1
+    if [[ -z "$(_awg_dl_rule_num)" ]]; then
+        print_err "UFW не открыл ${port}/tcp для раздачи: проверь ufw status verbose"
+        return 1
+    fi
+    return 0
+}
+
+# - закрытие порта: строки своего правила снимаются по номерам, пока видна -
+# - метка (UFW держит записи v4 и v6 отдельными строками); правило -
+# - пользователя на тот же порт остаётся -
+_awg_dl_close() {
+    local port="$1" num i
+    for i in 1 2 3; do
+        num=$(_awg_dl_rule_num)
+        [[ -z "$num" ]] && return 0
+        echo "y" | ufw delete "$num" >/dev/null 2>&1
+    done
+    if [[ -n "$(_awg_dl_rule_num)" ]]; then
+        print_err "Правило раздачи осталось в UFW: закрой ${port}/tcp в разделе UFW"
+        return 1
+    fi
+    return 0
+}
+
 # --> AWG: РАЗДАЧА КЛИЕНТСКОГО КОНФИГА ПО ССЫЛКЕ <--
-# - временный одноразовый HTTP-сервер: ссылка живёт 10 минут либо -
-# - закрывается сразу после первого скачивания. Путь неугадываемый (32 симв). -
-# - на время раздачи добавляется временное UFW-правило, снимается после. -
-# - конфиг содержит приватный ключ: короткое окно + случайный путь + автозакрытие -
+# - одноразовый HTTP-сервер: ссылка живёт 10 минут или до первого скачивания, -
+# - путь неугадываемый (32 симв), UFW-правило временное; конфиг несёт приватный ключ: -
+# - короткое окно + случайный путь + автозакрытие -
 _awg_serve_conf() {
     local conf_file="$1"
     [[ -f "$conf_file" ]] || { print_err "Конфиг не найден: ${conf_file}"; return 1; }
@@ -1505,12 +1574,17 @@ _awg_serve_conf() {
     token=$(rand_str 32)
     fname=$(basename "$conf_file")
 
-    # - временное UFW-правило только на время раздачи (если UFW активен) -
+    # - временное UFW-правило только на время раздачи (если UFW активен); -
+    # - порт уже открыт правилом пользователя: своё не заводим - UFW знает -
+    # - правило по спецификации и переписал бы комментарий чужого правила -
     local ufw_added="no"
-    local _ufw_state
-    _ufw_state=$(ufw status 2>/dev/null || true)
-    if command -v ufw &>/dev/null && [[ "$_ufw_state" == *"Status: active"* ]]; then
-        ufw allow "${port}/tcp" comment "AWG conf dl temp" >/dev/null 2>&1 && ufw_added="yes"
+    if command -v ufw &>/dev/null && ufw_active; then
+        if _awg_dl_port_open "$port"; then
+            print_info "Порт ${port}/tcp уже открыт в UFW: раздача идёт без временного правила"
+        else
+            _awg_dl_open "$port" || return 1
+            ufw_added="yes"
+        fi
     fi
 
     echo ""
@@ -1524,9 +1598,12 @@ _awg_serve_conf() {
     print_info "Ctrl-C чтобы прервать раздачу досрочно"
 
     # - одноразовый сервер: отдаёт только правильный путь, стоп после первого GET или через 600с -
-    python3 - "$conf_file" "$port" "$token" "$fname" << 'PYEOF'
-import sys, time, http.server, socketserver
-conf, port, token, fname = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+    # - токен передаётся окружением, а не аргументом: argv процесса видит в ps -
+    # - любой пользователь системы всё время раздачи -
+    env ELI_DL_TOKEN="$token" python3 - "$conf_file" "$port" "$fname" << 'PYEOF'
+import sys, os, time, http.server, socketserver
+conf, port, fname = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+token = os.environ["ELI_DL_TOKEN"]
 want = "/%s/%s" % (token, fname)
 data = open(conf, "rb").read()
 state = {"done": False}
@@ -1564,16 +1641,23 @@ sys.exit(0 if state["done"] else 1)
 PYEOF
     local rc=$?
 
-    # - снять временное UFW-правило -
+    # - снять временное UFW-правило: своё правило снимается по номеру строки, -
+    # - правило пользователя на тот же порт остаётся на месте -
+    local close_rc=0
     if [[ "$ufw_added" == "yes" ]]; then
-        ufw delete allow "${port}/tcp" >/dev/null 2>&1 || true
+        if _awg_dl_close "$port"; then
+            print_info "Правило раздачи на ${port}/tcp снято"
+        else
+            close_rc=1
+        fi
     fi
 
     if [[ $rc -eq 0 ]]; then
         print_ok "Конфиг скачан, раздача закрыта"
     else
-        print_info "Раздача завершена (таймаут или прервано), порт закрыт"
+        print_info "Раздача завершена (таймаут или прервано)"
     fi
+    [[ $close_rc -eq 0 ]] || return 1
     return 0
 }
 
@@ -1585,6 +1669,7 @@ awg_iface_conf()   { echo "${AWG_CONF_DIR}/${1}.conf"; }
 
 # --> AWG: СПИСОК ИНТЕРФЕЙСОВ <--
 awg_get_iface_list() {
+    local f
     local result=()
     for f in "${AWG_SETUP_DIR}"/iface_*.env; do
         [[ -f "$f" ]] || continue
@@ -1597,6 +1682,7 @@ awg_get_iface_list() {
 
 # --> AWG: СПИСОК КЛИЕНТОВ ИНТЕРФЕЙСА <--
 awg_get_client_list() {
+    local d
     local iface="$1" cdir
     cdir=$(awg_iface_clients "$iface")
     local result=()
@@ -1619,6 +1705,15 @@ awg_next_free_ip() {
     local used_ips=""
     [[ -f "$conf" ]] && used_ips=$(grep "^AllowedIPs" "$conf" \
         | awk '{print $3}' | cut -d'/' -f1)
+    # - адреса клиентов учитываются все, включая паузных: их пира в -
+    # - конфиге нет, но адрес закреплён за клиентом -
+    local cdir cfile cname
+    cdir=$(awg_iface_clients "$iface")
+    for cfile in "${cdir}"/*/client.conf; do
+        [[ -f "$cfile" ]] || continue
+        cname=$(basename "$(dirname "$cfile")")
+        used_ips="${used_ips}"$'\n'"$(_awg_client_ip "$iface" "$cname")"
+    done
     local i=2
     while [[ $i -lt 254 ]]; do
         local candidate="${base}.${i}"
@@ -1635,7 +1730,9 @@ awg_next_free_ip() {
 awg_remove_peer_by_pubkey() {
     local conf="$1" pub_key="$2"
     local tmpfile
-    tmpfile=$(mktemp)
+    # - временный файл рядом с конфигом: перенос внутри каталога атомарен, -
+    # - обрыв не оставляет усечённый конфиг под штатным именем -
+    tmpfile=$(mktemp "${conf}.tmp.XXXXXX") || { print_err "Нет временного файла для ${conf}"; return 1; }
     # - потоковая awk логика: буфер только для [Peer], остальное печатается сразу -
     # - pending[] копит пустые строки чтобы срезать их если следом идёт удаляемый блок -
     awk -v target="$pub_key" '
@@ -1649,7 +1746,7 @@ awg_remove_peer_by_pubkey() {
                     key_val = buf[i]
                     sub(/^[[:space:]]*PublicKey[[:space:]]*=[[:space:]]*/, "", key_val)
                     gsub(/[[:space:]]+$/, "", key_val)
-                    if (key_val == target) { has_match = 1; break }
+                    if (key_val == target) { has_match = 1; found = 1; break }
                 }
             }
             if (has_match) {
@@ -1663,7 +1760,7 @@ awg_remove_peer_by_pubkey() {
             }
             buf_active = 0; buf_len = 0
         }
-        BEGIN { buf_active = 0; buf_len = 0; pending_len = 0 }
+        BEGIN { buf_active = 0; buf_len = 0; pending_len = 0; found = 0 }
         /^\[Peer\][[:space:]]*$/ {
             flush_buffer()
             buf_active = 1
@@ -1691,11 +1788,24 @@ awg_remove_peer_by_pubkey() {
         END {
             flush_buffer()
             for (i = 1; i <= pending_len; i++) print pending[i]
+            exit (found ? 0 : 3)
         }
     ' "$conf" > "$tmpfile"
+    local awk_rc=$?
 
-    if [[ -s "$tmpfile" ]]; then
-        mv "$tmpfile" "$conf"; chmod 600 "$conf"
+    if [[ $awk_rc -eq 0 && -s "$tmpfile" ]]; then
+        # - перенос подтверждается кодом возврата: при отказе конфиг остаётся с пиром -
+        if ! mv "$tmpfile" "$conf"; then
+            print_err "Не удалось заменить ${conf}: пир остался в конфиге"
+            rm -f "$tmpfile"
+            return 1
+        fi
+        chmod 600 "$conf"
+        return 0
+    elif [[ $awk_rc -eq 3 ]]; then
+        print_warn "Пир с этим ключом в конфиге не найден"
+        rm -f "$tmpfile"
+        return 2
     else
         print_err "Ошибка при обработке конфига (awk вернул пусто)"
         rm -f "$tmpfile"
@@ -1708,7 +1818,9 @@ awg_remove_peer_by_pubkey() {
 awg_remove_peer_by_name() {
     local conf="$1" cname="$2"
     local tmpfile
-    tmpfile=$(mktemp)
+    # - временный файл рядом с конфигом: перенос внутри каталога атомарен, -
+    # - обрыв не оставляет усечённый конфиг под штатным именем -
+    tmpfile=$(mktemp "${conf}.tmp.XXXXXX") || { print_err "Нет временного файла для ${conf}"; return 1; }
     awk -v target="$cname" '
         function flush_buffer() {
             if (!buf_active) return
@@ -1756,17 +1868,27 @@ awg_remove_peer_by_name() {
         END {
             flush_buffer()
             for (i = 1; i <= pending_len; i++) print pending[i]
-            exit (found ? 0 : 1)
+            exit (found ? 0 : 3)
         }
     ' "$conf" > "$tmpfile"
     local awk_rc=$?
 
     if [[ $awk_rc -eq 0 && -s "$tmpfile" ]]; then
-        mv "$tmpfile" "$conf"; chmod 600 "$conf"
+        # - перенос подтверждается кодом возврата: при отказе конфиг остаётся с пиром -
+        if ! mv "$tmpfile" "$conf"; then
+            print_err "Не удалось заменить ${conf}: пир остался в конфиге"
+            rm -f "$tmpfile"
+            return 1
+        fi
+        chmod 600 "$conf"
         print_ok "Блок [Peer] удалён по имени '${cname}'"
         return 0
+    elif [[ $awk_rc -eq 3 ]]; then
+        print_warn "Блок [Peer] клиента '${cname}' в конфиге не найден"
+        rm -f "$tmpfile"
+        return 2
     else
-        print_err "Не удалось найти блок '${cname}'"
+        print_err "Ошибка при обработке конфига (awk вернул пусто)"
         rm -f "$tmpfile"
         return 1
     fi
@@ -1814,6 +1936,7 @@ awg_apply_peer() {
 
 # --> AWG: ВЫБОР ИНТЕРФЕЙСА (ИНТЕРАКТИВНЫЙ) <--
 awg_select_iface() {
+    local iface
     local ifaces
     ifaces=$(awg_get_iface_list)
     if [[ -z "$ifaces" ]]; then
@@ -1865,10 +1988,9 @@ awg_migrate_legacy() {
     [[ ! -f "$legacy_env" ]] && return 0
     [[ -f "$target_env" ]] && return 0
 
-    # - наследие живое только вместе с ключами: server.env пишется и новой -
-    # - установкой ради совместимости и переживает снятие интерфейса, а без -
-    # - ключей по одному env интерфейс воссоздался бы призраком: без conf и -
-    # - юнита, но в списках интерфейсов и в конфиге DNS резолвера -
+    # - server.env пишется и новой установкой ради совместимости и переживает снятие -
+    # - интерфейса: без ключей по одному env интерфейс воссоздался бы призраком (в списках -
+    # - и в DNS-конфиге резолвера, но без conf и юнита) -
     if [[ ! -f "${AWG_SETUP_DIR}/server/server.key" ]]; then
         print_warn "Legacy server.env без ключей (${AWG_SETUP_DIR}/server): миграция не нужна"
         return 0
@@ -1890,6 +2012,14 @@ awg_migrate_legacy() {
         local old_keys="${AWG_SETUP_DIR}/server"
         [[ -f "${old_keys}/server.key" ]] && cp "${old_keys}/server.key" "${keys_dir}/server.key"
         [[ -f "${old_keys}/server.pub" ]] && cp "${old_keys}/server.pub" "${keys_dir}/server.pub"
+        # - перенос подтверждается содержимым: без ключей клиенты получают -
+        # - пустой PublicKey, а интерфейс остаётся нерабочим -
+        if [[ ! -s "${keys_dir}/server.key" ]] || [[ ! -s "${keys_dir}/server.pub" ]]; then
+            print_err "Ключи сервера не перенесены в ${keys_dir}: нужны непустые server.key и server.pub"
+            print_info "Источник ключей: ${old_keys}; проверь место на диске (df -h) и повтори"
+            rm -rf "$keys_dir"
+            return 1
+        fi
         chmod 700 "$keys_dir"
         chmod 600 "${keys_dir}/server.key" "${keys_dir}/server.pub" 2>/dev/null || true
     fi
@@ -1898,7 +2028,14 @@ awg_migrate_legacy() {
     new_clients=$(awg_iface_clients "awg0")
     local old_clients="${AWG_SETUP_DIR}/clients"
     if [[ -d "$old_clients" ]] && [[ ! -d "$new_clients" ]]; then
-        cp -r "$old_clients" "$new_clients"
+        # - приватные ключи клиентов есть только в источнике: он сносится -
+        # - после сверки состава и содержимого копии -
+        if ! cp -r "$old_clients" "$new_clients" || ! diff -r "$old_clients" "$new_clients" >/dev/null 2>&1; then
+            print_err "Перенос клиентов из ${old_clients} не подтверждён, источник оставлен на месте"
+            print_info "Проверь место на диске (df -h) и повтори миграцию"
+            rm -rf "$new_clients"
+            return 1
+        fi
         chmod 700 "$new_clients"
         rm -rf "$old_clients"
     fi
@@ -1938,14 +2075,19 @@ H3="${mig_h3}"
 H4="${mig_h4}"
 MIGEOF
     chmod 600 "$target_env"
+    # - успех печатается по факту: env перечитывается тем же шаблоном, которым писался -
+    if ! eli_fact_line "$target_env" '^IFACE_NAME="awg0"' "Миграция awg0"; then
+        rm -f "$target_env"
+        print_info "Файл интерфейса не подтверждён: проверь место на диске (df -h) и повтори миграцию"
+        return 1
+    fi
     print_ok "Миграция awg0 выполнена"
     return 0
 }
 
 # --> AWG: ENSURE KERNEL HEADERS <--
-# - гарантирует наличие headers для текущего ядра, без них DKMS не соберёт модуль -
-# - трёхступенчатый fallback: exact headers -> метапакет -> установка стандартного ядра -
-# - return 0 = headers есть, return 1 = headers нет и не удалось поставить, return 2 = нужен reboot -
+# - без headers DKMS не соберёт модуль; fallback: exact headers -> метапакет -> стандартное ядро -
+# - rc: 0 = есть, 1 = нет и не поставить, 2 = нужен reboot -
 _awg_ensure_headers() {
     local kver arch
     kver=$(uname -r)
@@ -1962,10 +2104,15 @@ _awg_ensure_headers() {
     # - шаг 1: точный пакет linux-headers-$(uname -r) -
     print_info "Устанавливаю linux-headers-${kver}..."
     if apt-get install -y -qq "linux-headers-${kver}" 2>/dev/null; then
-        print_ok "linux-headers-${kver} установлен"
-        return 0
+        # - код возврата apt не доказывает, что headers появились: DKMS смотрит на build -
+        if [[ -d "/lib/modules/${kver}/build" ]]; then
+            print_ok "linux-headers-${kver} установлен"
+            return 0
+        fi
+        print_warn "Пакет установлен, но /lib/modules/${kver}/build не появился"
+    else
+        print_warn "Пакет linux-headers-${kver} не найден в репозитории"
     fi
-    print_warn "Пакет linux-headers-${kver} не найден в репозитории"
 
     # - шаг 2: метапакет linux-headers-${arch} (тянет headers для текущего stable ядра) -
     print_info "Пробую метапакет linux-headers-${arch}..."
@@ -2015,10 +2162,8 @@ _awg_ensure_headers() {
 }
 
 # --> AWG: ОПРЕДЕЛЕНИЕ UBUNTU CODENAME ДЛЯ PPA <--
-# - Amnezia PPA публикует под focal/jammy/noble, выбираем по Debian версии -
-# - Debian 11 -> focal (glibc 2.31 совместимо) -
-# - Debian 12 -> focal -
-# - Debian 13 -> noble (для новых ядер 6.1+ и glibc 2.38+) -
+# - Amnezia PPA публикует под focal/jammy/noble: Debian 11 и 12 -> focal (glibc 2.31), -
+# - Debian 13 -> noble (ядра 6.1+, glibc 2.38+) -
 _awg_ppa_codename() {
     local deb_ver=""
     if [[ -f /etc/os-release ]]; then
@@ -2035,6 +2180,7 @@ _awg_ppa_codename() {
 # --> AWG: ДОБАВИТЬ PPA И УСТАНОВИТЬ ПАКЕТ <--
 # - GPG ключ + sources.list + apt install amneziawg -
 _awg_install_ppa_package() {
+    local ks
     local gpg_key="75c9dd72c799870e310542e24166f2c257290828"
     local gpg_ok="no"
     for ks in "keyserver.ubuntu.com" "keys.openpgp.org" "pgp.mit.edu"; do
@@ -2052,7 +2198,14 @@ _awg_install_ppa_package() {
         return 1
     fi
 
-    gpg --export "$gpg_key" > /usr/share/keyrings/amnezia.gpg
+    # - экспорт в временный файл: прежний keyring не должен остаться усечённым -
+    local keyring_tmp="/usr/share/keyrings/amnezia.gpg.part.$$"
+    if ! gpg --export "$gpg_key" > "$keyring_tmp" 2>/dev/null || [[ ! -s "$keyring_tmp" ]]; then
+        rm -f "$keyring_tmp"
+        print_err "GPG-ключ не экспортировался: репозиторий не добавлен, прежний keyring не тронут"
+        return 1
+    fi
+    mv "$keyring_tmp" /usr/share/keyrings/amnezia.gpg
     rm -f /etc/apt/sources.list.d/amnezia.list \
           /etc/apt/sources.list.d/amneziawg.list
 
@@ -2096,11 +2249,13 @@ REPOEOF
 
     if ! apt-get install -y amneziawg; then
         print_err "Не удалось установить пакет amneziawg"
-        # - rollback при ошибке install -
+        # - rollback при ошибке install: внешний репозиторий тоже снимается -
+        rm -f /etc/apt/sources.list.d/amnezia.list \
+              /etc/apt/sources.list.d/amneziawg.list
         if [[ "$src_modified" == "yes" && -f "$src_list_bak" ]]; then
             mv "$src_list_bak" /etc/apt/sources.list
             apt-get update -qq 2>/dev/null || true
-            print_warn "sources.list восстановлен (бэкап убран)"
+            print_warn "sources.list восстановлен (бэкап убран), репозиторий PPA снят"
         fi
         return 1
     fi
@@ -2167,6 +2322,7 @@ _awg_ensure_module() {
 # - анализ системы, headers, DKMS модуль, wireguard-tools, первый интерфейс и клиент -
 
 awg_install() {
+    local _hs ex
     # --> ПРОВЕРКА ПОВТОРНОЙ УСТАНОВКИ <--
     # - блокируем если AWG уже установлен: флаг в book + файлы конфига или загруженный модуль -
     local _already_flag _has_conf _has_mod
@@ -2206,6 +2362,11 @@ awg_install() {
     local main_iface
     main_iface=$(ip route show default 2>/dev/null | awk '/default/{print $5}' | head -1)
     [[ -z "$main_iface" ]] && main_iface=$(ip -o link show | awk -F': ' '{print $2}' | grep -v lo | head -1)
+    # - пустое значение уходит в env, книгу и MASQUERADE: без интерфейса не ставим -
+    if [[ -z "$main_iface" ]]; then
+        print_err "Основной интерфейс не определён: MASQUERADE и env были бы пустыми"
+        return 1
+    fi
     print_ok "Основной интерфейс: ${main_iface}"
 
     local server_ip
@@ -2240,6 +2401,14 @@ SYSEOF
     apt-get update -qq || true
     # - iptables нужен PostUp/PostDown интерфейса: на минимальных образах его нет -
     apt-get install -y -qq curl gnupg2 dkms wireguard-tools iptables || true
+
+    # - без wg конвейеры genkey дают пустые файлы ключей, а установка идёт дальше -
+    if ! command -v wg &>/dev/null; then
+        print_err "Не найден wg (пакет wireguard-tools): ключи и пиры не создать"
+        print_info "Поставь вручную: apt-get install -y wireguard-tools"
+        return 1
+    fi
+    print_ok "wg найден: $(command -v wg)"
 
     # - проверяем: может модуль уже есть -
     local already_installed="no"
@@ -2308,14 +2477,14 @@ SYSEOF
     done
 
     local srv_port
-    srv_port=$(_awg_default_port)
+    srv_port=$(_awg_default_port) || print_warn "Свободный порт не подобран за 10 попыток: укажи порт вручную"
     while true; do
         echo -e "  ${CYAN}UDP порт AmneziaWG. Дефолт - случайный свободный из 20000-60000.${NC}"
         echo -e "  ${CYAN}Типичные порты VPN-скриптов (1618, 51820 и т.п.) сознательно не предлагаются:${NC}"
         echo -e "  ${CYAN}у дефолтных портов установщиков плохая репутация у DPI-эвристик.${NC}"
         ask "UDP порт" "$srv_port" srv_port
         if ! validate_port "$srv_port"; then print_err "Порт 1-65535"; continue; fi
-        if ss -H -uln 2>/dev/null | grep -Eq "[:.]${srv_port}[[:space:]]"; then
+        if eli_port_busy "$srv_port" udp; then
             print_warn "Порт ${srv_port} уже занят"; continue
         fi
         break
@@ -2403,10 +2572,8 @@ SYSEOF
     done
 
     # --> MTU ТУННЕЛЯ <--
-    # - бюджет накладных: 60 байт обвязки (IPv4+UDP+заголовок и тег WG) плюс padding -
-    # - транспорта S4 (до 32) и добивка ContentPaddingAddition: в auto это до 109 -
-    # - байт, то есть 1400 даёт на проводе до 1509 байт -
-    # - 1400 укладывается в 1492 (PPPoE) только при выключенной добивке -
+    # - бюджет: 60 байт обвязки плюс S4 (до 32) и CPA (в auto до 109): 1400 даёт на -
+    # - проводе до 1509, в 1492 (PPPoE) укладывается только при выключенной добивке -
     local tunnel_mtu="1320"
     echo ""
     echo -e "  ${BOLD}MTU туннеля:${NC}"
@@ -2437,7 +2604,7 @@ SYSEOF
         local obf_auto=""
         ask_yn "Сгенерировать параметры автоматически?" "y" obf_auto
         case "$AWG_VER" in
-            3.0) _awg_gen_obf_v3  "$obf_auto" "$tunnel_mtu" ;;
+            3.0) _awg_gen_obf_v3  "$obf_auto" "$tunnel_mtu" || { print_err "Параметры AWG 3.0 не собраны"; return 1; } ;;
             2.0) _awg_gen_obf_v2  "$obf_auto" "$tunnel_mtu" ;;
             1.5) _awg_gen_obf_v15 "$obf_auto" "$tunnel_mtu" ;;
             *)   _awg_gen_obf_v1  "$obf_auto" "$tunnel_mtu" ;;
@@ -2494,11 +2661,14 @@ SYSEOF
     mkdir -p "$keys_dir" "$clients_dir" "$AWG_CONF_DIR"
     chmod 700 "$keys_dir" "$clients_dir"
 
-    wg genkey | tee "${keys_dir}/server.key" | wg pubkey > "${keys_dir}/server.pub"
+    # - факт: ключи обязаны быть валидными до записи в конфиг -
+    if ! _awg_gen_keypair "${keys_dir}/server.key" "${keys_dir}/server.pub"; then
+        print_err "Ключи сервера не сгенерированы: проверь wg genkey"
+        return 1
+    fi
     local srv_priv srv_pub
     srv_priv=$(cat "${keys_dir}/server.key")
     srv_pub=$(cat "${keys_dir}/server.pub")
-    chmod 600 "${keys_dir}/server.key" "${keys_dir}/server.pub"
     print_ok "Ключи сервера сгенерированы"
 
     cat > "$conf" << CONFEOF
@@ -2517,8 +2687,10 @@ CONFEOF
     for cname in "${client_names[@]}"; do
         local cdir="${clients_dir}/${cname}"
         mkdir -p "$cdir"; chmod 700 "$cdir"
-        wg genkey | tee "${cdir}/private.key" | wg pubkey > "${cdir}/public.key"
-        chmod 600 "${cdir}/private.key" "${cdir}/public.key"
+        if ! _awg_gen_keypair "${cdir}/private.key" "${cdir}/public.key"; then
+            print_err "Ключи клиента ${cname} не сгенерированы: проверь wg genkey"
+            continue
+        fi
         local cli_priv cli_pub cli_ip
         cli_priv=$(cat "${cdir}/private.key")
         cli_pub=$(cat "${cdir}/public.key")
@@ -2613,7 +2785,11 @@ LEGEOF
     # - UFW -
     if command -v ufw &>/dev/null; then
         ufw allow "${srv_port}/udp" comment "AWG ${iface}" 2>/dev/null || true
-        print_ok "UFW: разрешён ${srv_port}/udp"
+        if _ufw_has_rule "$srv_port" "udp"; then
+            print_ok "UFW: разрешён ${srv_port}/udp"
+        else
+            print_err "UFW не разрешил ${srv_port}/udp: проверь ufw status verbose"
+        fi
     fi
 
     # - book -
@@ -2677,6 +2853,7 @@ LEGEOF
 # --> AWG: ФУНКЦИИ УПРАВЛЕНИЯ <--
 
 awg_show_status() {
+    local iface name
     print_section "Статус AmneziaWG"
     awg_migrate_legacy
     local ifaces
@@ -2798,7 +2975,23 @@ _awg_book_iface_write() {
     return 0
 }
 
+# --> AWG: ГЕНЕРАЦИЯ ПАРЫ КЛЮЧЕЙ <--
+# - ключи формата wg: base64, 43 символа и знак "="; при отсутствии wg -
+# - конвейер genkey создаёт пустые файлы и печатает успех -
+_awg_gen_keypair() {
+    local priv_file="$1" pub_file="$2" priv pub
+    priv=$(wg genkey 2>/dev/null) || priv=""
+    [[ "$priv" =~ ^[A-Za-z0-9+/]{43}=$ ]] || return 1
+    pub=$(printf '%s\n' "$priv" | wg pubkey 2>/dev/null) || pub=""
+    [[ "$pub" =~ ^[A-Za-z0-9+/]{43}=$ ]] || return 1
+    printf '%s\n' "$priv" > "$priv_file" || return 1
+    printf '%s\n' "$pub" > "$pub_file" || return 1
+    chmod 600 "$priv_file" "$pub_file"
+    return 0
+}
+
 awg_create_iface() {
+    local _hs f
     print_section "Создать новый интерфейс"
     awg_migrate_legacy
     # - PostUp и PostDown интерфейса вызывают iptables: на минимальном -
@@ -2859,12 +3052,12 @@ awg_create_iface() {
     done
 
     local port
-    port=$(_awg_default_port)
+    port=$(_awg_default_port) || print_warn "Свободный порт не подобран за 10 попыток: укажи порт вручную"
     while true; do
         echo -e "  ${CYAN}UDP порт для этого туннеля (1-65535). Должен быть свободен и не совпадать с другими.${NC}"
         ask "UDP порт" "$port" port
         if ! validate_port "$port"; then print_err "Порт 1-65535"; continue; fi
-        if ss -H -uln 2>/dev/null | grep -Eq "[:.]${port}[[:space:]]"; then print_warn "Занят"; continue; fi
+        if eli_port_busy "$port" udp; then print_warn "Занят"; continue; fi
         break
     done
 
@@ -2970,7 +3163,7 @@ awg_create_iface() {
         local gen_obf=""
         ask_yn "Сгенерировать параметры обфускации автоматически?" "y" gen_obf
         case "$AWG_VER" in
-            3.0) _awg_gen_obf_v3  "$gen_obf" "$tunnel_mtu" ;;
+            3.0) _awg_gen_obf_v3  "$gen_obf" "$tunnel_mtu" || { print_err "Параметры AWG 3.0 не собраны"; return 1; } ;;
             2.0) _awg_gen_obf_v2  "$gen_obf" "$tunnel_mtu" ;;
             1.5) _awg_gen_obf_v15 "$gen_obf" "$tunnel_mtu" ;;
             *)   _awg_gen_obf_v1  "$gen_obf" "$tunnel_mtu" ;;
@@ -2981,8 +3174,10 @@ awg_create_iface() {
     local keys_dir
     keys_dir=$(awg_iface_keys "$iface")
     mkdir -p "$keys_dir"; chmod 700 "$keys_dir"
-    wg genkey | tee "${keys_dir}/server.key" | wg pubkey > "${keys_dir}/server.pub"
-    chmod 600 "${keys_dir}/server.key" "${keys_dir}/server.pub"
+    if ! _awg_gen_keypair "${keys_dir}/server.key" "${keys_dir}/server.pub"; then
+        print_err "Ключи сервера не сгенерированы: проверь wg genkey"
+        return 1
+    fi
     local srv_priv
     srv_priv=$(cat "${keys_dir}/server.key")
 
@@ -3036,6 +3231,13 @@ ENVEOF
         print_ok "Интерфейс ${iface} (${desc}) запущен!"
     else
         print_err "Не запустился: journalctl -xeu awg-quick@${iface} --no-pager | tail -20"
+        # - откат: нерабочий интерфейс не остаётся в списке, порт наружу не открывается, -
+        # - в книгу не пишется; созданное снимается до повтора настройки -
+        systemctl disable --now "awg-quick@${iface}" 2>/dev/null || true
+        rm -f "$(awg_iface_env "$iface")" "$conf"
+        rm -rf "$(awg_iface_keys "$iface")" "$(awg_iface_clients "$iface")"
+        print_info "Созданное для ${iface} снято, повтори настройку после проверки лога"
+        return 1
     fi
 
     # - UFW -
@@ -3043,7 +3245,13 @@ ENVEOF
     if [[ -n "${AWG_NO_UFW:-}" ]]; then
         print_info "Порт ${port}/udp наружу не открывается: интерфейс за обфускатором"
     elif command -v ufw &>/dev/null; then
+        # - факт: правило перечитывается, иначе порт наружу молча остаётся закрыт -
         ufw allow "${port}/udp" comment "AWG ${iface}" 2>/dev/null || true
+        if _ufw_has_rule "$port" "udp"; then
+            print_ok "UFW: разрешён ${port}/udp"
+        else
+            print_err "UFW не разрешил ${port}/udp: проверь ufw status verbose"
+        fi
     fi
 
     # - book: интерфейс и обфускация в книгу через общий хелпер -
@@ -3089,6 +3297,7 @@ awg_restart_iface() {
 }
 
 awg_change_dns() {
+    local iface
     print_section "Изменить DNS интерфейса"
     local ifaces
     ifaces=$(awg_get_iface_list)
@@ -3135,27 +3344,43 @@ awg_change_dns() {
     fi
 
     sed -i "s|^CLIENT_DNS=.*|CLIENT_DNS=\"${new_dns}\"|" "$env_file"
+    # - факт: строка перечитывается тем же шаблоном, которым писали -
+    if ! eli_fact_line "$env_file" "^CLIENT_DNS=\"${new_dns}\"$" "DNS интерфейса ${sel_iface}"; then
+        print_err "DNS интерфейса не изменился: в ${env_file} нет строки CLIENT_DNS"
+        return 1
+    fi
+    # - legacy-зеркало держится в согласии с env интерфейса -
+    if [[ -f "${AWG_SETUP_DIR}/server.env" ]]; then
+        sed -i "s|^CLIENT_DNS=.*|CLIENT_DNS=\"${new_dns}\"|" "${AWG_SETUP_DIR}/server.env"
+        eli_fact_line "${AWG_SETUP_DIR}/server.env" "^CLIENT_DNS=\"${new_dns}\"$" "DNS legacy server.env" || return 1
+    fi
+    # - книга: поле интерфейса не должно расходиться с env -
+    book_write ".awg.interfaces.${sel_iface}.client_dns" "$new_dns"
     print_ok "DNS ${sel_iface}: ${new_dns}"
 
-    local clients_dir updated=0
+    local clients_dir updated=0 total=0 ccf
     clients_dir=$(awg_iface_clients "$sel_iface")
     if [[ -d "$clients_dir" ]]; then
         for ccf in "${clients_dir}"/*/client.conf; do
             [[ -f "$ccf" ]] || continue
+            total=$(( total + 1 ))
             sed -i "s|^DNS = .*|DNS = ${new_dns}|" "$ccf"
-            updated=$(( updated + 1 ))
+            # - счётчик считает подтверждённые замены: без строки DNS файл не меняется -
+            grep -qF "DNS = ${new_dns}" "$ccf" && updated=$(( updated + 1 ))
         done
-        [[ $updated -gt 0 ]] && print_ok "Обновлено конфигов: ${updated}"
+        if (( updated > 0 )); then
+            print_ok "Обновлено конфигов: ${updated} из ${total}"
+        fi
+        (( updated < total )) && print_warn "Часть клиентов без строки DNS: им нужен DNS вручную или перевыпуск"
     fi
     print_info "Клиентам нужно переимпортировать конфиг"
     return 0
 }
 
 # --> AWG: СМЕНИТЬ ПОРТ ИНТЕРФЕЙСА <--
-# - симптом выгорания: ping в туннеле живой, throughput мёртв, трафик мимо -
-# - туннеля быстрый. Новый порт: сервер + ufw + env + книга + клиентские conf -
-# - старый порт помечается в burned_ports (TTL 30 дней), опционально -
-# - grace-redirect старого порта на новый через systemd-run (до ребута сервера) -
+# - симптом выгорания: ping в туннеле живой, throughput мёртв. Новый порт: сервер + -
+# - ufw + env + книга + клиентские conf; старый порт в burned_ports (TTL 30 дней), -
+# - опционально grace-redirect через systemd-run (до ребута сервера) -
 awg_change_port() {
     print_section "Сменить порт интерфейса"
     awg_select_iface
@@ -3183,9 +3408,9 @@ awg_change_port() {
 
     # - новый порт: свободный, не занят другими интерфейсами, не burned (TTL 30 дней) -
     local new_port
-    new_port=$(_awg_default_port)
+    new_port=$(_awg_default_port) || print_warn "Свободный порт не подобран за 10 попыток: укажи порт вручную"
     while [[ "$new_port" == "$old_port" ]]; do
-        new_port=$(_awg_default_port)
+        new_port=$(_awg_default_port) || break
     done
     while true; do
         ask "Новый UDP порт" "$new_port" new_port
@@ -3207,12 +3432,24 @@ awg_change_port() {
         print_err "Строка 'ListenPort = ${old_port}' в ${conf_file} не найдена, ничего не изменено"
         return 1
     fi
+    # - интерфейс за обфускатором: новый порт закрывается до рестарта, -
+    # - наружу он не выставляется (гвард как в create_iface) -
+    local behind_obfs=""
+    if wgo_iface_bound "$iface"; then
+        behind_obfs="1"
+        if ! wgo_lock_awg_port "$iface" "$new_port"; then
+            print_err "Не удалось закрыть ${new_port}/udp -> смена порта отменена"
+            _awg_conf_set_port "$conf_file" "$new_port" "$old_port"
+            return 1
+        fi
+    fi
     systemctl restart "awg-quick@${iface}"
     sleep 1
     if ! systemctl is-active --quiet "awg-quick@${iface}" \
        || [[ "$(awg show "${iface}" listen-port 2>/dev/null)" != "$new_port" ]]; then
         print_err "Подъём на порту ${new_port} не удался, откатываю на ${old_port}"
         _awg_conf_set_port "$conf_file" "$new_port" "$old_port"
+        [[ -n "$behind_obfs" ]] && wgo_unlock_awg_port "$iface" "$new_port"
         systemctl restart "awg-quick@${iface}"
         sleep 1
         if systemctl is-active --quiet "awg-quick@${iface}"; then
@@ -3223,10 +3460,9 @@ awg_change_port() {
         return 1
     fi
 
-    # - старый порт в burned: повторно предлагается через TTL; протухшие записи -
-    # - (старше TTL) подчищаем при каждой записи. Подмена файла идёт только после -
-    # - успешной чистки: неудачный awk оставляет пустой результат, и он стирал бы -
-    # - весь список, возвращая выгоревшие порты в пул -
+    # - старый порт в burned: предлагается снова через TTL, протухшие записи подчищаются -
+    # - при каждой записи; подмена файла только после успешной чистки: пустой результат -
+    # - awk стирал бы весь список, возвращая выгоревшие порты в пул -
     local now cutoff
     now=$(date +%s)
     cutoff=$(( now - AWG_BURNED_TTL ))
@@ -3241,10 +3477,19 @@ awg_change_port() {
     echo "${old_port} ${now}" >> "${AWG_SETUP_DIR}/burned_ports"
     eli_fact_line "${AWG_SETUP_DIR}/burned_ports" "^${old_port} " "Выгоревший порт ${old_port}"
 
-    # - ufw: новый открыть, старый закрыть (там же, где create/delete интерфейса) -
-    if command -v ufw &>/dev/null; then
+    # - ufw: новый открыть, старый закрыть (там же, где create/delete интерфейса); -
+    # - за обфускатором порт туннеля наружу не выставляется, новый закрыт заранее -
+    if [[ -z "$behind_obfs" ]] && command -v ufw &>/dev/null; then
         ufw allow "${new_port}/udp" comment "AWG ${iface}" >/dev/null 2>&1 || true
         ufw delete allow "${old_port}/udp" >/dev/null 2>&1 || true
+        # - факт смены: новый порт открыт, старый снят; успех печатает -
+        # - конец смены, провал виден здесь -
+        if ! _ufw_has_rule "$new_port" "udp"; then
+            print_err "UFW не разрешил ${new_port}/udp: ufw allow ${new_port}/udp и проверь ufw status verbose"
+        fi
+        if _ufw_has_rule "$old_port" "udp"; then
+            print_warn "UFW не закрыт ${old_port}/udp: ufw delete allow ${old_port}/udp"
+        fi
     fi
 
     # - env (iface + legacy server.env) и книга -
@@ -3252,6 +3497,22 @@ awg_change_port() {
     [[ -f "${AWG_SETUP_DIR}/server.env" ]] && \
         sed -i "s/^SERVER_PORT=\"${old_port}\"/SERVER_PORT=\"${new_port}\"/" "${AWG_SETUP_DIR}/server.env"
     book_write ".awg.interfaces.${iface}.port" "$new_port" number
+
+    # - обфускатор: цель инстанса переезжает вместе с туннелем -
+    if [[ -n "$behind_obfs" ]]; then
+        if ! wgo_retarget "$iface" "$old_port" "$new_port"; then
+            print_err "Инстанс обфускатора не перешёл на порт ${new_port}: journalctl -xeu wgobfs-eli@${iface} --no-pager | tail -20"
+            return 1
+        fi
+    fi
+
+    # - mimic: фильтр держит порт туннеля и переезжает вместе с ним -
+    if declare -f mim_retarget >/dev/null 2>&1; then
+        if ! mim_retarget "$iface" "$old_port" "$new_port"; then
+            print_err "mimic не переведён на порт ${new_port}: туннель на новом порту, фильтр на старом"
+            return 1
+        fi
+    fi
 
     # - клиентские conf: только строки Endpoint, якорь конца строки -
     # - правка подтверждается перечитыванием: у интерфейса за обфускатором -
@@ -3274,7 +3535,11 @@ awg_change_port() {
     if (( clients_miss > 0 )); then
         print_warn "Порт не значится в Endpoint у ${clients_miss} конфигов: у клиента адрес обфускатора, а не туннеля"
     fi
-    print_info "Клиентам: обнови порт (одно поле) или перекачай свежий конфиг/QR (пункт 8)"
+    if [[ -n "$behind_obfs" ]]; then
+        print_info "Клиентам ничего менять не нужно: они ходят через обфускатор"
+    else
+        print_info "Клиентам: обнови порт (одно поле) или перекачай свежий конфиг/QR (пункт 8)"
+    fi
 
     _awg_tunnel_check "$iface"
 
@@ -3332,6 +3597,11 @@ awg_delete_iface() {
     local port=""
     [[ -f "$env_file" ]] && port=$(eli_source_env "$env_file" SERVER_PORT || true)
 
+    # - обфускатор и mimic: привязки снимаются до удаления конфигов -
+    # - интерфейса (запасное правило обфускатора живёт в конфиге AWG) -
+    wgo_detach "$iface"
+    mim_detach "$iface"
+
     systemctl stop "awg-quick@${iface}" 2>/dev/null || true
     systemctl disable "awg-quick@${iface}" 2>/dev/null || true
     rm -f "$(awg_iface_conf "$iface")"
@@ -3339,10 +3609,25 @@ awg_delete_iface() {
     rm -rf "$(awg_iface_clients "$iface")"
     rm -f "$env_file"
 
+    # - факт: файлы сняты, иначе интерфейс остаётся в списке со старым портом -
+    local left=""
+    [[ -f "$env_file" ]] && left="${left} env"
+    [[ -f "$(awg_iface_conf "$iface")" ]] && left="${left} conf"
+    [[ -d "$(awg_iface_keys "$iface")" ]] && left="${left} keys"
+    [[ -d "$(awg_iface_clients "$iface")" ]] && left="${left} clients"
+    if [[ -n "$left" ]]; then
+        print_err "Не удалилось:${left} - проверь права и повтори"
+        return 1
+    fi
+
     # - UFW: закрываем порт -
     if [[ -n "$port" ]] && command -v ufw &>/dev/null; then
         ufw delete allow "${port}/udp" 2>/dev/null || true
-        print_ok "UFW: закрыт ${port}/udp"
+        if _ufw_has_rule "$port" "udp"; then
+            print_err "UFW не закрыт ${port}/udp: ufw delete allow ${port}/udp и проверь ufw status verbose"
+        else
+            print_ok "UFW: закрыт ${port}/udp"
+        fi
     fi
 
     # - book: запись интерфейса убирается хелпером (mktemp, проверка jq, chmod); -
@@ -3454,8 +3739,10 @@ awg_add_client() {
     local cdir
     cdir="$(awg_iface_clients "$iface")/${name}"
     mkdir -p "$cdir"; chmod 700 "$cdir"
-    wg genkey | tee "${cdir}/private.key" | wg pubkey > "${cdir}/public.key"
-    chmod 600 "${cdir}/private.key" "${cdir}/public.key"
+    if ! _awg_gen_keypair "${cdir}/private.key" "${cdir}/public.key"; then
+        print_err "Ключи клиента ${name} не сгенерированы: проверь wg genkey"
+        return 1
+    fi
     local cli_priv cli_pub
     cli_priv=$(cat "${cdir}/private.key")
     cli_pub=$(cat "${cdir}/public.key")
@@ -3489,16 +3776,27 @@ CLIEOF
     chmod 600 "${cdir}/client.conf"
 
     # - хук 02e_wgobfs: если интерфейс за обфускатором, Endpoint переезжает на 127.0.0.1 -
-    # - и рядом с client.conf ложится конфиг обфускатора. Нет модуля - нет хука -
+    # - и рядом с client.conf ложится конфиг обфускатора. Нет модуля - нет хука; -
+    # - отказ хука читается: конфиг устройства не собран, успех не печатается -
+    local hook_ok="yes"
     if declare -f _wgo_fix_client >/dev/null 2>&1; then
-        _wgo_fix_client "$iface" "${cdir}/client.conf"
+        _wgo_fix_client "$iface" "${cdir}/client.conf" || hook_ok="no"
     fi
 
-    print_ok "Клиент ${name} добавлен: IP ${client_ip}"
-    print_info "Конфиг: ${cdir}/client.conf"
+    if [[ "$hook_ok" == "yes" ]]; then
+        print_ok "Клиент ${name} добавлен: IP ${client_ip}"
+        print_info "Конфиг: ${cdir}/client.conf"
+    fi
 
     # - пир идёт на живой интерфейс: перезапуск не нужен и не рвёт сессии соседей -
     awg_apply_peer "$iface" "$cli_pub" "${client_ip}/32"
+
+    if [[ "$hook_ok" != "yes" ]]; then
+        print_err "Клиент ${name} заведён: IP ${client_ip}, пир в конфиге интерфейса"
+        print_info "Конфиг устройства не собран: Endpoint остался прямым, порт туннеля закрыт"
+        print_info "После починки данных обфускатора пересобери комплект: управление -> Клиентский комплект"
+        return 1
+    fi
 
     # - скрипт-пробник для клиента: по запросу, по умолчанию нет -
     local want_probe="" kit_file=""
@@ -3534,6 +3832,7 @@ CLIEOF
 }
 
 awg_show_client() {
+    local n
     print_section "Показать конфиг клиента"
     awg_select_iface
     [[ -z "$AWG_ACTIVE_IFACE" ]] && return 0
@@ -3570,6 +3869,7 @@ awg_show_client() {
 }
 
 awg_edit_client() {
+    local n
     print_section "Редактировать клиента"
     awg_select_iface
     [[ -z "$AWG_ACTIVE_IFACE" ]] && return 0
@@ -3667,7 +3967,7 @@ awg_edit_client() {
             4)
                 local new_mtu=""
                 ask "MTU (1000-1500)" "$cur_mtu" new_mtu
-                if ! [[ "$new_mtu" =~ ^(0|[1-9][0-9]*)$ ]] || (( new_mtu < 1000 || new_mtu > 1500 )); then
+                if ! [[ "$new_mtu" =~ ^(0|[1-9][0-9]*)$ ]] || ! _awg_num_leq "1000" "$new_mtu" || ! _awg_num_leq "$new_mtu" "1500"; then
                     print_err "MTU 1000-1500"; continue
                 fi
                 sed -i "s|^MTU = .*|MTU = ${new_mtu}|" "$cfg"
@@ -3702,6 +4002,7 @@ awg_edit_client() {
 }
 
 awg_delete_client() {
+    local n
     print_section "Удалить клиента"
     awg_select_iface
     [[ -z "$AWG_ACTIVE_IFACE" ]] && return 0
@@ -3724,19 +4025,38 @@ awg_delete_client() {
     ask_yn "Подтвердить?" "n" confirm
     [[ "$confirm" != "yes" ]] && { print_info "Отмена"; return 0; }
 
-    local cdir conf
+    local cdir conf rm_rc=0
     cdir="$(awg_iface_clients "$iface")/${name}"
     conf=$(awg_iface_conf "$iface")
     if [[ -f "${cdir}/public.key" ]]; then
         local pub
         pub=$(cat "${cdir}/public.key")
-        awg_remove_peer_by_pubkey "$conf" "$pub"
-        print_ok "Peer удалён из конфига"
-        awg_apply_peer "$iface" "$pub" ""
+        awg_remove_peer_by_pubkey "$conf" "$pub" || rm_rc=$?
+        if (( rm_rc == 0 )); then
+            print_ok "Пир удалён из конфига"
+            awg_apply_peer "$iface" "$pub" ""
+        elif (( rm_rc == 2 )); then
+            print_warn "Пир клиента в конфиге не найден (уже снят)"
+            # - в конфиге пира нет, но живой интерфейс мог его удерживать: -
+            # - пир снимается и с живого интерфейса -
+            awg_apply_peer "$iface" "$pub" ""
+        else
+            print_err "Пир не снят: конфиг интерфейса не менялся, файлы клиента сохранены"
+            return 1
+        fi
     else
-        awg_remove_peer_by_name "$conf" "$name"
-        # - без файла ключа пир снимается только перечитыванием конфига интерфейса -
-        awg_reload_iface "$iface"
+        awg_remove_peer_by_name "$conf" "$name" || rm_rc=$?
+        if (( rm_rc == 0 )); then
+            # - без файла ключа пир снимается только перечитыванием конфига интерфейса -
+            awg_reload_iface "$iface"
+        elif (( rm_rc == 2 )); then
+            print_warn "Пир клиента в конфиге не найден (уже снят)"
+            # - конфиг пира не содержал, конфиг интерфейса перечитывается -
+            awg_reload_iface "$iface"
+        else
+            print_err "Пир не снят: конфиг интерфейса не менялся, файлы клиента сохранены"
+            return 1
+        fi
     fi
     rm -rf "${cdir:?}"
     print_ok "Файлы клиента '${name}' удалены"
@@ -3744,12 +4064,10 @@ awg_delete_client() {
 }
 
 # --> AWG: ТЕСТ ОБФУСКАЦИИ <--
-# - снимает tcpdump и сверяет дамп с параметрами интерфейса: S1/S2 padding, -
-# - Jc junk, H1-H4 mangle, I1 signature chain. Проверяемость зависит от версии: -
-# - HeaderProtection скрывает тип пакета, RandomTrailers делает размеры рукопожатия -
-# - плавающими, а добивку транспорта (S4 и ContentPaddingAddition) по дампу не -
-# - отделить от данных. Такие параметры помечаются как непроверяемые с причиной, -
-# - остальные сверяются по размерам и байтам пакетов. Pcap удаляется после анализа -
+# - tcpdump-дамп сверяется с параметрами интерфейса: S1/S2 padding, Jc junk, H1-H4 -
+# - mangle, I1 signature chain; HeaderProtection скрывает тип пакета, RandomTrailers -
+# - плавает в размерах рукопожатия, добивку транспорта не отделить от данных - такие -
+# - параметры помечаются непроверяемыми с причиной; pcap удаляется после анализа -
 awg_test_obf() {
     print_section "Тест обфускации AmneziaWG"
     awg_select_iface
@@ -3795,6 +4113,15 @@ awg_test_obf() {
     local ext_iface
     ext_iface=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
     [[ -z "$ext_iface" ]] && ext_iface="any"
+
+    # --> МЕСТО ЗАХВАТА <--
+    # - клиенты привязанного интерфейса ходят через порт обфускатора, порт туннеля -
+    # - снаружи закрыт; развернутые пакеты обфускатор передаёт на loopback - захват там -
+    local cap_iface="$ext_iface" wgo_bound=0
+    if wgo_iface_bound "$iface"; then
+        wgo_bound=1
+        cap_iface="lo"
+    fi
 
     # --> ОЖИДАЕМЫЕ РАЗМЕРЫ <--
     # - стандартный WG: init=148, resp=92 (UDP payload) -
@@ -3876,11 +4203,15 @@ awg_test_obf() {
     echo ""
     print_info "Путь дампа: ${pcap}"
     print_info "(удаляется автоматически после анализа)"
-    print_info "Захват до ${duration} сек на ${ext_iface}:${srv_port}/udp (остановится по хендшейку)"
+    if (( wgo_bound )); then
+        print_info "Интерфейс привязан к обфускатору: клиенты стучатся на его порт,"
+        print_info "развернутые пакеты ловлю на ${cap_iface}:${srv_port}/udp"
+    fi
+    print_info "Захват до ${duration} сек на ${cap_iface}:${srv_port}/udp (остановится по хендшейку)"
     # - до захвата запоминаем текущий хендшейк: интересен только свежий -
     local hs_before=""
     hs_before=$(awg show "$iface" latest-handshakes 2>/dev/null | awk '$2 > 0 {print $2}' | sort -n | tail -1)
-    timeout "$duration" tcpdump -i "$ext_iface" -nn -U -s 0 \
+    timeout "$duration" tcpdump -i "$cap_iface" -nn -U -s 0 \
         "udp port ${srv_port}" -w "$pcap" >/dev/null 2>&1 &
     local tpid=$!
 
@@ -3909,15 +4240,33 @@ awg_test_obf() {
     if [[ ! -s "$pcap" ]]; then
         print_err "Дамп пустой. Возможные причины:"
         echo -e "    - клиент не пытался подключиться"
-        echo -e "    - UFW блокирует ${srv_port}/udp"
-        echo -e "    - пакеты идут через другой интерфейс (не ${ext_iface})"
+        if (( wgo_bound )); then
+            echo -e "    - обфускатор не пересылает пакеты в ${srv_port}/udp (wgobfs-eli@${iface} не работает?)"
+            echo -e "    - клиент стучится не на порт обфускатора"
+        else
+            echo -e "    - UFW блокирует ${srv_port}/udp"
+            echo -e "    - пакеты идут через другой интерфейс (не ${ext_iface})"
+        fi
         return 1
     fi
 
     local pkt_count
     pkt_count=$(tcpdump -nn -r "$pcap" 2>/dev/null | wc -l)
     print_ok "Захвачено пакетов всего: ${pkt_count}"
-    [[ "$pkt_count" -eq 0 ]] && { print_err "Пакетов нет, клиент не подключался"; return 1; }
+    # - нулевой захват: файл содержит только заголовок pcap, причины те же, -
+    # - что у пустого дампа, включая привязку к обфускатору -
+    if [[ "$pkt_count" -eq 0 ]]; then
+        print_err "Пакетов нет (в дампе только заголовок pcap). Возможные причины:"
+        echo -e "    - клиент не пытался подключиться"
+        if (( wgo_bound )); then
+            echo -e "    - клиент стучится не на порт обфускатора"
+            echo -e "    - обфускатор не пересылает пакеты в ${srv_port}/udp (wgobfs-eli@${iface} не работает?)"
+        else
+            echo -e "    - UFW блокирует ${srv_port}/udp"
+            echo -e "    - пакеты идут через другой интерфейс (не ${ext_iface})"
+        fi
+        return 1
+    fi
 
     # - лимит для анализа: handshake + Jc junk + несколько data пакетов -
     # - всё что дальше - это уже трафик пользователя, не влияет на диагностику обфускации -
@@ -4016,11 +4365,8 @@ awg_test_obf() {
     done
 
     # --> ПЕРВЫЙ БАЙТ PAYLOAD (H-MANGLE) <--
-    # - tcpdump -x выводит hex начиная с IP хедера -
-    # - IP хедер 20 байт + UDP хедер 8 байт = 28 байт = offset 0x001c -
-    # - в выводе каждая строка: "\t0x0000:  4500 0098 ..." по 16 байт -
-    # - offset 28 байт -> во второй строке (0x0010) позиция +12 от начала -
-    # - берём payload-hex первых 5 пакетов и смотрим первый байт -
+    # - tcpdump -x даёт hex с начала IP-хедера: 20 IP + 8 UDP = 28 байт = offset 0x001c, -
+    # - во второй строке (0x0010) позиция +12; берём payload-hex от рукопожатия и смотрим первый байт -
     echo ""
     echo -e "  ${BOLD}Первый байт UDP payload (WG type field):${NC}"
     if [[ $hp_on -eq 1 ]]; then
@@ -4028,11 +4374,16 @@ awg_test_obf() {
         echo -e "    значит H1-H4 по дампу не проверяются. Raw-байты ниже - справка.${NC}"
     fi
 
+    # - окно разбора начинается с рукопожатия: junk до него со случайным -
+    # - содержимым вердикт по типу пакета не даёт -
+    local h_start=0
+    (( hs_idx >= 0 )) && h_start=$hs_idx
+
     # - dump в виде "packet #N: <все hex без пробелов>" -
-    # - ограничиваем 10 пакетами на уровне tcpdump - иначе awk молотит весь pcap -
+    # - ограничиваем лимитом анализа на уровне tcpdump - иначе awk молотит весь pcap -
     local -a pkt_hex=()
     mapfile -t pkt_hex < <(
-        tcpdump -nn -r "$pcap" -c 10 -x 2>/dev/null | awk '
+        tcpdump -nn -r "$pcap" -c "$analyze_limit" -x 2>/dev/null | awk '
             /^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/ {
                 if (buf != "") print buf
                 buf = ""
@@ -4047,11 +4398,29 @@ awg_test_obf() {
         '
     )
 
-    local h_mangled=0 h_vanilla=0
+    local h_mangled=0 h_vanilla=0 h_ambig=0
+    # - младшие байты H4: у одиночного значения один, у диапазона набор -
+    # - H4 задаётся и диапазоном ("5000-6000"), арифметика по такому значению -
+    # - считает вычитание и даёт отрицательный байт -
+    local h4_set=""
+    if [[ "$h4_v" =~ ^[0-9]+$ ]]; then
+        h4_set="|$(( 10#$h4_v % 256 ))|"
+    elif [[ "$h4_v" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+        local h4_a=$(( 10#${BASH_REMATCH[1]} )) h4_b=$(( 10#${BASH_REMATCH[2]} )) h4_i h4_x
+        if (( h4_b >= h4_a )); then
+            (( h4_b - h4_a > 255 )) && h4_b=$(( h4_a + 255 ))
+            h4_x=$(( h4_a % 256 ))
+            for (( h4_i = h4_a; h4_i <= h4_b; h4_i++ )); do
+                h4_set="${h4_set}|${h4_x}|"
+                h4_x=$(( (h4_x + 1) % 256 ))
+            done
+        fi
+    fi
     local p idx=0
     for p in "${pkt_hex[@]}"; do
         idx=$(( idx + 1 ))
-        [[ $idx -gt 5 ]] && break
+        (( idx - 1 < h_start )) && continue
+        (( idx - 1 >= h_start + 5 )) && break
         # - payload начинается с offset 56 (28 байт × 2 hex символа) -
         # - первый байт payload = символы 56-57 -
         local fb="${p:56:2}"
@@ -4061,13 +4430,29 @@ awg_test_obf() {
         if [[ $hp_on -eq 1 ]]; then
             desc="0x${fb} (${fb_dec}) -> тип шифрован HeaderProtection"
         else
-            case "$fb_dec" in
-                1) desc="0x01 -> vanilla WG init (H1 mangle НЕ применилось)"; h_vanilla=1 ;;
-                2) desc="0x02 -> vanilla WG response (H2 mangle НЕ применилось)"; h_vanilla=1 ;;
-                3) desc="0x03 -> vanilla WG cookie (H3 mangle НЕ применилось)"; h_vanilla=1 ;;
-                4) desc="0x04 -> vanilla WG data (H4 mangle НЕ применилось)"; h_vanilla=1 ;;
-                *) desc="0x${fb} (${fb_dec}) -> обфусцирован (не равен 1-4)"; h_mangled=1 ;;
-            esac
+            # - транспорт несёт поле типа H4: его младший байт обязан быть первым в payload -
+            # - и может совпасть с 1-4 vanilla (тогда это легитимный mangle); рукопожатия несут -
+            # - H1/H2: правило H4 к ним не применяется, иначе vanilla-байт читается как mangle -
+            local plen=$(( ${#p} / 2 - 28 )) hs_pkt=0
+            [[ "$plen" == "$exp_init" || "$plen" == "$exp_resp" \
+               || "$plen" == "$exp_init_pad" || "$plen" == "$exp_resp_pad" \
+               || "$plen" == "$exp_cookie_pad" ]] && hs_pkt=1
+            if (( hs_pkt == 0 )) && [[ "$h4_set" == *"|${fb_dec}|"* ]]; then
+                # - байт 4 у транспорта совпадает с vanilla data: по дампу не различить -
+                if [[ "$fb_dec" == "4" ]]; then
+                    desc="0x04 -> неотличимо: vanilla data или младший байт H4 (${h4_v})"; h_ambig=1
+                else
+                    desc="0x${fb} (${fb_dec}) -> транспорт, младший байт H4 (${h4_v})"; h_mangled=1
+                fi
+            else
+                case "$fb_dec" in
+                    1) desc="0x01 -> vanilla WG init (H1 mangle НЕ применилось)"; h_vanilla=1 ;;
+                    2) desc="0x02 -> vanilla WG response (H2 mangle НЕ применилось)"; h_vanilla=1 ;;
+                    3) desc="0x03 -> vanilla WG cookie (H3 mangle НЕ применилось)"; h_vanilla=1 ;;
+                    4) desc="0x04 -> vanilla WG data (H4 mangle НЕ применилось)"; h_vanilla=1 ;;
+                    *) desc="0x${fb} (${fb_dec}) -> обфусцирован (не равен 1-4)"; h_mangled=1 ;;
+                esac
+            fi
         fi
         printf "    пакет #%d: %s\n" "$idx" "$desc"
     done
@@ -4088,11 +4473,15 @@ awg_test_obf() {
         else
             local target="${i1_static[0],,}"
             local probe="${target:0:16}"
-            # - поиск probe в первых 5 пакетах через grep (быстрее bash substring на длинных hex) -
+            # - поиск probe в пакетах через grep (быстрее bash substring на длинных hex): -
+            # - signature chain I1 клиент шлёт до init, поэтому просматривается весь -
+            # - отрезок дампа до рукопожатия; рукопожатия в дампе нет - все пакеты -
+            local i1_to=$(( h_start + 5 ))
+            (( hs_idx < 0 )) && i1_to=${#pkt_hex[@]}
             local found=0 pnum=0 p payload_hex
             for p in "${pkt_hex[@]}"; do
                 pnum=$(( pnum + 1 ))
-                [[ $pnum -gt 5 ]] && break
+                (( pnum > i1_to )) && break
                 payload_hex="${p:56}"
                 [[ -z "$payload_hex" ]] && continue
                 if grep -qi "$probe" <<< "$payload_hex"; then
@@ -4108,7 +4497,7 @@ awg_test_obf() {
                 fi
             done
             if [[ $found -eq 0 ]]; then
-                print_warn "    I1 статичный фрагмент НЕ найден в первых 5 пакетах"
+                print_warn "    I1 статичный фрагмент НЕ найден в анализируемых пакетах"
                 echo -e "    Искомый фрагмент: ${target:0:32}..."
                 echo -e "    Возможные причины: клиент не поддерживает I1-I5 или применил их иначе"
                 i1_status="missing"
@@ -4171,11 +4560,13 @@ awg_test_obf() {
     elif [[ $hp_on -eq 1 ]]; then
         print_info "H1-H4: тип пакета скрыт HeaderProtection, по дампу не определить"
     elif [[ $h_mangled -eq 1 && $h_vanilla -eq 0 ]]; then
-        print_ok "H1-H4 mangle работает (первые байты не равны 1-4)"
+        print_ok "H1-H4 mangle работает (первые байты payload не vanilla-типа)"
     elif [[ $h_vanilla -eq 1 && $h_mangled -eq 0 ]]; then
         print_err "H1-H4 mangle НЕ применяется (видны vanilla type байты 1-4)"
     elif [[ $h_mangled -eq 1 && $h_vanilla -eq 1 ]]; then
         print_warn "H: смешанная картина (часть пакетов обфусцирована, часть нет)"
+    elif [[ $h_ambig -eq 1 ]]; then
+        print_warn "H: по дампу не определить (первый байт совпадает и с младшим байтом H4, и с vanilla)"
     else
         print_warn "H: недостаточно пакетов для анализа"
     fi
@@ -4267,15 +4658,37 @@ awg_toggle_client() {
     [[ -z "$pub" ]] && { print_err "Нет ключа клиента: ${cdir}/public.key"; return 0; }
 
     if [[ -f "${cdir}/disabled" ]]; then
-        local ip
+        local ip conf
         ip=$(_awg_client_ip "$iface" "$name")
         [[ -z "$ip" ]] && { print_err "Не найден адрес клиента в client.conf"; return 0; }
+        conf=$(awg_iface_conf "$iface")
+        # - возврат с паузы: блока с адресом клиента быть не должно, иначе -
+        # - в конфиге окажутся два [Peer] с одним AllowedIPs -
+        if grep -qF "${ip}/32" "$conf"; then
+            print_err "Адрес ${ip} занят пиром в ${conf}: клиент остаётся на паузе"
+            print_info "Убери лишний блок [Peer] и повтори"
+            return 1
+        fi
         _awg_append_peer "$iface" "$pub" "$ip" "$name"
+        # - факт: пир клиента в конфиге есть; иначе маркер паузы остаётся -
+        if ! eli_fact_line "$conf" "^AllowedIPs = ${ip}/32$" "Пир клиента '${name}'"; then
+            print_info "Клиент остаётся на паузе, повтори после устранения причины"
+            return 1
+        fi
         rm -f "${cdir}/disabled"
         print_ok "Клиент '${name}' включён, адрес ${ip}"
         awg_apply_peer "$iface" "$pub" "${ip}/32"
     else
-        awg_remove_peer_by_pubkey "$(awg_iface_conf "$iface")" "$pub"
+        # - пауза подтверждается снятием пира: код снятия читается, при -
+        # - отказе разбора конфига маркер не ставится и успех не печатается -
+        local conf rc_rm=0
+        conf=$(awg_iface_conf "$iface")
+        awg_remove_peer_by_pubkey "$conf" "$pub"
+        rc_rm=$?
+        if [[ $rc_rm -eq 1 ]] || { [[ $rc_rm -eq 0 ]] && grep -qF "$pub" "$conf"; }; then
+            print_err "Пир клиента '${name}' не снят из ${conf}: пауза не выполнена"
+            return 1
+        fi
         : > "${cdir}/disabled"
         print_ok "Клиент '${name}' отключён: файлы и адрес сохранены"
         awg_apply_peer "$iface" "$pub" ""
@@ -4312,31 +4725,71 @@ awg_reissue_client() {
     ask_yn "Перевыпустить ключи клиента '${name}' (адрес ${ip})?" "n" confirm
     [[ "$confirm" != "yes" ]] && { print_info "Отмена"; return 0; }
 
-    # - старый пир уходит из конфига и с живого интерфейса -
+    # - старый пир уходит из конфига и с живого интерфейса; код снятия -
+    # - читается: при ошибке разбора конфига ничего не меняется, занятый -
+    # - адрес чужого пира не даёт второго блока с тем же AllowedIPs -
+    local conf rc_rm=0
+    conf=$(awg_iface_conf "$iface")
     if [[ -n "$pub" ]]; then
-        awg_remove_peer_by_pubkey "$(awg_iface_conf "$iface")" "$pub"
+        awg_remove_peer_by_pubkey "$conf" "$pub"
+        rc_rm=$?
+        if [[ $rc_rm -eq 1 ]] || { [[ $rc_rm -eq 0 ]] && grep -qF "$pub" "$conf"; }; then
+            print_err "Старый пир не снят из ${conf}: перевыпуск отменён, ключи не тронуты"
+            return 1
+        fi
+        if [[ $rc_rm -eq 2 ]] && grep -qF "${ip}/32" "$conf"; then
+            print_err "Адрес ${ip} занят другим пиром в ${conf}: перевыпуск отменён"
+            print_info "Приведи конфиг в порядок (лишний блок [Peer]) и повтори"
+            return 1
+        fi
         awg_apply_peer "$iface" "$pub" ""
     fi
 
-    local new_priv new_pub
+    local new_priv new_pub old_priv old_priv_saved old_pub_saved
+    old_priv_saved=$(cat "${cdir}/private.key" 2>/dev/null)
+    old_pub_saved=$(cat "${cdir}/public.key" 2>/dev/null)
     new_priv=$(wg genkey)
     new_pub=$(printf '%s\n' "$new_priv" | wg pubkey)
     printf '%s\n' "$new_priv" > "${cdir}/private.key"
     printf '%s\n' "$new_pub" > "${cdir}/public.key"
     chmod 600 "${cdir}/private.key" "${cdir}/public.key"
+    old_priv=$(sed -n 's/^PrivateKey = //p' "$cfg")
     sed -i "s|^PrivateKey = .*|PrivateKey = ${new_priv}|" "$cfg"
+    # - факт правки сверяется точной строкой: при провале прежние ключи, -
+    # - файлы ключей и пир возвращаются на место, успех не печатается -
+    if ! grep -Fqx "PrivateKey = ${new_priv}" "$cfg"; then
+        [[ -n "$old_priv" ]] && sed -i "s|^PrivateKey = .*|PrivateKey = ${old_priv}|" "$cfg"
+        [[ -n "$old_priv_saved" ]] && printf '%s\n' "$old_priv_saved" > "${cdir}/private.key"
+        [[ -n "$old_pub_saved" ]] && printf '%s\n' "$old_pub_saved" > "${cdir}/public.key"
+        chmod 600 "${cdir}/private.key" "${cdir}/public.key" 2>/dev/null || true
+        if [[ "$disabled" != "yes" && -n "$pub" ]]; then
+            _awg_append_peer "$iface" "$pub" "$ip" "$name"
+            awg_apply_peer "$iface" "$pub" "${ip}/32"
+        fi
+        print_err "Перевыпуск не завершён: в client.conf нет строки PrivateKey, прежние ключи возвращены"
+        return 1
+    fi
 
-    # - интерфейс за обфускатором: хук пересобирает конфиг клиента под него -
+    # - интерфейс за обфускатором: хук пересобирает конфиг клиента под него; -
+    # - отказ хука читается: конфиг устройства не собран, успех не печатается -
+    local hook_ok="yes"
     if declare -f _wgo_fix_client >/dev/null 2>&1; then
-        _wgo_fix_client "$iface" "$cfg"
+        _wgo_fix_client "$iface" "$cfg" || hook_ok="no"
     fi
 
     if [[ "$disabled" == "yes" ]]; then
-        print_ok "Ключи перевыпущены, клиент остаётся на паузе"
+        [[ "$hook_ok" == "yes" ]] && print_ok "Ключи перевыпущены, клиент остаётся на паузе"
     else
         _awg_append_peer "$iface" "$new_pub" "$ip" "$name"
-        print_ok "Ключи перевыпущены, пир возвращён в конфиг"
+        [[ "$hook_ok" == "yes" ]] && print_ok "Ключи перевыпущены, пир возвращён в конфиг"
         awg_apply_peer "$iface" "$new_pub" "${ip}/32"
+    fi
+
+    if [[ "$hook_ok" != "yes" ]]; then
+        print_err "Перевыпуск не завершён: конфиг устройства не собран, Endpoint остался прямым"
+        print_info "Ключи и пир заменены; после починки данных обфускатора пересобери комплект"
+        print_info "Файлы клиента: ${cdir}"
+        return 1
     fi
     print_warn "Старый конфиг на устройстве больше не работает: раздай новый"
     print_info "Конфиг: ${cfg}"
@@ -4347,9 +4800,8 @@ awg_reissue_client() {
 }
 
 # --> AWG: СКРИПТ-ПРОБНИК ДЛЯ КЛИЕНТА <--
-# - кладётся рядом с client.conf: проверяет, что видно С КЛИЕНТСКОЙ стороны -
-# - (доступность endpoint, живость туннеля, реальный MTU пути, выход в интернет), -
-# - и печатает вердикт человеческим языком. Нужен только ping и, по желанию, curl -
+# - рядом с client.conf: проверяет то, что видно с клиента (endpoint, живость туннеля, -
+# - реальный MTU пути, выход в интернет), вердикт словами; нужен ping и опционально curl -
 _awg_write_probe_script() {
     local cdir="$1"
     [[ -d "$cdir" ]] || return 1
@@ -4377,8 +4829,46 @@ CPA=$(grep "^ContentPaddingAddition = " "$CONF" | head -1 | sed 's/^ContentPaddi
 HOST="${EP%%:*}"; PORT="${EP##*:}"
 ADDR_IP="${ADDR%%/*}"
 GW="${ADDR_IP%.*}.1"
+
+# - endpoint локальный: клиент за обфускатором, реальный адрес сервера лежит -
+# - в wg-obfuscator.conf рядом с конфигом (строка target) -
+REAL_HOST="$HOST"
+WGO_NOTE=""
+case "$HOST" in
+    127.*|localhost|::1)
+        OBF_CONF="$(dirname "$CONF")/wg-obfuscator.conf"
+        TARGET=$(grep "^target = " "$OBF_CONF" 2>/dev/null | head -1 | sed 's/^target = //')
+        if [[ -n "$TARGET" ]]; then
+            REAL_HOST="${TARGET%%:*}"
+            WGO_NOTE="клиент за обфускатором: WireGuard -> ${HOST}:${PORT} локально, наружу -> ${TARGET}"
+        else
+            REAL_HOST=""
+            WGO_NOTE="клиент за обфускатором, но wg-obfuscator.conf рядом с конфигом нет"
+        fi
+        ;;
+esac
+# - доменный Endpoint: для сверки внешнего адреса имя разрешается в IPv4, -
+# - иначе адрес клиента сравнивался бы со строкой имени и рабочий туннель -
+# - попал бы в "трафик идёт мимо туннеля". getent есть в glibc и части -
+# - busybox, nslookup - запасной путь; ответ читается от строки Name -
+REAL_IP=""
+if [[ -n "$REAL_HOST" ]]; then
+    if [[ "$REAL_HOST" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        REAL_IP="$REAL_HOST"
+    elif command -v getent >/dev/null 2>&1; then
+        REAL_IP=$(getent ahostsv4 "$REAL_HOST" 2>/dev/null | awk '$1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $1; exit }')
+    fi
+    if [[ -z "$REAL_IP" ]] && command -v nslookup >/dev/null 2>&1; then
+        REAL_IP=$(nslookup "$REAL_HOST" 2>/dev/null | awk '/^[Nn]ame:/ { asked = 1; next } asked { for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) { print $i; exit } }')
+    fi
+fi
+# - значения конфига могут прийти с ведущим нулём: bash читает такое как -
+# - восьмеричное (01320 = 720) или падает "value too great for base" (08) -
 MTU="${MTU:-1320}"; S4="${S4:-0}"; CPA_MAX=$(echo "$CPA" | sed 's/.*-//'); CPA_MAX="${CPA_MAX:-0}"
+[[ "$MTU" =~ ^[0-9]+$ ]] || MTU=1320
+[[ "$S4" =~ ^[0-9]+$ ]] || S4=0
 [[ "$CPA_MAX" =~ ^[0-9]+$ ]] || CPA_MAX=0
+MTU=$(( 10#$MTU )); S4=$(( 10#$S4 )); CPA_MAX=$(( 10#$CPA_MAX ))
 
 OS=$(uname -s)
 case "$OS" in
@@ -4396,12 +4886,15 @@ echo ""
 echo "Пробник клиента The VPS of Eli"
 echo "  конфиг:   ${CONF}"
 echo "  endpoint: ${HOST}:${PORT}"
+[[ -n "$WGO_NOTE" ]] && echo "  ${WGO_NOTE}"
 echo "  туннель:  ${GW}, MTU ${MTU}"
 echo ""
 
 # --> 1. ХОСТ СЕРВЕРА <--
-if command -v ping >/dev/null 2>&1; then
-    RTT=$(ping -c 3 "$HOST" 2>/dev/null | tail -2 | head -1)
+if [[ -z "$REAL_HOST" ]]; then
+    warn "реальный адрес сервера неизвестен: ping пропущен"
+elif command -v ping >/dev/null 2>&1; then
+    RTT=$(ping -c 3 "$REAL_HOST" 2>/dev/null | tail -2 | head -1)
     if [[ -n "$RTT" ]]; then
         ok "сервер отвечает: ${RTT}"
     else
@@ -4464,10 +4957,14 @@ if command -v curl >/dev/null 2>&1; then
     MYIP=$(curl -4 -fsS --connect-timeout 8 https://ifconfig.me 2>/dev/null || echo "")
     if [[ -z "$MYIP" ]]; then
         bad "внешний адрес не получен: трафик наружу не идёт"
-    elif [[ "$MYIP" == "$HOST" ]]; then
+    elif [[ -z "$REAL_HOST" ]]; then
+        warn "внешний адрес ${MYIP}, а сервер за обфускатором: с чем сравнивать - неизвестно"
+    elif [[ -z "$REAL_IP" ]]; then
+        warn "внешний адрес ${MYIP}: адрес сервера ${REAL_HOST} не разрешился, сравнение пропущено"
+    elif [[ "$MYIP" == "$REAL_IP" ]]; then
         ok "внешний адрес ${MYIP}: трафик выходит через сервер туннеля"
     else
-        warn "внешний адрес ${MYIP}, а сервер ${HOST}: трафик идёт мимо туннеля (AllowedIPs не весь трафик?)"
+        warn "внешний адрес ${MYIP}, а сервер ${REAL_HOST} (${REAL_IP}): трафик идёт мимо туннеля (AllowedIPs не весь трафик?)"
     fi
 else
     warn "нет curl: проверка выхода в интернет пропущена"
@@ -4490,10 +4987,9 @@ PROBEEOF
 }
 
 # --> AWG: ПРОВЕРКА ТУННЕЛЯ С СЕРВЕРА <--
-# - вызывается после создания интерфейса и смены порта: состояние туннеля со -
-# - стороны сервера. Свежий хендшейк означает, что ключи и порт подходят, но -
-# - не означает, что трафик идёт: при выгоревшем на границе сети порте пакеты -
-# - в туннеле пропадают молча. Проверка идёт DF-пингом по туннелю -
+# - после создания интерфейса и смены порта: свежий хендшейк значит, что ключи и порт -
+# - подходят, но не что трафик идёт: на выгоревшем порте пакеты пропадают молча. -
+# - Проверка - DF-пинг по туннелю -
 _awg_tunnel_check() {
     local iface="$1"
     local env_file
@@ -4502,6 +4998,10 @@ _awg_tunnel_check() {
     local mtu srv_ip
     mtu=$(eli_source_env "$env_file" TUNNEL_MTU || true)
     mtu="${mtu:-1320}"
+    # - десятичный форс: значение из env с ведущим нулём bash читает как -
+    # - восьмеричное (01320 = 720) или падает "value too great for base" (08) -
+    [[ "$mtu" =~ ^[0-9]+$ ]] || mtu=1320
+    mtu=$(( 10#$mtu ))
     srv_ip=$(eli_source_env "$env_file" SERVER_TUNNEL_IP || true)
     [[ -n "$srv_ip" ]] || return 0
 
@@ -4517,6 +5017,7 @@ _awg_tunnel_check() {
     [[ "$s4" =~ ^[0-9]+$ ]] || s4=0
     cpa_max="${cpa_max##*-}"
     [[ "$cpa_max" =~ ^[0-9]+$ ]] || cpa_max=0
+    s4=$(( 10#$s4 )); cpa_max=$(( 10#$cpa_max ))
     outer=$(( mtu + AWG_WIRE_BASE + s4 + cpa_max ))
     if (( outer > AWG_WIRE_MAX )); then
         print_warn "Внешний пакет туннеля ${outer} байт больше ${AWG_WIRE_MAX}: у клиента на PPPoE он будет фрагментироваться"
@@ -4555,10 +5056,9 @@ _awg_tunnel_check() {
         return 0
     fi
 
-    # - DF-пинг идёт по туннелю от адреса сервера к адресу клиента и меряет пакет -
-    # - целиком (28 байт - заголовки IP и ICMP): размер подбирается делением -
-    # - отрезка между 1200 и 1452. Сначала простой пинг: он отделяет мёртвый -
-    # - туннель (не проходит даже малый пакет) от завышенного MTU -
+    # - DF-пинг от адреса сервера к адресу клиента меряет пакет целиком (28 байт -
+    # - заголовков IP и ICMP), размер - делением отрезка 1200..1452; сначала простой пинг: -
+    # - он отделяет мёртвый туннель от завышенного MTU -
     local peer best lo hi mid inner dead=0
     for peer in "${peer_ips[@]}"; do
         if ! ping -c 2 -W 1 -I "$srv_ip" "$peer" >/dev/null 2>&1; then
@@ -4594,13 +5094,15 @@ _awg_tunnel_check() {
 }
 
 # --> AWG: КОМПЛЕКТ КЛИЕНТА <--
-# - конфиг и пробник одним архивом: удобно отдать клиенту одним файлом -
+# - конфиг и пробник одним архивом; за обфускатором Endpoint в конфиге локальный, -
+# - архив обязан нести и wg-obfuscator.conf, иначе комплект у клиента не поднимается -
 _awg_pack_client_kit() {
     local iface="$1" name="$2" cdir="$3" kit
     local -a files=()
     [[ -d "$cdir" ]] || return 1
     kit="${cdir}/${name}-kit.tar.gz"
     files=(client.conf)
+    [[ -f "${cdir}/wg-obfuscator.conf" ]] && files+=(wg-obfuscator.conf)
     [[ -f "${cdir}/eli-probe.sh" ]] && files+=(eli-probe.sh)
     ( cd "$cdir" && tar -czf "$(basename "$kit")" "${files[@]}" 2>/dev/null ) || return 1
     [[ -s "$kit" ]] || return 1
@@ -4610,6 +5112,7 @@ _awg_pack_client_kit() {
 # --> МЕНЮ: УПРАВЛЕНИЕ AWG <--
 # - мультиинтерфейсное управление AmneziaWG -
 awg_manage() {
+    local choice
     while true; do
         eli_header
         eli_banner "Управление AmneziaWG" \

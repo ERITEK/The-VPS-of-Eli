@@ -16,6 +16,7 @@ _pr_found()   {                      echo -e "  ${GREEN}[ОК]${NC}       $1"; }
 _pr_check()   {                      echo -e "  ${CYAN}[...]${NC}      $1"; }
 
 _pr_find_file() {
+    local dir
     local pattern="$1"; shift
     for dir in "$@"; do
         [[ -d "$dir" ]] || continue
@@ -35,6 +36,8 @@ _pr_env_sq() {
 }
 
 prayer_run() {
+    local wf
+    local bid cf env_f envf idir item mkey wkey zkey
     eli_header
     eli_banner "Prayer of Eli" \
         "Аудит и самовосстановление VPS стека.
@@ -64,12 +67,16 @@ prayer_run() {
     elif ! jq empty "$_BOOK" 2>/dev/null; then
         local bak
         bak="${_BOOK}.broken.$(date +%Y%m%d_%H%M%S)"
-        mv "$_BOOK" "$bak"
-        _pr_warn "JSON повреждён, бэкап: $bak"
-        if book_init; then
-            _pr_fixed "Книга пересоздана"
+        # - без подтверждённого переноса пересоздание затирает данные книги -
+        if ! mv "$_BOOK" "$bak" || [[ ! -f "$bak" ]]; then
+            _pr_failed "JSON повреждён, книга не сохранена в бэкап (${_BOOK}): проверь место и права"
         else
-            _pr_failed "Не удалось пересоздать книгу"
+            _pr_warn "JSON повреждён, бэкап: $bak"
+            if book_init; then
+                _pr_fixed "Книга пересоздана"
+            else
+                _pr_failed "Не удалось пересоздать книгу"
+            fi
         fi
     else
         _pr_found "Книга в порядке (обновлена: $(book_read '._meta.updated'))"
@@ -249,7 +256,12 @@ prayer_run() {
                     "rekey_after_time":$rekey_after_time,"rekey_timeout":$rekey_timeout,
                     "reject_after_time":$reject_after_time,"keepalive_timeout":$keepalive_timeout,
                     "max_handshake_attempts":$max_handshake_attempts}}' 2>/dev/null || echo "{}")
-            book_write_obj ".awg.interfaces.${iface}" "$iobj"
+            # - пустой объект не затирает запись интерфейса: jq мог не собрать схему -
+            if [[ -z "$iobj" || "$iobj" == "{}" ]]; then
+                _pr_warn "Книга: запись интерфейса ${iface} не обновлена (jq не собрал объект)"
+            elif ! book_write_obj ".awg.interfaces.${iface}" "$iobj"; then
+                _pr_warn "Книга: запись интерфейса ${iface} не обновлена (провал записи)"
+            fi
         done
         # - восстанавливаем исходное состояние nullglob -
         eval "$_saved_nullglob"
@@ -257,7 +269,7 @@ prayer_run() {
 
     # --> 3. OUTLINE <--
     print_section "3. Outline"
-    if docker ps 2>/dev/null | grep -q "shadowbox"; then
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "shadowbox"; then
         book_write ".outline.installed" "true" bool
         _pr_found "Контейнер shadowbox: запущен"
         local bkp; bkp=$(book_read ".outline.manager_key_path")
@@ -291,7 +303,11 @@ MGMT_PORT="$(book_read '.outline.mgmt_port')"
 KEYS_PORT="$(book_read '.outline.keys_port')"
 EOF
                 chmod 600 "$ol_env"
-                _pr_fixed "outline.env восстановлен"
+                if eli_fact_line "$ol_env" "^SERVER_IP=" "outline.env"; then
+                    _pr_fixed "outline.env восстановлен"
+                else
+                    _pr_failed "outline.env не восстановился: файл не перечитался"
+                fi
             else
                 _pr_failed "Нет данных для восстановления outline.env"
             fi
@@ -344,7 +360,11 @@ PANEL_PASS='${e_pass}'
 VERSION='$(_pr_env_sq "${rv}")'
 EOF
                 chmod 600 "$xe"
-                _pr_fixed "3xui.env восстановлен"
+                if eli_fact_line "$xe" "^SERVER_IP=" "3xui.env"; then
+                    _pr_fixed "3xui.env восстановлен"
+                else
+                    _pr_failed "3xui.env не восстановился: файл не перечитался"
+                fi
             else
                 _pr_failed "Нет данных для восстановления 3xui.env"
             fi
@@ -399,7 +419,9 @@ EOF
                     [[ -n "$tdb" ]] && echo "TS_DB_PATH=\"${tdb}\""
                 } > "$te"
                 chmod 600 "$te"
-                if [[ -n "$tdb" ]]; then
+                if ! eli_fact_line "$te" "^SERVER_IP=" "teamspeak.env"; then
+                    _pr_failed "teamspeak.env не восстановился: файл не перечитался"
+                elif [[ -n "$tdb" ]]; then
                     _pr_fixed "teamspeak.env восстановлен"
                 else
                     _pr_fixed "teamspeak.env восстановлен, TS_DB_PATH не записан: БД не найдена"
@@ -442,11 +464,12 @@ EOF
         fi
     else
         _pr_check "Unbound не установлен"
+        [[ "$(book_read '.unbound.installed')" == "true" ]] && { book_write ".unbound.installed" "false" bool; _pr_updated "book: .unbound.installed=false"; }
     fi
 
     # --> 7. MUMBLE <--
     print_section "7. Mumble"
-    # - mumble-server и murmurd: оба варианта legacy/upstream проверяем зеркально -
+    # - mumble-server и murmurd: оба имени юнита проверяем зеркально -
     local mbl_active="" mbl_installed=""
     if systemctl is-active --quiet mumble-server 2>/dev/null; then
         mbl_active="mumble-server"
@@ -582,9 +605,12 @@ EOF
     if [[ -f "/etc/signal-proxy/signal.env" || -d "/opt/signal-proxy" ]]; then
         local sig_dom
         sig_dom=$(eli_source_env /etc/signal-proxy/signal.env DOMAIN || true)
-        if docker ps --format '{{.Names}}' 2>/dev/null | grep -Eq 'signal|nginx-terminate|nginx-relay'; then
-            _pr_found "Signal TLS Proxy: контейнеры запущены${sig_dom:+ (домен ${sig_dom})}"
+        local sig_run; sig_run=$(_sig_count)
+        if (( sig_run >= SIG_EXPECT )); then
+            _pr_found "Signal TLS Proxy: контейнеры запущены (${sig_run}/${SIG_EXPECT})${sig_dom:+ (домен ${sig_dom})}"
             [[ "$(book_read '.signal_proxy.installed')" != "true" ]] && { book_write ".signal_proxy.installed" "true" bool; _pr_updated "book: .signal_proxy.installed=true"; }
+        elif (( sig_run > 0 )); then
+            _pr_warn "Signal TLS Proxy: запущена часть контейнеров (${sig_run}/${SIG_EXPECT})"
         else
             _pr_warn "Signal TLS Proxy: файлы есть, контейнеры не запущены"
         fi
@@ -599,8 +625,12 @@ EOF
     print_section "9. Telegram-бот"
     local tgbot_script="/usr/local/bin/eli-tgbot-monitor.sh"
     local tgbot_env="/etc/vps-eli-stack/telegrambot.env"
-    local tgbot_cron="no"
-    crontab -l 2>/dev/null | grep -q 'eli-tgbot-monitor' && tgbot_cron="yes"
+    local tgbot_cron="no" _cron=""
+    if ! eli_cron_read _cron; then
+        tgbot_cron="unknown"
+    elif grep -qE "$TGBOT_CRON_JOB_RE" <<< "$_cron"; then
+        tgbot_cron="yes"
+    fi
     if [[ -f "$tgbot_script" && -f "$tgbot_env" && "$tgbot_cron" == "yes" ]]; then
         _pr_found "Telegram-бот: скрипт, env и cron на месте"
         [[ "$(book_read '.telegram_bot.enabled')" != "true" ]] && { book_write ".telegram_bot.enabled" "true" bool; _pr_updated "book: .telegram_bot.enabled=true"; }
@@ -649,10 +679,15 @@ EOF
         _pr_check "Zapret2 не установлен"
     fi
     # - cron автообновления vs книга -
-    local zap_cron="no"
-    crontab -l 2>/dev/null | grep -q 'eli-zapret-autoupdate' && zap_cron="yes"
+    local zap_cron="no" _cron=""
+    if ! eli_cron_read _cron; then
+        _pr_warn "Zapret2: crontab не прочитан, состояние автообновления неизвестно"
+        zap_cron="unknown"
+    elif grep -qE '^[^#].*/usr/local/bin/eli-zapret-autoupdate\.sh([[:space:]]|$)' <<< "$_cron"; then
+        zap_cron="yes"
+    fi
     local zap_au; zap_au=$(book_read '.zapret.autoupdate_enabled')
-    if [[ "$zap_au" == "true" && "$zap_cron" == "no" ]]; then
+    if [[ "$zap_cron" != "unknown" && "$zap_au" == "true" && "$zap_cron" == "no" ]]; then
         _pr_warn "Zapret2: автообновление в книге включено, но cron отсутствует"
     elif [[ "$zap_au" != "true" && "$zap_cron" == "yes" ]]; then
         _pr_warn "Zapret2: cron автообновления есть, но в книге выключено"
@@ -681,12 +716,12 @@ EOF
             if [[ ! -f "$wenv" ]]; then
                 _pr_warn "wg-obfuscator ${wiface}: awg-интерфейс отсутствует, привязка висит в пустоту"
             else
-                if [[ "$(grep -m1 '^AWG_VERSION=' "$wenv" 2>/dev/null | cut -d'"' -f2)" != "wg" ]]; then
+                if [[ "$(eli_source_env "$wenv" AWG_VERSION)" != "wg" ]]; then
                     _pr_warn "wg-obfuscator ${wiface}: интерфейс больше не vanilla-WG, обфускация портит пакеты"
                 fi
                 # - смысл модуля: порт туннеля не должен быть виден снаружи -
-                wport=$(grep -m1 '^SERVER_PORT=' "$wenv" 2>/dev/null | cut -d'"' -f2)
-                if [[ -n "$wport" ]] && ufw show added 2>/dev/null | grep -Eq "(^|[[:space:]])${wport}/udp([[:space:]]|$)"; then
+                wport=$(eli_source_env "$wenv" SERVER_PORT)
+                if [[ -n "$wport" ]] && _ufw_has_rule "$wport" "udp"; then
                     _pr_warn "wg-obfuscator ${wiface}: порт ${wport}/udp открыт в UFW, голый WireGuard виден снаружи"
                 fi
             fi
@@ -762,7 +797,7 @@ EOF
             mim_n=$(( mim_n + 1 ))
 
             # - порт интерфейса мог поменяться: книга подтягивается за env -
-            mport=$(grep -m1 '^SERVER_PORT=' "$menv" 2>/dev/null | cut -d'"' -f2)
+            mport=$(eli_source_env "$menv" SERVER_PORT)
             if [[ "$mport" =~ ^(0|[1-9][0-9]*)$ ]] && [[ "$(book_read ".mimic.instances.\"${mkey}\".port")" != "$mport" ]]; then
                 book_write ".mimic.instances.\"${mkey}\".port" "$mport" number
                 _pr_fixed "book: mimic ${mkey} port=${mport}"
@@ -778,9 +813,9 @@ EOF
 
             # - смысл модуля: на порт должны ходить и TCP, и UDP -
             if [[ -n "$mport" ]] && command -v ufw &>/dev/null; then
-                ufw show added 2>/dev/null | grep -Eq "(^|[[:space:]])${mport}/tcp([[:space:]]|$)" \
+                _ufw_has_rule "$mport" "tcp" \
                     || _pr_warn "mimic ${mkey}: порт ${mport}/tcp закрыт в UFW, хендшейк mimic не дойдёт"
-                ufw show added 2>/dev/null | grep -Eq "(^|[[:space:]])${mport}/udp([[:space:]]|$)" \
+                _ufw_has_rule "$mport" "udp" \
                     || _pr_warn "mimic ${mkey}: порт ${mport}/udp закрыт в UFW, восстановленный трафик не дойдёт"
             fi
         done
@@ -791,16 +826,31 @@ EOF
         else
             _pr_found "mimic: привязок ${mim_n} на ${mim_wan}"
             systemctl is-active --quiet "$mim_unit" 2>/dev/null || _pr_warn "mimic: привязки есть, ${mim_unit} не активен"
-            # - конфиг детерминированно собирается из книги, расхождение чиним на месте -
-            local mim_want mim_have
+            # - конфиг детерминированно собирается из книги: расхождение числа -
+            # - фильтров или порта (смена порта туннеля) чиним на месте -
+            local mim_want mim_have mim_ports_have mim_ports_want
             mim_want=$mim_n
+            mim_ports_have=$(grep '^filter = ' "$mim_conf" 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\),.*/\1/p' | sort | tr '\n' ' ')
+            mim_ports_want=$(for mim_key in $(jq -r '.mimic.instances | keys[]?' "$_BOOK" 2>/dev/null); do
+                book_read ".mimic.instances.\"${mim_key}\".port"
+            done | sort | tr '\n' ' ')
             # - grep -c печатает 0 и при этом возвращает 1: подстраховка через регулярку, а не через || -
             mim_have=$(grep -c '^filter = ' "$mim_conf" 2>/dev/null)
             [[ "$mim_have" =~ ^(0|[1-9][0-9]*)$ ]] || mim_have=0
-            if [[ "$mim_have" != "$mim_want" ]] && declare -f _mim_build_conf >/dev/null 2>&1; then
+            if { [[ "$mim_have" != "$mim_want" ]] || [[ "$mim_ports_have" != "$mim_ports_want" ]]; } \
+                && declare -f _mim_build_conf >/dev/null 2>&1; then
                 if _mim_build_conf; then
-                    _pr_fixed "mimic: конфиг ${mim_conf} пересобран из книги (фильтров было ${mim_have}, стало ${mim_want})"
-                    _pr_warn "mimic: нужен рестарт ${mim_unit}, чтобы фильтры применились"
+                    # - факт: конфиг перечитывается, число фильтров и портов сверяется с книгой -
+                    local mim_now mim_ports_now
+                    mim_now=$(grep -c '^filter = ' "$mim_conf" 2>/dev/null)
+                    [[ "$mim_now" =~ ^(0|[1-9][0-9]*)$ ]] || mim_now=0
+                    mim_ports_now=$(grep '^filter = ' "$mim_conf" 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\),.*/\1/p' | sort | tr '\n' ' ')
+                    if [[ "$mim_now" == "$mim_want" && "$mim_ports_now" == "$mim_ports_want" ]]; then
+                        _pr_fixed "mimic: конфиг ${mim_conf} пересобран из книги (фильтров ${mim_have} -> ${mim_now}, порты [${mim_ports_have}] -> [${mim_ports_now}])"
+                        _pr_warn "mimic: нужен рестарт ${mim_unit}, чтобы фильтры применились"
+                    else
+                        _pr_warn "mimic: конфиг ${mim_conf} не пересобрался (фильтров ${mim_now} из ${mim_want}, порты [${mim_ports_now}] из [${mim_ports_want}])"
+                    fi
                 else
                     _pr_warn "mimic: конфиг ${mim_conf} разошёлся с книгой, пересобрать не вышло"
                 fi

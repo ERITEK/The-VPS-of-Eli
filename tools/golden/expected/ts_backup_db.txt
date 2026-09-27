@@ -10,5 +10,7 @@ ts6_20260913_120000
 CMD flock -n 200
 CMD systemctl is-active --quiet teamspeak
 CMD systemctl stop teamspeak
+CMD systemctl is-active --quiet teamspeak
 CMD systemctl start teamspeak
+CMD systemctl is-active --quiet teamspeak
 rc=0

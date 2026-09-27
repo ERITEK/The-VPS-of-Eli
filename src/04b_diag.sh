@@ -33,6 +33,8 @@ _dg_esc() {
 }
 
 diag_run() {
+    local pr sr
+    local i mt pe
     eli_header
     eli_banner "Диагностика VPS стека" \
         "Полная проверка сервера по 21 секции. Занимает 2-5 минут.
@@ -52,11 +54,14 @@ diag_run() {
     local RPT_TXT="/root/diag_${_TS}.txt"
     local RPT_HTML="/root/diag_${_TS}.html"
 
-    # - дублирование вывода в файл через named pipe -
-    # - process substitution через >(tee ...) не даёт надёжного PID: $! может -
-    # - указывать не на tee, wait зависает или возвращает 127. mkfifo решает: -
-    # - tee запускается как явный bg-child shell'а, PID гарантированно наш -
-    # - оригинальные stdout/stderr сохранены в fd 3 и 4 -
+    # - дублирование вывода в файл через named pipe: >(tee ...) не даёт надёжного PID -
+    # - ($! может быть не tee, wait зависает или 127); mkfifo: tee явный bg-child, PID наш; -
+    # - stdout/stderr сохранены в fd 3 и 4; отчёт открывается до запуска канала: полный диск -
+    # - иначе убивает tee и прогон молча пишет в мёртвую трубу -
+    if ! ( : >> "$RPT_TXT" ) 2>/dev/null; then
+        print_err "Отчёт недоступен: не открыть ${RPT_TXT} (диск полон или файловая система read-only)"
+        return 1
+    fi
     exec 3>&1 4>&2
     local _DG_TMPDIR _DG_FIFO _DG_TEE_PID=""
     _DG_TMPDIR=$(mktemp -d -t diag.XXXXXXXX)
@@ -66,16 +71,30 @@ diag_run() {
     # - так tee продолжит писать на экран, а функция пишет в pipe -
     tee -a "$RPT_TXT" < "$_DG_FIFO" &
     _DG_TEE_PID=$!
+    # - смерть читателя не роняет прогон: SIGPIPE заглушается, живость -
+    # - tee сверяется сразу после переключения вывода -
+    trap '' PIPE
     exec > "$_DG_FIFO" 2>&1
+    if ! kill -0 "$_DG_TEE_PID" 2>/dev/null; then
+        exec 1>&3 2>&4 3>&- 4>&-
+        print_err "Читатель отчёта умер до начала проверки: диагностика прервана, вывод только на экран"
+        rm -rf "$_DG_TMPDIR"
+        _DG_TEE_PID=""
+        trap - PIPE
+        return 1
+    fi
 
     # - cleanup: закрыть pipe (EOF для tee) -> дождаться tee -> убрать tmp -
     # - идемпотентно: повторный вызов из разных trap не упадёт -
     _dg_cleanup() {
         [[ -z "${_DG_TEE_PID:-}" ]] && return 0
         exec 1>&3 2>&4 3>&- 4>&- || true
-        wait "$_DG_TEE_PID" 2>/dev/null || true
+        local _tee_rc=0
+        wait "$_DG_TEE_PID" 2>/dev/null || _tee_rc=$?
+        (( _tee_rc != 0 )) && print_warn "Отчёт мог быть неполным: tee завершился с ошибкой (${_tee_rc}), диск полон?"
         [[ -n "${_DG_TMPDIR:-}" && -d "$_DG_TMPDIR" ]] && rm -rf "$_DG_TMPDIR"
         _DG_TEE_PID=""
+        trap - PIPE
     }
     # - штатный возврат -
     trap '_dg_cleanup' RETURN
@@ -135,11 +154,9 @@ diag_run() {
     }
 
     # --> 3. КАНАЛ (регионы, живые точки с фолбэком) <--
-    # - таблица точек _pts[]: "__region__|Имя" задаёт заголовок группы, -
-    # - "LABEL|URL[|URL2[|URL3]]" - точка с цепочкой источников-фолбэков. -
-    # - пустой URL (Киргизия) даёт честный статус "точка недоступна". -
-    # - на нацзеркалах ОС ls-lR.gz местами убирают, поэтому вторым источником -
-    # - идёт Contents-amd64.gz текущего LTS (noble) - он есть на любом зеркале. -
+    # - "__region__|Имя" - заголовок группы, "LABEL|URL[|URL2[|URL3]]" - точка с цепочкой -
+    # - фолбэков; пустой URL (Киргизия) - честный статус "точка недоступна"; вторым источником -
+    # - Contents-amd64.gz текущего LTS: ls-lR.gz на нацзеркалах местами убирают -
     _dg_bandwidth() {
         D_BEST_SPEED="0"; D_BEST_HOST="?"
         local bw_confirm=""
@@ -219,6 +236,7 @@ diag_run() {
 
     # --> 4. ЛАТЕНТНОСТЬ + DNS + NTP <--
     _dg_latency() {
+        local ns_host
         _tp() {
             local host="$1" label="$2" result loss avg jitter
             result=$(ping -c 10 -q "$host" 2>/dev/null | tail -2 || true)
@@ -282,6 +300,7 @@ diag_run() {
 
     # --> 6. AWG <--
     _dg_awg() {
+        local iface
         if ! command -v awg &>/dev/null; then print_warn "AWG не установлен"; return 0; fi
         local ifaces=()
         while read -r _ iface; do [[ -n "$iface" ]] && ifaces+=("$iface"); done < <(awg show 2>/dev/null | awk '/^interface:/{print $1, $2}')
@@ -294,7 +313,7 @@ diag_run() {
             local conf="/etc/amnezia/amneziawg/${iface}.conf"
             [[ -f "$conf" ]] && grep -q "TCPMSS" "$conf" && { mss_conf="есть"; _dg_green "MSS clamping в ${iface}.conf"; }
             [[ "$mss_conf" != "есть" ]] && _dg_red "MSS clamping отсутствует в ${iface}.conf|Добавь TCPMSS в PostUp/PostDown"
-            local mss_cnt; mss_cnt=$(iptables-save -t mangle 2>/dev/null | grep "TCPMSS" | grep -c "${iface}")
+            local mss_cnt; mss_cnt=$(iptables-save -t mangle 2>/dev/null | grep "TCPMSS" | grep -cE -- "[[:space:]]-[oi] ${iface}([[:space:]]|\$)")
             [[ $mss_cnt -ge 2 ]] && mss_ipt="да"
             echo -e "  ${BOLD}${iface}:${NC} порт=${port} пиров=${peers} MTU=${mtu} MSS_conf=${mss_conf} MSS_ipt=${mss_ipt}"
             D_AWG_DATA+=("${iface}|${port}|${peers}|${mtu}|${mss_conf}|${mss_ipt}")
@@ -314,7 +333,7 @@ diag_run() {
 
     # --> 8. OUTLINE <--
     _dg_outline() {
-        if docker ps 2>/dev/null | grep -q "shadowbox"; then
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "shadowbox"; then
             D_OL_STATUS="запущен"; print_ok "Outline: запущен"
             D_OL_CPU=$(docker stats --no-stream --format "{{.CPUPerc}}" shadowbox 2>/dev/null || echo "?")
             D_OL_MEM=$(docker stats --no-stream --format "{{.MemUsage}}" shadowbox 2>/dev/null | grep -oP '^[\d.]+\w+' || echo "?")
@@ -394,6 +413,7 @@ diag_run() {
             || { print_warn "MSS: нет правил"; _dg_red "Нет MSS clamping в iptables|Перезапусти AWG интерфейсы"; }
     }
     _dg_ports() {
+        local _ae
         printf "\n  %-8s %-6s %-22s %s\n" "ПОРТ" "PROTO" "ПРОЦЕСС" "НАЗНАЧЕНИЕ"
         declare -A _seen
         local line
@@ -420,9 +440,14 @@ diag_run() {
     _dg_disk() {
         # - файл пробы через mktemp: имя в общем /tmp предсказуемо и подменяется симлинком -
         local dtmp
-        dtmp=$(mktemp) || dtmp="/tmp/_disktest.$$"
-        D_DISK_SPEED=$(dd if=/dev/zero of="$dtmp" bs=1M count=32 conv=fdatasync 2>&1 | grep -oP '[0-9.]+ [MG]B/s' | tail -1 || echo "?")
-        rm -f "$dtmp"; print_ok "Запись: ${D_DISK_SPEED}"
+        dtmp=$(mktemp) 2>/dev/null
+        if [[ -z "$dtmp" ]]; then
+            D_DISK_SPEED="?"
+            print_warn "Тест записи пропущен: временный файл не создан"
+        else
+            D_DISK_SPEED=$(dd if=/dev/zero of="$dtmp" bs=1M count=32 conv=fdatasync 2>&1 | grep -oP '[0-9.]+ [MG]B/s' | tail -1 || echo "?")
+            rm -f "$dtmp"; print_ok "Запись: ${D_DISK_SPEED}"
+        fi
         df -hT | grep -v "tmpfs\|overlay\|udev" | sed 's/^/  /'
         local use mp
         while read -r use mp; do local pct="${use%\%}"
@@ -431,13 +456,14 @@ diag_run() {
         return 0
     }
     _dg_services() {
+        local _ae cn
         _sv() { local svc="$1" label="$2" st
             if systemctl is-active --quiet "$svc" 2>/dev/null; then st="активен"; print_ok "${label}: активен"; _dg_green "Сервис ${label} активен"
             elif systemctl list-unit-files 2>/dev/null | grep -q "^${svc}"; then st="остановлен"; print_err "${label}: ОСТАНОВЛЕН"; _dg_red "Сервис ${label} остановлен|systemctl start ${svc}"
             else st="н/у"; print_info "${label}: не установлен"; fi; D_SVC_TABLE+=("${label}|${st}"); }
         _sv "fail2ban" "Fail2Ban"; _sv "docker" "Docker"; _sv "x-ui" "3X-UI"
         _sv "teamspeak" "TeamSpeak"; _sv "unbound" "Unbound"
-        # - Mumble: upstream mumble-server или legacy murmurd -
+        # - Mumble: имя юнита mumble-server или legacy murmurd -
         if systemctl is-active --quiet mumble-server 2>/dev/null || systemctl is-active --quiet murmurd 2>/dev/null; then
             print_ok "Mumble: активен"; _dg_green "Сервис Mumble активен"; D_SVC_TABLE+=("Mumble|активен")
         elif systemctl list-unit-files 2>/dev/null | grep -qE '^(mumble-server|murmurd)\.service'; then
@@ -472,9 +498,11 @@ diag_run() {
                 print_ok "AWG ${_ai}: поднят"; D_SVC_TABLE+=("AWG ${_ai}|активен")
             else print_err "AWG ${_ai}: не поднят"; D_SVC_TABLE+=("AWG ${_ai}|остановлен"); fi
         done
-        # - docker контейнеры: MTProto, SOCKS5, Outline, Signal -
+        # - docker контейнеры: MTProto, SOCKS5, Outline, Signal; в таблицу идут -
+        # - только свои (записи стека), чужой контейнер с похожим именем не попадает -
         if command -v docker &>/dev/null; then
-            for cn in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E "^(mtproto-|socks5-|shadowbox|signal)"); do
+            for cn in $(docker ps -a --format '{{.Names}}' 2>/dev/null); do
+                eli_own_container "$cn" || continue
                 if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${cn}$"; then
                     print_ok "${cn}: запущен"; D_SVC_TABLE+=("${cn}|активен")
                 else
@@ -487,6 +515,7 @@ diag_run() {
 
     # --> ПРОКСИ (MTProto, SOCKS5, Hysteria 2) <--
     _dg_proxy() {
+        local idir
         # - MTProto мультиинстанс -
         local mtp_count=0
         for envf in /etc/mtproto/instance_*.env; do
@@ -572,10 +601,15 @@ diag_run() {
 
         # - Signal TLS Proxy: env/каталог + docker signal/nginx-terminate/nginx-relay -
         if [[ -f "/etc/signal-proxy/signal.env" || -d "/opt/signal-proxy" ]]; then
-            if docker ps --format '{{.Names}}' 2>/dev/null | grep -Eq 'signal|nginx-terminate|nginx-relay'; then
-                print_ok "Signal TLS Proxy: контейнеры запущены"
+            local sig_run; sig_run=$(_sig_count)
+            if (( sig_run >= SIG_EXPECT )); then
+                print_ok "Signal TLS Proxy: контейнеры запущены (${sig_run}/${SIG_EXPECT})"
                 _dg_green "Signal TLS Proxy активен"
                 D_SVC_TABLE+=("Signal TLS Proxy|активен")
+            elif (( sig_run > 0 )); then
+                print_warn "Signal TLS Proxy: запущена часть контейнеров (${sig_run}/${SIG_EXPECT})"
+                _dg_yellow "Signal TLS Proxy: часть контейнеров не запущена|cd /opt/signal-proxy && docker compose up -d"
+                D_SVC_TABLE+=("Signal TLS Proxy|частично")
             else
                 print_err "Signal TLS Proxy: файлы есть, контейнеры не запущены"
                 _dg_red "Signal TLS Proxy остановлен|cd /opt/signal-proxy && docker compose up -d"
@@ -591,7 +625,10 @@ diag_run() {
         if [[ -f /etc/vps-eli-stack/telegrambot.env ]]; then
             local interval_min
             interval_min=$(eli_source_env /etc/vps-eli-stack/telegrambot.env INTERVAL || true)
-            if crontab -l 2>/dev/null | grep -q "eli-tgbot-monitor"; then
+            local _cron=""
+            if ! eli_cron_read _cron; then
+                print_warn "Telegram мониторинг: crontab не прочитан, состояние неизвестно"
+            elif grep -qE "$TGBOT_CRON_JOB_RE" <<< "$_cron"; then
                 print_ok "Telegram мониторинг: каждые ${interval_min} мин"
                 _dg_green "Telegram мониторинг активен"
             else
@@ -607,11 +644,18 @@ diag_run() {
         local js; js=$(journalctl --disk-usage 2>/dev/null | grep -oP '[\d.]+\s*[KMGTPE]i?B?' | tail -1 || echo "?")
         [[ -n "$jl" ]] && { print_ok "Journald: ${js}/${jl}"; D_MAINT_TABLE+=("Journald|[OK] ${js} / ${jl}"); } \
             || { print_warn "Journald: без лимита"; _dg_yellow "Journald без лимита|Запусти Автообслуживание"; D_MAINT_TABLE+=("Journald|[!] Без лимита"); }
-        local cr; cr=$(crontab -l 2>/dev/null | grep -v "^#" | grep -c "reboot" | tr -d '[:space:]')
-        [[ "${cr:-0}" -gt 0 ]] && { print_ok "Авто-reboot: ${cr}"; D_MAINT_TABLE+=("Авто-reboot|[OK] ${cr} задачи"); } \
-            || { print_warn "Авто-reboot: нет"; _dg_yellow "Нет авто-reboot|Запусти Автообслуживание"; D_MAINT_TABLE+=("Авто-reboot|[!] Выключен"); }
-        local cd; cd=$(crontab -l 2>/dev/null | grep -v "^#" | grep -c "docker-cleanup" | tr -d '[:space:]')
-        [[ "${cd:-0}" -gt 0 ]] && D_MAINT_TABLE+=("Docker cleanup|[OK] Активен") || D_MAINT_TABLE+=("Docker cleanup|[!] Выключен")
+        local _cron=""
+        if ! eli_cron_read _cron; then
+            print_warn "Авто-reboot: crontab не прочитан"
+            D_MAINT_TABLE+=("Авто-reboot|[?] Не прочитан")
+            D_MAINT_TABLE+=("Docker cleanup|[?] Не прочитан")
+        else
+            local cr; cr=$(grep -cE "^[^#].*/s?bin/reboot([[:space:]]|$)" <<< "$_cron" | tr -d '[:space:]')
+            [[ "${cr:-0}" -gt 0 ]] && { print_ok "Авто-reboot: ${cr}"; D_MAINT_TABLE+=("Авто-reboot|[OK] ${cr} задачи"); } \
+                || { print_warn "Авто-reboot: нет"; _dg_yellow "Нет авто-reboot|Запусти Автообслуживание"; D_MAINT_TABLE+=("Авто-reboot|[!] Выключен"); }
+            local cd; cd=$(grep -cE "^[^#].*/usr/local/bin/docker-cleanup\.sh([[:space:]]|$)" <<< "$_cron" | tr -d '[:space:]')
+            [[ "${cd:-0}" -gt 0 ]] && D_MAINT_TABLE+=("Docker cleanup|[OK] Активен") || D_MAINT_TABLE+=("Docker cleanup|[!] Выключен")
+        fi
         local upd; upd=$(apt-get upgrade --dry-run 2>/dev/null | grep -c "^Inst " | tr -d '[:space:]')
         [[ "${upd:-0}" -gt 0 ]] && { print_warn "Обновлений: ${upd}"; D_MAINT_TABLE+=("Обновлений|[!] ${upd}"); } \
             || { print_ok "Система актуальна"; D_MAINT_TABLE+=("Обновлений|[OK] Актуально"); }
@@ -1038,10 +1082,17 @@ CSS
     # - Footer -
     echo "<div class='footer'>VPS Diag v${ELI_VERSION} &middot; $(_dg_esc "${D_HOST}") &middot; $(date '+%d.%m.%Y %H:%M:%S UTC')</div></body></html>"
     } >> "$RPT_HTML"
+    # - факт: файл HTML перечитывается, иначе провал записи выдаётся за готовый отчёт -
+    local _html_ok=1
+    [[ -s "$RPT_HTML" ]] || _html_ok=0
 
     echo -e "${BOLD}====================================================${NC}"
     echo -e "  [TXT] TXT:  ${RPT_TXT}"
-    echo -e "  [HTML] HTML: ${RPT_HTML}"
+    if (( _html_ok == 1 )); then
+        echo -e "  [HTML] HTML: ${RPT_HTML}"
+    else
+        echo -e "  [HTML] HTML отчёт не записан: ${RPT_HTML} (диск полон или read-only)"
+    fi
     echo -e "${BOLD}====================================================${NC}"
     echo ""
     # - FD 3/4 закроются автоматически через trap RETURN -

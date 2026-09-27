@@ -41,7 +41,7 @@ _zap_table() { echo "zeli_${1}"; }
 _zap_unit()  { echo "zapret2-eli@${1}.service"; }
 
 # --> ZAP2: ОПРЕДЕЛЕНИЕ АРХИТЕКТУРЫ <--
-# - маппинг uname -m в имя каталога бинар апстрима -
+# - маппинг uname -m в имя каталога с бинарём zapret -
 _zap_arch() {
     case "$(uname -m)" in
         x86_64|amd64)   echo "linux-x86_64" ;;
@@ -216,6 +216,7 @@ _zap_asset_url() {
 # --> ZAP2: ПОЛУЧЕНИЕ БИНАРЯ <--
 # - скачиваем архив релиза, кладём nfqws2 под нашу arch, при отсутствии -> собираем -
 _zap_fetch_binary() {
+    local comp d
     local tag="$1" arch tmp url tarball extracted src
     arch=$(_zap_arch)
     tmp=$(mktemp -d) || { print_err "mktemp failed"; return 1; }
@@ -250,9 +251,17 @@ _zap_fetch_binary() {
     [[ -f "${extracted}/blockcheck2.sh" ]] && cp -a "${extracted}/blockcheck2.sh" "${ZAP2_DIR}/" 2>/dev/null
 
     # - ищем готовые бинарники под arch: nfqws2 + mdig + ip2net (mdig нужен blockcheck) -
-    local bindir="${extracted}/binaries/${arch}"
+    local bindir="${extracted}/binaries/${arch}" engine_src=""
+    # - живые инстансы держат текст бинаря: замена без остановки -
+    # - провалится с ETXTBSY, остановленные возвращаются на место -
+    local u
+    local stopped=()
+    for u in $(_zap_bound_list); do
+        systemctl stop "$(_zap_unit "$u")" 2>/dev/null && stopped+=("$u")
+    done
     if [[ -f "${bindir}/nfqws2" ]]; then
-        cp -a "${bindir}/nfqws2" "$ZAP2_BIN"; chmod 755 "$ZAP2_BIN"
+        engine_src="${bindir}/nfqws2"
+        cp -a "$engine_src" "$ZAP2_BIN"; chmod 755 "$ZAP2_BIN"
         [[ -f "${bindir}/mdig" ]]   && { cp -a "${bindir}/mdig"   "${ZAP2_DIR}/mdig/mdig";     chmod 755 "${ZAP2_DIR}/mdig/mdig"; }
         [[ -f "${bindir}/ip2net" ]] && { cp -a "${bindir}/ip2net" "${ZAP2_DIR}/ip2net/ip2net"; chmod 755 "${ZAP2_DIR}/ip2net/ip2net"; }
     else
@@ -262,12 +271,21 @@ _zap_fetch_binary() {
         for comp in nfq2 mdig ip2net; do
             [[ -d "${extracted}/${comp}" ]] && make -C "${extracted}/${comp}" 2>/dev/null
         done
-        [[ -f "${extracted}/nfq2/nfqws2" ]]     && { cp -a "${extracted}/nfq2/nfqws2" "$ZAP2_BIN"; chmod 755 "$ZAP2_BIN"; }
+        [[ -f "${extracted}/nfq2/nfqws2" ]]     && { engine_src="${extracted}/nfq2/nfqws2"; cp -a "$engine_src" "$ZAP2_BIN"; chmod 755 "$ZAP2_BIN"; }
         [[ -f "${extracted}/mdig/mdig" ]]       && { cp -a "${extracted}/mdig/mdig" "${ZAP2_DIR}/mdig/mdig"; chmod 755 "${ZAP2_DIR}/mdig/mdig"; }
         [[ -f "${extracted}/ip2net/ip2net" ]]   && { cp -a "${extracted}/ip2net/ip2net" "${ZAP2_DIR}/ip2net/ip2net"; chmod 755 "${ZAP2_DIR}/ip2net/ip2net"; }
     fi
 
+    # - замена движка проверяется содержимым: пробник по тому же пути -
+    # - ответил бы и старый файл -
+    if [[ -z "$engine_src" ]] || ! cmp -s "$engine_src" "$ZAP2_BIN"; then
+        print_err "Бинарь nfqws2 не получен или не заменён (занят процессом или нет места)"
+        rm -rf "$tmp"
+        for u in "${stopped[@]}"; do systemctl start "$(_zap_unit "$u")" 2>/dev/null; done
+        return 1
+    fi
     rm -rf "$tmp"
+    for u in "${stopped[@]}"; do systemctl start "$(_zap_unit "$u")" 2>/dev/null; done
 
     # - верификация: бинарник на месте, запускается, lua-библиотека присутствует -
     if [[ ! -x "$ZAP2_BIN" ]]; then
@@ -354,11 +372,9 @@ _zap_ensure_hosts() {
 }
 
 # --> ZAP2: ПОСТРОЕНИЕ NFT ПРАВИЛ <--
-# - postrouting priority 101 (после NAT), приоритет обязателен для POSTNAT-режима -
-# - скоуп по iifname конкретного awg-интерфейса + oifname WAN (только форвард этого туннеля) -
-# - loop-guard: fake-пакеты nfqws2 помечены POSTNAT маркой, их не берём в очередь -
-# - predefrag/output notrack: fake-пакеты не должны проходить conntrack/NAT проверки -
-# - SSH структурно не затрагивается: это форвард, а не INPUT хоста -
+# - postrouting priority 101 (после NAT, обязательна для POSTNAT); скоуп iifname -
+# - интерфейса + oifname WAN; fake-пакеты помечены POSTNAT-маркой - мимо очереди (loop-guard); -
+# - predefrag/output notrack - мимо conntrack/NAT; SSH не затронут: это форвард, не INPUT -
 _zap_build_nft() {
     local iface="$1" qnum="$2" wan="$3" table nftf
     table=$(_zap_table "$iface")
@@ -422,29 +438,36 @@ _zap_apply_with_rollback() {
         return 1
     fi
 
-    # - страховочный таймер -> снос таблицы, если подтверждение не пришло -
-    local rbunit="zeli-rollback-${iface}"
-    systemctl reset-failed "${rbunit}.timer" "${rbunit}.service" 2>/dev/null || true
-    systemd-run --unit="$rbunit" --on-active="${ZAP2_ROLLBACK_SEC}" \
-        /usr/sbin/nft delete table inet "$table" >/dev/null 2>&1 || \
-        systemd-run --unit="$rbunit" --on-active="${ZAP2_ROLLBACK_SEC}" \
-        nft delete table inet "$table" >/dev/null 2>&1
+    # - страховочный таймер -> снос таблицы, если подтверждение не пришло; -
+    # - постановку подтверждает канонный хелпер: молчаливый отказ systemd-run -
+    # - оставил бы пользователя без страховки при обещанном откате -
+    local rbunit="zeli-rollback-${iface}" safety=0
+    eli_safety_disarm "$rbunit"
+    if eli_safety_arm "$rbunit" "$ZAP2_ROLLBACK_SEC" \
+        "nft delete table inet ${table} 2>/dev/null || /usr/sbin/nft delete table inet ${table} 2>/dev/null"; then
+        safety=1
+    fi
 
     # - хостовая проверка -
     if ! _zap_connectivity_ok "$iface"; then
         print_err "Проверка связности не прошла = откат"
-        systemctl stop "${rbunit}.timer" 2>/dev/null || true
+        eli_safety_disarm "$rbunit"
         nft delete table inet "$table" 2>/dev/null
         return 1
     fi
 
-    print_ok "Правила применены. Страховочный откат через ${ZAP2_ROLLBACK_SEC} сек, если не подтвердишь."
+    if [[ $safety -eq 1 ]]; then
+        print_ok "Правила применены. Страховочный откат через ${ZAP2_ROLLBACK_SEC} сек, если не подтвердишь."
+    else
+        print_warn "Правила применены без страховочного таймера: не подтвердишь - откати вручную"
+        print_info "Ручной откат: nft delete table inet ${table}"
+    fi
     print_info "Проверь на клиенте: трафик через ${iface} жив, целевые сервисы открываются."
     local confirm=""
     ask_yn "Клиентский трафик работает? Зафиксировать правила?" "y" confirm
 
     if [[ "$confirm" == "yes" ]]; then
-        systemctl stop "${rbunit}.timer" 2>/dev/null || true
+        eli_safety_disarm "$rbunit"
         # - таймер мог сработать, пока клиент проверялся: тогда правил уже нет -
         if ! nft list table inet "$table" &>/dev/null; then
             print_err "Страховочный откат сработал раньше подтверждения (${ZAP2_ROLLBACK_SEC} сек): правила сняты"
@@ -457,7 +480,7 @@ _zap_apply_with_rollback() {
     fi
 
     print_warn "Не подтверждено -> откат"
-    systemctl stop "${rbunit}.timer" 2>/dev/null || true
+    eli_safety_disarm "$rbunit"
     nft delete table inet "$table" 2>/dev/null
     return 1
 }
@@ -507,9 +530,23 @@ _zap_book_init() {
     eli_book_section_init ".zapret" '{installed:false, version:"", autoupdate_enabled:false, interfaces:{}}'
 }
 
+# --> ZAP2: УБОРКА НЕУДАВШЕЙСЯ ПРИВЯЗКИ <--
+# - юниты глушатся всегда; файлы сносятся только созданные вызовом, -
+# - сохранённые conf, hostlist и loader остаются на месте -
+_zap_rollback_bind() {
+    local iface="$1" keep_conf="$2" keep_hosts="$3" keep_loader="$4"
+    systemctl disable --now "$(_zap_unit "$iface")" 2>/dev/null
+    systemctl disable --now "zeli-nft-${iface}.service" 2>/dev/null
+    [[ "$keep_conf" == "yes" ]] || rm -f "$(_zap_conf "$iface")" "$(_zap_nftf "$iface")"
+    [[ "$keep_hosts" == "yes" ]] || rm -f "$(_zap_hosts "$iface")"
+    [[ "$keep_loader" == "yes" ]] || rm -f "/etc/systemd/system/zeli-nft-${iface}.service"
+    systemctl daemon-reload 2>/dev/null || true
+}
+
 # --> ZAP2: ПРИВЯЗКА К ИНТЕРФЕЙСУ <--
 # - выбор awg интерфейса, стратегия, применение с откатом, запуск инстанса -
 zapret_bind_iface() {
+    local x
     _zap_installed || { print_err "zapret2 не установлен"; return 1; }
 
     local ifaces
@@ -532,15 +569,37 @@ zapret_bind_iface() {
     [[ "$sel" =~ ^(0|[1-9][0-9]*)$ ]] && (( sel >= 1 && sel <= ${#arr[@]} )) || { print_err "Неверный выбор"; return 1; }
     iface="${arr[$((sel-1))]}"
 
+    # - живая привязка: стратегию меняют автоподбором или ручным заданием, -
+    # - повторная привязка затёрла бы её без копии -
+    if [[ "$(book_read ".zapret.interfaces.\"${iface}\".bound")" == "true" ]]; then
+        print_err "К ${iface} zapret2 уже привязан"
+        print_info "Сменить стратегию: Автоподбор стратегии или Задать стратегию вручную"
+        return 1
+    fi
+
     local wan
     wan=$(_zap_wan_iface)
     [[ -z "$wan" ]] && { print_err "Не удалось определить WAN интерфейс"; return 1; }
 
-    # - hostlist и стратегия -
+    # - что лежит на диске до вызова: сохранённая настройка не перезаписывается, -
+    # - уборка после отказа её не сносит -
     local hostf strat qnum nftf unit
+    local keep_conf="" keep_hosts="" keep_loader=""
+    [[ -f "$(_zap_conf "$iface")" ]] && keep_conf="yes"
+    [[ -f "$(_zap_hosts "$iface")" ]] && keep_hosts="yes"
+    [[ -f "/etc/systemd/system/zeli-nft-${iface}.service" ]] && keep_loader="yes"
+
+    # - hostlist и стратегия -
     hostf=$(_zap_ensure_hosts "$iface")
-    strat=$(_zap_baseline_strategy "$hostf")
-    qnum=$(_zap_write_conf "$iface" "$strat")
+    if [[ -n "$keep_conf" ]]; then
+        # - конфиг сохранён (интерфейс отключён): применяется как есть, номер -
+        # - очереди берётся из него, стратегия не перезаписывается -
+        qnum=$(sed -n 's/^--qnum=\([0-9][0-9]*\)$/\1/p' "$(_zap_conf "$iface")" | head -1)
+        [[ -n "$qnum" ]] || qnum=$(_zap_qnum_for "$iface")
+    else
+        strat=$(_zap_baseline_strategy "$hostf")
+        qnum=$(_zap_write_conf "$iface" "$strat")
+    fi
     nftf=$(_zap_build_nft "$iface" "$qnum" "$wan")
     unit=$(_zap_unit "$iface")
 
@@ -550,36 +609,33 @@ zapret_bind_iface() {
     systemctl enable "$unit" 2>/dev/null
     systemctl restart "$unit" 2>/dev/null
     if ! _zap_verify_active "$iface"; then
-        systemctl disable --now "$unit" 2>/dev/null
-        systemctl disable --now "zeli-nft-${iface}.service" 2>/dev/null
-        rm -f "$(_zap_conf "$iface")" "$(_zap_nftf "$iface")" "$(_zap_hosts "$iface")" 2>/dev/null
-        rm -f "/etc/systemd/system/zeli-nft-${iface}.service" 2>/dev/null
-        systemctl daemon-reload 2>/dev/null || true
+        _zap_rollback_bind "$iface" "$keep_conf" "$keep_hosts" "$keep_loader"
         print_err "Привязка отменена -> инстанс nfqws2 не стартовал"
         return 1
     fi
 
     # - теперь правила с гибридным откатом (очередь уже со слушателем) -
     if ! _zap_apply_with_rollback "$iface" "$nftf"; then
-        systemctl disable --now "$unit" 2>/dev/null
-        systemctl disable --now "zeli-nft-${iface}.service" 2>/dev/null
-        rm -f "$(_zap_conf "$iface")" "$(_zap_nftf "$iface")" "$(_zap_hosts "$iface")" 2>/dev/null
-        rm -f "/etc/systemd/system/zeli-nft-${iface}.service" 2>/dev/null
-        systemctl daemon-reload 2>/dev/null || true
+        _zap_rollback_bind "$iface" "$keep_conf" "$keep_hosts" "$keep_loader"
         return 1
     fi
 
     print_ok "Инстанс zapret2 для ${iface} запущен (queue ${qnum})"
-    _zap_book_iface "$iface" "$qnum" "baseline" "true" ""
+    # - свежая привязка начинает с baseline, у сохранённой настройки имя прежнее -
+    local strat_name="baseline"
+    if [[ -n "$keep_conf" ]]; then
+        strat_name=$(book_read ".zapret.interfaces.\"${iface}\".strategy")
+        [[ -n "$strat_name" ]] || strat_name="custom"
+    fi
+    _zap_book_iface "$iface" "$qnum" "$strat_name" "true" "$(book_read ".zapret.interfaces.\"${iface}\".last_blockcheck")"
     book_write ".zapret.installed" "true" bool
     return 0
 }
 
 # --> ZAP2: ИЗВЛЕЧЕНИЕ ПОБЕДИВШЕЙ СТРАТЕГИИ ИЗ ЛОГА <--
-# - формат: строка-маркер "!!!!! AVAILABLE !!!!!", а НА СЛЕДУЮЩЕЙ строке -
-# - "- <test> ipv4 <domain> : nfqws2 <фрагмент>". Берём строку после маркера через -A1 -
-# - фрагмент уже содержит --payload/--lua-desync, но НЕ содержит --filter/--hostlist (их добавим сами) -
-# - матч СТРОГО по имени теста в начале строки -
+# - после маркера "!!!!! AVAILABLE !!!!!" идёт "- <test> ipv4 <domain> : nfqws2 <фрагмент>", -
+# - берём строку после маркера через -A1; фрагмент несёт --payload/--lua-desync, но не -
+# - --filter/--hostlist (добавляем сами); матч строго по имени теста в начале строки -
 _zap_extract_frag() {
     local log="$1" test="$2"
     grep -A1 -F '!!!!! AVAILABLE !!!!!' "$log" 2>/dev/null \
@@ -590,16 +646,13 @@ _zap_extract_frag() {
 }
 
 # --> ZAP2: ПРОГОН BLOCKCHECK2 <--
-# - протоколы гоняем РАЗДЕЛЬНО: общий прогон тонет в сотнях tls12-победителей и умирает -
-# - по таймауту ДО начала tls13, а реальные клиенты ходят по tls13 -
-# - BATCH=1 = официальный неинтерактивный режим. quick -> стоп на первом победителе -
+# - протоколы гоняем РАЗДЕЛЬНО: общий прогон тонет в tls12-победителях и умирает -
+# - по таймауту до tls13, а клиенты ходят по tls13; BATCH=1 - неинтерактивный режим, -
+# - quick - стоп на первом победителе -
 # --> ZAP2: УБОРКА АРТЕФАКТОВ BLOCKCHECK2 <--
-# - blockcheck2 именует свою nft-таблицу blockcheck<pid> (+ временную blockcheck<pid>_test) -
-# - очередь qnum=pid%64536+1000, правила queue БЕЗ bypass, cleanup() апстрима на Linux пуст -
-# - снятие таблицы висит на нормальном pktws_ipt_unprepare. При убийстве по timeout таблица -
-# - остаётся и без слушателя дропает трафик к тестовым IP (в т.ч. дискорду) на хосте и форварде -
-# - накапливаются от запуска к запуску: автоподбор ведёт себя по-разному, а трафик глохнет -
-# - наши таблицы зовутся zeli_*, наш nfqws2 идёт с @<конфиг> без --qnum= в argv, их не трогаем -
+# - blockcheck2 зовёт таблицы blockcheck<pid> (_test), очередь qnum=pid%64536+1000, -
+# - cleanup() на Linux пуст; убитый по timeout процесс оставляет таблицу: она дропает -
+# - трафик к тестовым IP и копится; наши zeli_* и nfqws2 с @<конфиг> не трогаем -
 _zap_blockcheck_gc() {
     local t p cl
     for t in $(nft list tables inet 2>/dev/null | awk '$2=="inet" && $3 ~ /^blockcheck[0-9]+(_test)?$/ {print $3}'); do
@@ -630,6 +683,7 @@ _zap_run_blockcheck() {
 # --> ZAP2: АВТОПОДБОР И АВТОПРИМЕНЕНИЕ СТРАТЕГИИ <--
 # - неинтерактивный blockcheck2 по доменам -> парс победителя -> сборка профилей -> применение -
 zapret_autostrategy() {
+    local d x
     _zap_installed || { print_err "zapret2 не установлен"; return 1; }
     local bc="${ZAP2_DIR}/blockcheck2.sh"
     [[ -f "$bc" ]] || { print_err "blockcheck2.sh не найден в ${ZAP2_DIR}"; return 1; }
@@ -732,6 +786,7 @@ zapret_autostrategy() {
 
 # --> ZAP2: РУЧНОЕ ЗАДАНИЕ СТРАТЕГИИ <--
 zapret_set_strategy() {
+    local x
     _zap_installed || { print_err "zapret2 не установлен"; return 1; }
     local bound
     bound=$(_zap_bound_list)
@@ -755,17 +810,37 @@ zapret_set_strategy() {
 
     local hostf
     hostf=$(_zap_ensure_hosts "$iface")
+    # - прежняя стратегия сохраняется рядом: при неудаче её вернуть, иначе -
+    # - рабочую настройку пришлось бы вводить заново -
+    local conf bak
+    conf=$(_zap_conf "$iface"); bak="${conf}.bak"
+    cp -a "$conf" "$bak" || { print_err "Прежний конфиг не сохранён: ${conf}"; return 1; }
     _zap_write_conf "$iface" "$strat" >/dev/null
     systemctl restart "$(_zap_unit "$iface")" 2>/dev/null
     # - проверка удержания инстанса: is-active сразу после restart врёт про Type=simple -
     if _zap_verify_active "$iface"; then
+        rm -f "$bak"
         print_ok "Стратегия применена для ${iface}"
         local q; q=$(_zap_qnum_for "$iface")
         _zap_book_iface "$iface" "$q" "custom" "true" "$(book_read ".zapret.interfaces.\"${iface}\".last_blockcheck")"
-    else
-        print_err "Стратегия не применена: инстанс не удержался, запись в книгу не сделана"
-        return 1
+        return 0
     fi
+    print_err "Стратегия не применена: инстанс не удержался -> возвращаю прежний конфиг"
+    # - факт возврата: файл совпадает с копией, инстанс снова удержался -
+    if cp -a "$bak" "$conf" && cmp -s "$bak" "$conf"; then
+        systemctl restart "$(_zap_unit "$iface")" 2>/dev/null
+        if _zap_verify_active "$iface"; then
+            print_ok "Прежняя стратегия возвращена для ${iface}, запись в книгу не сделана"
+            rm -f "$bak"
+        else
+            print_warn "Прежний конфиг возвращён, инстанс не удержался: journalctl -u $(_zap_unit "$iface")"
+            print_info "Прежняя стратегия сохранена в ${bak}"
+        fi
+    else
+        print_err "Прежний конфиг вернуть не удалось: ${conf}"
+        print_info "Прежняя стратегия сохранена в ${bak}"
+    fi
+    return 1
 }
 
 # --> ZAP2: TELEGRAM-ЗВОНКИ (STUN-профиль) <--
@@ -783,6 +858,7 @@ zapret_telegram_calls() {
 
 # --> ZAP2: СТАТУС <--
 zapret_status() {
+    local iface
     _zap_installed || { print_warn "zapret2 не установлен"; return 0; }
     print_section "Статус zapret2"
     # - флаг автообновления показывается словами: разбор книги отдаёт булево -
@@ -815,6 +891,7 @@ zapret_status() {
 
 # --> ZAP2: ТЕСТ ИНТЕРФЕЙСА <--
 zapret_test() {
+    local iface
     _zap_installed || { print_err "zapret2 не установлен"; return 1; }
     local bound; bound=$(_zap_bound_list)
     [[ -z "$bound" ]] && { print_warn "Нет привязанных интерфейсов"; return 0; }
@@ -837,6 +914,7 @@ zapret_test() {
 # --> ZAP2: ОТКЛЮЧЕНИЕ ПО ИНТЕРФЕЙСУ <--
 # - стоп инстанса и снятие nft, конфиг стратегии сохраняется -
 zapret_disable_iface() {
+    local x
     _zap_installed || { print_err "zapret2 не установлен"; return 1; }
     local bound; bound=$(_zap_bound_list)
     [[ -z "$bound" ]] && { print_warn "Нет привязанных интерфейсов"; return 0; }
@@ -858,6 +936,7 @@ zapret_disable_iface() {
 
 # --> ZAP2: ПОЛНОЕ УДАЛЕНИЕ <--
 zapret_remove() {
+    local iface
     _zap_installed || { print_warn "zapret2 не установлен"; return 0; }
     print_section "Полное удаление zapret2"
     local confirm=""
@@ -873,7 +952,7 @@ zapret_remove() {
     done
 
     # - cron автообновления и сам скрипт проверки -
-    _zap_autoupdate_cron "off"
+    _zap_autoupdate_cron "off" || print_warn "Cron-задача автопроверки не снята: crontab не прочитан"
     rm -f "$ZAP2_AUTOUPDATE_SCRIPT"
 
     rm -f "$ZAP2_UNIT_TPL"
@@ -889,8 +968,12 @@ zapret_remove() {
 # - периодический blockcheck на случай смены сигнатур ТСПУ, алерт в Telegram при смене -
 _zap_autoupdate_cron() {
     local mode="$1" script="$ZAP2_AUTOUPDATE_SCRIPT"
-    local current_cron
-    current_cron=$(crontab -l 2>/dev/null || echo "")
+    local current_cron=""
+    # - отказ чтения: чужие задачи не уносим -
+    if ! eli_cron_read current_cron; then
+        print_info "Crontab не изменён"
+        return 1
+    fi
     # - вычищаем прежнюю строку -
     current_cron=$(echo "$current_cron" | grep -vF "$script")
     if [[ "$mode" == "on" ]]; then
@@ -905,12 +988,12 @@ zapret_autoupdate_toggle() {
     local cur
     cur=$(book_read ".zapret.autoupdate_enabled")
     if [[ "$cur" == "true" ]]; then
-        _zap_autoupdate_cron "off"
+        _zap_autoupdate_cron "off" || { print_err "Автопроверка не выключена: crontab не изменён"; return 1; }
         book_write ".zapret.autoupdate_enabled" "false" bool
         print_ok "Автообновление стратегий выключено"
     else
         _zap_write_autoupdate_script
-        _zap_autoupdate_cron "on"
+        _zap_autoupdate_cron "on" || { print_err "Автопроверка не включена: crontab не изменён"; return 1; }
         book_write ".zapret.autoupdate_enabled" "true" bool
         print_ok "Автопроверка включена (еженедельно, пн 4:00 UTC): лог + алерт в Telegram, подбор стратегий вручную через меню"
     fi

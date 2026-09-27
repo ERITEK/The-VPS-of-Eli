@@ -1,5 +1,5 @@
 # --> ДЕТЕКТОРЫ СТРУКТУРЫ <--
-# - семь проверок по собранному монолиту: -
+# - восемь проверок по собранному монолиту: -
 # - 1) запись в переменную без local внутри функции (неявный глобал); -
 # - 2) cd вне subshell (смена каталога процесса); -
 # - 3) вызов внутренней функции, которой нет в сборке (переименование без правки вызова); -
@@ -155,8 +155,11 @@ END {
         if (hdbody[i] || skipq[i]) continue
         L = lines[i]
         sub(/[[:space:]]#.*$/, "", L)
-        if (match(L, /^[A-Za-z_][A-Za-z0-9_]*\(\)/)) {
-            fn = substr(L, 1, RLENGTH - 2)
+        # - определение функции бывает с отступом: вложенный хелпер внутри функции -
+        tdef = L
+        sub(/^[[:space:]]+/, "", tdef)
+        if (match(tdef, /^[A-Za-z_][A-Za-z0-9_]*\(\)/)) {
+            fn = substr(tdef, 1, RLENGTH - 2)
             defined[fn] = 1
         }
         # - имена, которые где-то являются переменными: присваивание, local, $ИМЯ -
@@ -264,6 +267,8 @@ END {
             t = substr(t, RSTART + RLENGTH)
             if (before == "." || after == "." || after == "/" || before == "-") continue
             hit = 0
+            # - хелперы с ведущим подчёркиванием проверяются наравне с префиксами модуля -
+            if (substr(nm, 1, 1) == "_" && length(nm) > 1) hit = 1
             for (q = 1; q <= npre; q++) if (index(nm, pre[q]) == 1 && nm != pre[q]) hit = 1
             if (!hit) continue
             if (nm in defined || nm in varname) continue

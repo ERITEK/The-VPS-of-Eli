@@ -59,10 +59,9 @@ _ts_arch_pattern() {
     esac
 }
 
-# - возвращает на stdout строку "url|fmt", где fmt одно из xz|bz2|gz|zst -
-# - формат и URL передаются вместе чтобы пережить вызов через $(...) -
-# - архитектура матчится regex'ом, переживает смену amd64 <-> x86_64 в имени ассета -
-# - перебор форматов от современного к старому: xz (текущий TS6) > bz2 > gz > zst -
+# - возвращает на stdout строку "url|fmt" (fmt: xz|bz2|gz|zst) - вместе, чтобы пережить $(...) -
+# - архитектура матчится regex'ом (переживает смену amd64 <-> x86_64); перебор форматов -
+# - от современного к старому: xz (текущий TS6) > bz2 > gz > zst -
 ts_get_latest_url() {
     local json arch_pat fmt url
     json=$(eli_github_fetch "$TS_GITHUB_API" 2>/dev/null || true)
@@ -106,14 +105,14 @@ ts_install() {
         echo -e "  ${CYAN}Основной порт для голосовой связи (UDP). Стандарт: 9987. Клиенты подключаются по нему.${NC}"
         ask "Голосовой порт (UDP)" "$voice_port" voice_port
         validate_port "$voice_port" || { print_err "Порт 1-65535"; continue; }
-        ! ss -H -uln 2>/dev/null | grep -Eq "[:.]${voice_port}[[:space:]]" && break
+        ! eli_port_busy "$voice_port" udp && break
         print_warn "Занят"
     done
     while true; do
         echo -e "  ${CYAN}Порт для передачи файлов между участниками (TCP). Стандарт: 30033.${NC}"
         ask "Порт файлового трансфера (TCP)" "$ft_port" ft_port
         validate_port "$ft_port" || { print_err "Порт 1-65535"; continue; }
-        ! ss -H -tln 2>/dev/null | grep -Eq "[:.]${ft_port}[[:space:]]" && break
+        ! eli_port_busy "$ft_port" tcp && break
         print_warn "Занят"
     done
 
@@ -128,7 +127,15 @@ ts_install() {
     print_ok "Версия: ${latest_ver} (формат: ${archive_fmt})"
 
     id "$TS_USER" &>/dev/null || useradd -r -s /bin/false -d "$TS_DIR" -M "$TS_USER"
+    if ! id "$TS_USER" &>/dev/null; then
+        print_err "Пользователь ${TS_USER} не создан"
+        return 1
+    fi
     mkdir -p "$TS_DIR" "$TS_DATA_DIR" "$TS_LOG_DIR" "$TS_ENV_DIR" "$TS_BACKUP_DIR"
+    local _td
+    for _td in "$TS_DIR" "$TS_DATA_DIR" "$TS_LOG_DIR" "$TS_ENV_DIR" "$TS_BACKUP_DIR"; do
+        [[ -d "$_td" ]] || { print_err "Каталог не создан: ${_td}"; return 1; }
+    done
 
     local tmpdir; tmpdir=$(mktemp -d)
     # - выбор флага tar по формату; xz/zst поддерживаются современным GNU tar (--auto-compress тоже работает) -
@@ -186,8 +193,9 @@ ts_install() {
         print_err "Бинарь tsserver не найден после распаковки в ${TS_DIR}"
         return 1
     fi
-    chmod +x "$TS_BIN"
-    chown -R "${TS_USER}:${TS_USER}" "$TS_DIR" "$TS_DATA_DIR" "$TS_LOG_DIR"
+    chmod +x "$TS_BIN" || { print_err "chmod +x ${TS_BIN} не удался"; return 1; }
+    chown -R "${TS_USER}:${TS_USER}" "$TS_DIR" "$TS_DATA_DIR" "$TS_LOG_DIR" \
+        || { print_err "chown ${TS_DIR} не удался"; return 1; }
 
     # - systemd unit -
     cat > "$TS_UNIT" << EOF
@@ -209,7 +217,11 @@ LimitNOFILE=65536
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
-    systemctl enable teamspeak
+    systemctl enable teamspeak 2>/dev/null || true
+    if ! systemctl is-enabled --quiet teamspeak 2>/dev/null; then
+        print_err "Автозапуск teamspeak не включён: systemctl enable teamspeak"
+        return 1
+    fi
 
     # - первый запуск и перехват ключа -
     # - TS6 печатает token= в stdout/stderr (попадает в journal) И в лог-файлы в --log-path -
@@ -244,7 +256,7 @@ EOF
     # - пост-проверка порта: в бете TS6 --default-voice-port иногда игнорируется -
     # - сверяем что сервис реально слушает заданный voice_port через ss -
     if eli_fact_unit teamspeak 10; then
-        if ss -H -uln 2>/dev/null | grep -Eq "[:.]${voice_port}[[:space:]]"; then
+        if eli_port_busy "$voice_port" udp; then
             print_ok "Voice ${voice_port}/udp: слушает"
         else
             print_warn "Сервис активен, но НЕ слушает ${voice_port}/udp"
@@ -310,12 +322,12 @@ ts_show_status() {
     fi
     # - порты: если ключа в env нет, проверяются штатные значения сервера -
     local vp="${voice_port:-9987}" fp="${ft_port:-30033}"
-    if ss -ulnp 2>/dev/null | grep -q ":${vp} "; then
+    if eli_port_busy "$vp" udp; then
         print_ok "Voice ${vp}/udp: OK"
     else
         print_err "Voice ${vp}/udp: не слушает"
     fi
-    if ss -tlnp 2>/dev/null | grep -q ":${fp} "; then
+    if eli_port_busy "$fp" tcp; then
         print_ok "FT ${fp}/tcp: OK"
     else
         print_err "FT ${fp}/tcp: не слушает"
@@ -347,13 +359,21 @@ ts_backup_db() {
     mkdir -p "$TS_BACKUP_DIR"
     local bdir
     bdir="${TS_BACKUP_DIR}/ts6_$(date +%Y%m%d_%H%M%S)"
-    mkdir -p "$bdir"
-    # - согласованный снимок: копия только при остановленном сервисе -
+    # - согласованный снимок: копия только при подтверждённо -
+    # - остановленном сервисе; каталог бэкапа создаётся после стопа, -
+    # - иначе провал стопа оставляет пустой каталог -
     local _was_active=0
     systemctl is-active --quiet teamspeak 2>/dev/null && {
-        _was_active=1; systemctl stop teamspeak 2>/dev/null || true; sleep 1; }
+        _was_active=1
+        systemctl stop teamspeak 2>/dev/null || true
+        if ! eli_fact_unit "teamspeak" 3 inactive; then
+            print_err "Сервис не остановился: копия со живой БД не снимается"
+            return 1
+        fi
+    }
+    mkdir -p "$bdir"
     if ! cp -f "$TS_DB" "${bdir}/" 2>/dev/null || [[ ! -s "${bdir}/$(basename "$TS_DB")" ]]; then
-        [[ $_was_active -eq 1 ]] && systemctl start teamspeak 2>/dev/null || true
+        [[ $_was_active -eq 1 ]] && { systemctl start teamspeak 2>/dev/null || true; eli_fact_unit "teamspeak" || true; }
         rm -rf "$bdir"
         print_err "Бэкап не создан: ${bdir}/"
         return 1
@@ -362,6 +382,11 @@ ts_backup_db() {
     cp -f "${TS_DB}-wal" "${bdir}/" 2>/dev/null || true
     [[ $_was_active -eq 1 ]] && systemctl start teamspeak 2>/dev/null || true
     print_ok "Бэкап: ${bdir}/ (WAL)"
+    # - старт подтверждается опросом: сервис не должен молча лежать -
+    if [[ $_was_active -eq 1 ]] && ! eli_fact_unit "teamspeak"; then
+        print_warn "Бэкап снят, но сервис teamspeak не поднялся"
+        return 1
+    fi
     return 0
 }
 
@@ -382,6 +407,12 @@ ts_update() {
     [[ "$confirm" != "yes" ]] && return 0
     ts_backup_db || true
     systemctl stop teamspeak 2>/dev/null || true
+    # - стоп подтверждается состоянием: подмена бинаря под живым сервисом -
+    # - оставила бы старый процесс с новым файлом -
+    if ! eli_fact_unit teamspeak 3 inactive; then
+        print_err "TeamSpeak не остановился: обновление отменено"
+        return 1
+    fi
     local tmpdir; tmpdir=$(mktemp -d)
     # - выбор флага tar по формату -
     local tar_flag archive_ext
@@ -451,16 +482,37 @@ ts_update() {
     return 0
 }
 
+# --> TEAMSPEAK: СБРОС ЗАПИСИ КНИГИ <--
+# - установка снята: запись книги возвращается к значениям схемы -
+_ts_book_clear() {
+    book_write ".teamspeak.installed" "false" bool
+    book_write ".teamspeak.server_ip" ""
+    book_write ".teamspeak.priv_key" ""
+    book_write ".teamspeak.version" ""
+    book_write ".teamspeak.voice_port" "9987" number
+    book_write ".teamspeak.ft_port" "30033" number
+    book_write ".teamspeak.db_path" "$TS_DB"
+}
+
 ts_reinstall() {
     print_section "Переустановка TeamSpeak 6"
     local confirm=""; ask_yn "Подтвердить?" "n" confirm
     [[ "$confirm" != "yes" ]] && return 0
     ts_backup_db || true
     systemctl stop teamspeak 2>/dev/null || true; systemctl disable teamspeak 2>/dev/null || true
+    # - стоп подтверждается состоянием: сносить каталоги можно только -
+    # - когда сервис точно лежит -
+    if ! eli_fact_unit teamspeak 3 inactive; then
+        print_err "TeamSpeak не остановился: переустановка остановлена"
+        return 1
+    fi
     # - правила старых портов снимаются до удаления env: переустановка даёт порты новые -
     _ts_ufw_close
     rm -rf "$TS_DIR" "$TS_DATA_DIR" 2>/dev/null || true
     rm -f "$TS_UNIT" "$TS_ENV" 2>/dev/null || true; systemctl daemon-reload
+    # - установка снята: книгу пометить сразу, иначе провал переустановки -
+    # - оставит в ней installed=true и ключи при пустом диске -
+    _ts_book_clear
     ts_install
 }
 
@@ -485,18 +537,17 @@ ts_delete() {
     [[ "$confirm" != "yes" ]] && return 0
     ts_backup_db || true
     systemctl stop teamspeak 2>/dev/null || true; systemctl disable teamspeak 2>/dev/null || true
+    # - стоп подтверждается состоянием: сносить каталоги можно только -
+    # - когда сервис точно лежит -
+    if ! eli_fact_unit teamspeak 3 inactive; then
+        print_err "TeamSpeak не остановился: удаление остановлено"
+        return 1
+    fi
     rm -rf "$TS_DIR" "$TS_DATA_DIR" "$TS_LOG_DIR" 2>/dev/null || true
     rm -f "$TS_UNIT" 2>/dev/null || true; systemctl daemon-reload
     _ts_ufw_close
     rm -f "$TS_ENV" 2>/dev/null || true
-    book_write ".teamspeak.installed" "false" bool
-    book_write ".teamspeak.server_ip" ""
-    book_write ".teamspeak.priv_key" ""
-    book_write ".teamspeak.version" ""
-    # - порты и путь к БД возвращаются к значениям схемы книги -
-    book_write ".teamspeak.voice_port" "9987" number
-    book_write ".teamspeak.ft_port" "30033" number
-    book_write ".teamspeak.db_path" "$TS_DB"
+    _ts_book_clear
     print_ok "TeamSpeak удалён"
     return 0
 }

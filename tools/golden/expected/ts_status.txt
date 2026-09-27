@@ -11,6 +11,6 @@
 --- вызовы платформы ---
 CMD flock -n 200
 CMD systemctl is-active --quiet teamspeak
-CMD ss -ulnp
-CMD ss -tlnp
+CMD ss -H -uln
+CMD ss -H -tln
 rc=0

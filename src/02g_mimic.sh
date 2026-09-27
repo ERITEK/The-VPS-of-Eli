@@ -1,12 +1,8 @@
 # --> МОДУЛЬ: MIMIC <--
-# - eBPF UDP -> TCP обфускатор: прячет не сигнатуру WireGuard, а сам факт UDP -
-# - нужен там, где режут UDP как класс или душат его QoS -
-# - движок hack3ric/mimic: TC на egress превращает UDP в TCP, XDP на ingress возвращает обратно -
-# - привязка к WAN-интерфейсу, а не к awg: инстанс один на WAN, awg-порты идут фильтрами в один конфиг -
-# - обфускация AWG остаётся на месте, клиентские конфиги не переписываются -
-# - но каждый клиент интерфейса ОБЯЗАН поднять свой mimic: bpf/egress.c на неизвестном коннекте -
-# - отдаёт TC_ACT_STOLEN, то есть ответ сервера просто съедается. Отсюда выделенный интерфейс -
-# - юнит и каталог конфигов берём апстримные: mimic@<wan>.service + /etc/mimic/<wan>.conf -
+# - eBPF UDP -> TCP обфускатор (hack3ric/mimic): TC на egress, XDP на ingress обратно; -
+# - прячет сам факт UDP; привязка к WAN (инстанс один на WAN, awg-порты - фильтрами), -
+# - обфускация AWG остаётся; каждый клиент ОБЯЗАН поднять свой mimic: bpf/egress.c на -
+# - неизвестном коннекте отдаёт TC_ACT_STOLEN (ответ съедается); mimic@<wan> + /etc/mimic/<wan>.conf -
 
 MIM_REPO="hack3ric/mimic"
 MIM_BIN="/usr/sbin/mimic"
@@ -81,7 +77,7 @@ _mim_env_val() {
 _mim_iface_port() { _mim_env_val "$1" "SERVER_PORT"; }
 _mim_iface_mtu()  { _mim_env_val "$1" "TUNNEL_MTU"; }
 
-# --> MIM: ИНТЕРФЕЙС ЗА ОБФУСКАТОРОМ 02e? <--
+# --> MIM: ИНТЕРФЕЙС ЗА WG-ОБФУСКАТОРОМ <--
 # - wg-obfuscator уводит порт интерфейса на loopback, mimic там нечего заворачивать -
 _mim_iface_has_wgo() {
     declare -f _wgo_conf >/dev/null 2>&1 || return 1
@@ -91,7 +87,9 @@ _mim_iface_has_wgo() {
 # --> MIM: ПРИВЯЗАННЫЕ ИНТЕРФЕЙСЫ <--
 # - конфиг один на WAN и собирается целиком из книги, поэтому список берём из неё -
 _mim_bound_list() {
-    _book_ok || { echo ""; return 0; }
+    # - отказ чтения книги отделён от пустого списка кодом возврата: иначе -
+    # - снятый перехват выглядел бы как штатное "привязок не осталось" -
+    _book_ok || return 1
     jq -r '.mimic.instances | keys[]?' "$_BOOK" 2>/dev/null | tr '\n' ' '
 }
 
@@ -287,11 +285,8 @@ _mim_install_apt() {
 
 
 # --> MIM: ДЕТЕРМИНИРОВАННАЯ ЗАГРУЗКА МОДУЛЯ ПОСЛЕ СБОРКИ <--
-# - проверка загрузки строго через /sys/module/mimic, а не `lsmod | grep` -
-# - при set -o pipefail grep -q закрывает пайп по первому совпадению, lsmod ловит SIGPIPE -
-# - и пайп возвращает 141 даже когда модуль есть: проверка ложно-отрицательна -
-# - /sys/module без пайпа -
-# - порядок: собран ли под текущее ядро (dkms status) -> depmod -a -> modprobe -> проверка -
+# - проверка строго через /sys/module/mimic: lsmod|grep -q под pipefail ловит SIGPIPE -
+# - и даёт 141 даже при живом модуле; порядок: dkms status -> depmod -a -> modprobe -> проверка -
 _mim_kmod_load() {
     [[ -d /sys/module/mimic ]] && return 0
 
@@ -329,21 +324,30 @@ _mim_book_init() {
 
 # --> MIM: ЗАПИСЬ ПРИВЯЗКИ В КНИГУ <--
 _mim_book_iface() {
-    local iface="$1" port="$2" local_ip="$3" obj
+    local iface="$1" port="$2" local_ip="$3" obj got
     obj=$(jq -n --argjson p "$port" --arg ip "$local_ip" --arg i "$iface" \
         '{port:$p, local_ip:$ip, bound_iface:$i, bound:true}')
-    book_write_obj ".mimic.instances.\"${iface}\"" "$obj"
+    # - факт: запись читается тем же полем; привязки нет в книге - фильтр и правила -
+    # - уже стоят, а состояние в книге осталось прежним -
+    book_write_obj ".mimic.instances.\"${iface}\"" "$obj" || { print_err "Привязка ${iface} не записалась в книгу"; return 1; }
+    got=$(book_read ".mimic.instances.\"${iface}\".port")
+    if [[ "$got" != "$port" ]]; then
+        print_err "Привязка ${iface} в книге не подтверждается (порт ${got:-нет})"
+        return 1
+    fi
+    return 0
 }
 
 # --> MIM: СБОРКА КОНФИГА WAN <--
-# - файл собирается целиком из книги: ручные правки затираются, книга источник истины -
-# - handshake=0:0 делает сторону пассивной (bpf/egress.c: interval 0 = не инициируем SYN). -
-# - сервер не знает клиентов заранее и стучаться к ним не должен, инициатор всегда клиент -
-# - права 644 при каталоге 755: юнит апстрима читает конфиг под User=mimic, не под root -
+# - файл собирается целиком из книги (книга - источник истины, ручные правки затираются) -
+# - handshake=0:0 делает сторону пассивной (interval 0 = не инициируем SYN, инициатор -
+# - всегда клиент); права 644 при каталоге 755: юнит читает конфиг под User=mimic -
 _mim_build_conf() {
-    local wan conf xdp iface port ip
+    local wan conf xdp iface port ip bound
     wan=$(_mim_wan_iface)
     [[ -z "$wan" ]] && { print_err "WAN-интерфейс не определён"; return 1; }
+    # - книга недоступна: конфиг не пересобирается, фильтры остаются как есть -
+    bound=$(_mim_bound_list) || { print_err "Книга недоступна: конфиг mimic не пересобирается (${_BOOK})"; return 1; }
     conf=$(_mim_conf "$wan")
     xdp=$(book_read ".mimic.xdp_mode"); [[ -z "$xdp" ]] && xdp="skb"
 
@@ -353,7 +357,7 @@ _mim_build_conf() {
         echo "log.verbosity = info"
         echo "xdp_mode = ${xdp}"
         echo ""
-        for iface in $(_mim_bound_list); do
+        for iface in $bound; do
             port=$(book_read ".mimic.instances.\"${iface}\".port")
             ip=$(book_read ".mimic.instances.\"${iface}\".local_ip")
             [[ "$port" =~ ^(0|[1-9][0-9]*)$ ]] || continue
@@ -367,7 +371,7 @@ _mim_build_conf() {
 }
 
 # --> MIM: ПРОВЕРКА ЗАПУСКА <--
-# - юнит апстрима Type=notify, но SubState надёжнее: is-active бывает activating -
+# - юнит Type=notify, но SubState надёжнее: is-active бывает activating -
 _mim_verify_active() {
     local wan="$1" unit sub
     unit=$(_mim_unit "$wan")
@@ -404,12 +408,14 @@ _mim_preflight() {
 # --> MIM: ПРИМЕНЕНИЕ <--
 # - конфиг один на WAN, поэтому любая правка привязок это рестарт общего инстанса -
 _mim_apply() {
-    local wan unit n
+    local wan unit n bound
     wan=$(_mim_wan_iface)
     [[ -z "$wan" ]] && return 1
     unit=$(_mim_unit "$wan")
     _mim_build_conf || return 1
-    n=$(_mim_bound_list | wc -w)
+    # - отказ чтения книги: инстанс не гасится, привязки не трогаются -
+    bound=$(_mim_bound_list) || { print_err "Книга недоступна: инстанс ${unit} не перечитывается"; return 1; }
+    n=$(printf '%s' "$bound" | wc -w)
     if (( n == 0 )); then
         systemctl disable --now "$unit" 2>/dev/null
         print_info "Привязок не осталось = инстанс ${unit} остановлен"
@@ -421,22 +427,79 @@ _mim_apply() {
 }
 
 # --> MIM: UFW ДЛЯ ПОРТА <--
-# - трафик нужен и как TCP, и как UDP на одном порту: -
-# - данные на ingress XDP возвращает в UDP ДО netfilter, а SYN и keepalive mimic шлёт -
-# - настоящим TCP через raw-сокет, и они доходят до INPUT как TCP -
+# - порт нужен и как TCP, и как UDP: данные XDP возвращает в UDP до netfilter, а SYN -
+# - и keepalive mimic шлёт настоящим TCP через raw-сокет (доходят до INPUT) -
+# - rc: номер строки своего правила в нумерованном списке, пусто - правила нет -
+_mim_ufw_rule_num() {
+    local iface="$1"
+    ufw status numbered 2>/dev/null | sed -n "s/^ *\[ *\([0-9][0-9]*\)\].*mimic ${iface}.*/\1/p" | head -1
+}
+
 _mim_ufw_open() {
     local iface="$1" port="$2"
     command -v ufw &>/dev/null || return 0
-    ufw allow "${port}/tcp" comment "mimic ${iface}" 2>/dev/null || true
-    _ufw_has_rule "$port" "udp" || ufw allow "${port}/udp" comment "AWG ${iface}" 2>/dev/null || true
+    # - факт по каждому правилу: молчаливый отказ ufw оставил бы порт закрытым; -
+    # - своё существующее правило не дублируется: UFW знает правило по спецификации -
+    # - и переписал бы комментарий -
+    _ufw_has_rule "$port" "tcp" || ufw allow "${port}/tcp" comment "mimic ${iface}" >/dev/null 2>&1
+    _ufw_has_rule "$port" "udp" || ufw allow "${port}/udp" comment "AWG ${iface}" >/dev/null 2>&1
+    if ! _ufw_has_rule "$port" "tcp" || ! _ufw_has_rule "$port" "udp"; then
+        print_err "UFW не открыл ${port}/tcp или ${port}/udp: проверь ufw status verbose"
+        return 1
+    fi
     print_ok "UFW: ${port}/tcp и ${port}/udp открыты"
     return 0
 }
 
 _mim_ufw_close() {
-    local port="$1"
+    local iface="$1" port="$2" num i
     command -v ufw &>/dev/null || return 0
-    _ufw_has_rule "$port" "tcp" && ufw delete allow "${port}/tcp" >/dev/null 2>&1
+    # - строки своего правила снимаются по номерам, пока видна метка: удаление -
+    # - по спецификации унесло бы правило пользователя на том же порту -
+    for i in 1 2 3; do
+        num=$(_mim_ufw_rule_num "$iface")
+        [[ -z "$num" ]] && return 0
+        echo "y" | ufw delete "$num" >/dev/null 2>&1
+    done
+    if [[ -n "$(_mim_ufw_rule_num "$iface")" ]]; then
+        print_err "Правило mimic на ${port}/tcp осталось в UFW: проверь ufw status verbose"
+        return 1
+    fi
+    return 0
+}
+
+# --> MIM: ПЕРЕНОС ФИЛЬТРА НА НОВЫЙ ПОРТ ТУННЕЛЯ <--
+# - при смене порта запись книги, конфиг WAN и правила UFW переезжают на новый порт -
+# - arg1: интерфейс, arg2: старый порт, arg3: новый порт -
+# - rc: 0 - перенесён или интерфейс не привязан, 1 - перенос не подтверждён -
+mim_retarget() {
+    local iface="$1" old_port="$2" new_port="$3" port ip conf
+    [[ -z "$iface" || -z "$new_port" ]] && return 1
+    port=$(book_read ".mimic.instances.\"${iface}\".port")
+    # - интерфейс к mimic не привязан: переносить нечего -
+    [[ -z "$port" ]] && return 0
+    ip=$(book_read ".mimic.instances.\"${iface}\".local_ip")
+    [[ -z "$ip" ]] && { print_err "В книге нет адреса привязки mimic для ${iface}"; return 1; }
+    print_info "mimic держит ${iface}: фильтр переезжает на порт ${new_port}"
+    if ! _mim_book_iface "$iface" "$new_port" "$ip"; then
+        print_err "Перенос mimic на порт ${new_port} отменён: запись в книгу не прошла"
+        return 1
+    fi
+    # - правила нового порта нужны для TCP-хендшейка mimic: не подтвердились -
+    # - перенос отменяется, запись и правила возвращаются на старый порт -
+    if ! _mim_ufw_open "$iface" "$new_port"; then
+        _mim_book_iface "$iface" "$old_port" "$ip" || print_warn "Запись порта ${old_port} в книгу не вернулась"
+        _mim_ufw_open "$iface" "$old_port" || true
+        print_err "Перенос mimic на порт ${new_port} отменён"
+        return 1
+    fi
+    _mim_ufw_close "$iface" "$old_port"
+    if ! _mim_apply; then
+        print_err "Инстанс mimic не поднялся на порту ${new_port}: journalctl -u $(_mim_unit "$(_mim_wan_iface)") --no-pager | tail -20"
+        return 1
+    fi
+    conf=$(_mim_conf "$(_mim_wan_iface)")
+    eli_fact_line "$conf" "filter = local=[^:]*:${new_port}," "Фильтр mimic (${iface})" || return 1
     return 0
 }
 
@@ -529,10 +592,9 @@ EOF
 }
 
 # --> MIM: PROCD INIT-СКРИПТ ДЛЯ OPENWRT <--
-# - апстрим init-скрипт под OpenWrt не даёт вообще: пакет ставит только /usr/bin/mimic -
-# - без этого mimic на роутере поднимается руками и не переживает reboot -
-# - скелет procd стандартный, бинарь и конфиг апстримные: запуск повторяет штатный -
-# - WAN на OpenWrt почти всегда логический wan поверх устройства: имя устройства берём из ifstatus -
+# - пакет mimic ставит только бинарь: без init-скрипта mimic на роутере не переживает reboot -
+# - скелет procd стандартный; WAN на OpenWrt почти всегда логический wan поверх устройства: -
+# - имя устройства берём из ifstatus -
 _mim_client_openwrt_init() {
     local out="$1"
     cat > "$out" << 'EOF'
@@ -827,14 +889,22 @@ mim_bind_iface() {
     ask_yn "Привязать mimic к ${iface}?" "y" confirm
     [[ "$confirm" != "yes" ]] && return 0
 
-    book_write ".mimic.wan_iface" "$wan" string
-    _mim_book_iface "$iface" "$port" "$local_ip"
-    _mim_ufw_open "$iface" "$port"
+    book_write ".mimic.wan_iface" "$wan" string || { print_err "WAN ${wan} не записался в книгу"; return 1; }
+    if ! _mim_book_iface "$iface" "$port" "$local_ip"; then
+        print_info "Привязка ${iface} отменена: состояние не записалось в книгу"
+        return 1
+    fi
+    # - порт нужен mimic для TCP-хендшейка: правила не открылись - привязка отменяется -
+    if ! _mim_ufw_open "$iface" "$port"; then
+        print_info "Привязка ${iface} отменена: порт ${port} закрыт для mimic"
+        book_del ".mimic.instances.\"${iface}\""
+        return 1
+    fi
 
     if ! _mim_apply; then
         print_err "Инстанс не поднялся = откатываю привязку"
         book_del ".mimic.instances.\"${iface}\""
-        _mim_ufw_close "$port"
+        _mim_ufw_close "$iface" "$port"
         _mim_apply >/dev/null 2>&1
         return 1
     fi
@@ -850,7 +920,11 @@ mim_bind_iface() {
 # - client.conf без правок + конфиг mimic + инструкция одним tar.gz -
 mim_client_kit() {
     _mim_installed || { print_err "mimic не установлен"; return 1; }
-    local bound; bound=$(_mim_bound_list)
+    local bound
+    if ! bound=$(_mim_bound_list); then
+        print_err "Книга недоступна: привязки mimic не прочитать (${_BOOK})"
+        return 1
+    fi
     [[ -z "${bound// /}" ]] && { print_warn "Нет привязанных интерфейсов"; return 0; }
 
     print_section "Клиентский комплект"
@@ -898,7 +972,15 @@ mim_client_kit() {
 
     mkdir -p "$MIM_KIT_DIR"; chmod 700 "$MIM_KIT_DIR"
     local tarball="${MIM_KIT_DIR}/${iface}-${name}-mimic.tar.gz"
-    tar -czf "$tarball" -C "$tmp" "$(basename "$kit")" 2>/dev/null
+    # - факт сборки: код tar, непустой и читаемый архив; усечённый комплект -
+    # - клиенту не отдаём -
+    if ! tar -czf "$tarball" -C "$tmp" "$(basename "$kit")" 2>/dev/null \
+        || [[ ! -s "$tarball" ]] || ! tar -tzf "$tarball" >/dev/null 2>&1; then
+        print_err "Комплект не собран: архив не создан (${tarball})"
+        print_info "Проверь место на диске и права каталога ${MIM_KIT_DIR}"
+        rm -rf "$tmp"
+        return 1
+    fi
     chmod 600 "$tarball"
     rm -rf "$tmp"
 
@@ -946,13 +1028,20 @@ mim_set_xdp() {
         [[ "$go" != "yes" ]] && return 0
     fi
 
-    book_write ".mimic.xdp_mode" "$new" string
-    if ! _mim_apply; then
-        print_err "На ${new} инстанс не поднялся = откат на ${cur}"
-        book_write ".mimic.xdp_mode" "$cur" string
-        _mim_apply >/dev/null 2>&1
+    # - код записи читается: молчаливый отказ оставил бы книгу со старым режимом, -
+    # - а "XDP-режим: новый" печатался бы по обещанию -
+    if ! book_write ".mimic.xdp_mode" "$new" string; then
+        print_err "Режим ${new} не записался в книгу"
         return 1
     fi
+    if ! _mim_apply; then
+        print_err "На ${new} инстанс не поднялся = откат на ${cur}"
+        book_write ".mimic.xdp_mode" "$cur" string || print_warn "Возврат режима ${cur} в книгу не записался"
+        _mim_apply >/dev/null 2>&1 || print_warn "Инстанс не перечитался после отката режима: проверь журнал"
+        return 1
+    fi
+    # - факт: применённый конфиг несёт новый режим -
+    eli_fact_line "$(_mim_conf "$(_mim_wan_iface)")" "^xdp_mode = ${new}$" "XDP-режим" || return 1
     print_ok "XDP-режим: ${new}"
     return 0
 }
@@ -973,7 +1062,11 @@ mim_status() {
         print_err "Модуль ядра не загружен"
     fi
 
-    local bound; bound=$(_mim_bound_list)
+    local bound
+    if ! bound=$(_mim_bound_list); then
+        print_err "Книга недоступна: привязки mimic не прочитать (${_BOOK})"
+        return 1
+    fi
     if [[ -z "${bound// /}" ]]; then
         print_warn "Нет привязанных интерфейсов"
         return 0
@@ -981,11 +1074,22 @@ mim_status() {
     local iface
     for iface in $bound; do
         echo ""
-        local port awgact
+        local port awgact conf_port live_port
         port=$(book_read ".mimic.instances.\"${iface}\".port")
         awgact=$(systemctl is-active "awg-quick@${iface}" 2>/dev/null)
         echo -e "  ${BOLD}${iface}${NC}: туннель ${awgact}"
         echo -e "    фильтр: local=$(book_read ".mimic.instances.\"${iface}\".local_ip"):${port}"
+        # - фильтр в конфиге WAN и живой порт туннеля сверяются с книгой: -
+        # - при расхождении трафик идёт мимо фильтра и туннель молчит -
+        conf_port=$(sed -n "/^# eli:${iface}$/,/^$/p" "$(_mim_conf "$wan")" 2>/dev/null \
+            | sed -n 's/.*:\([0-9][0-9]*\),.*/\1/p' | head -1)
+        if [[ -n "$conf_port" && "$conf_port" != "$port" ]]; then
+            print_warn "Фильтр в конфиге на порту ${conf_port}, а книга на ${port}: пересборка в обслуживании (Проверка и починка)"
+        fi
+        live_port=$(awg show "$iface" listen-port 2>/dev/null | awk '/^[0-9]+$/{print; exit}')
+        if [[ -n "$live_port" && "$live_port" != "$port" ]]; then
+            print_warn "Туннель ${iface} на порту ${live_port}, а фильтр на ${port}: трафик мимо фильтра, перепривяжи mimic"
+        fi
         echo -e "    клиентов: $(awg_get_client_list "$iface" | wc -w)"
     done
     return 0
@@ -1023,8 +1127,12 @@ mim_test() {
     # - адрес в фильтре обязан совпадать с тем, что стоит на проводе, иначе матча не будет никогда -
     local live_ip
     live_ip=$(_mim_wan_ip "$wan")
-    local iface port fip
-    for iface in $(_mim_bound_list); do
+    local iface port fip bound
+    if ! bound=$(_mim_bound_list); then
+        print_err "Книга недоступна: привязки mimic не прочитать (${_BOOK})"
+        return 1
+    fi
+    for iface in $bound; do
         echo ""
         echo -e "  ${BOLD}${iface}${NC}"
         port=$(book_read ".mimic.instances.\"${iface}\".port")
@@ -1040,6 +1148,14 @@ mim_test() {
             print_ok "  туннель поднят"
         else
             print_err "  туннель не поднят"
+        fi
+
+        # - порт в книге обязан совпадать с живым портом туннеля: иначе -
+        # - фильтр не поймает трафик, а туннель будет молчать -
+        local live_port
+        live_port=$(awg show "$iface" listen-port 2>/dev/null | awk '/^[0-9]+$/{print; exit}')
+        if [[ -n "$live_port" && "$live_port" != "$port" ]]; then
+            print_err "  туннель на порту ${live_port}, а фильтр на ${port}: перепривяжи mimic"
         fi
 
         if command -v ufw &>/dev/null; then
@@ -1105,17 +1221,46 @@ mim_update() {
 
     # - пакет мог заменить и юнит, и бинарь под работающим инстансом -
     systemctl daemon-reload 2>/dev/null
-    if [[ -n "$(_mim_bound_list | tr -d ' ')" ]]; then
+    local bound
+    if ! bound=$(_mim_bound_list); then
+        print_err "Книга недоступна: инстанс mimic не перечитывается (${_BOOK})"
+        return 1
+    fi
+    if [[ -n "${bound// /}" ]]; then
         _mim_apply || { print_err "Инстанс не поднялся после обновления"; return 1; }
     fi
     print_ok "Обновлено до $(_mim_version)"
     return 0
 }
 
+# --> MIM: СНЯТИЕ ПРИВЯЗКИ БЕЗ ВОПРОСОВ <--
+# - запись книги, UFW-порт и фильтры конфига перечитываются сборкой: -
+# - интерфейс без привязки - пустой ход -
+mim_detach() {
+    local iface="$1" port
+    # - книга недоступна: молчаливый выход по пустому порту оставил бы фильтр -
+    # - и правило UFW после удаления интерфейса -
+    _book_ok || { print_err "Книга недоступна: привязку ${iface} снять нельзя (${_BOOK})"; return 1; }
+    port=$(book_read ".mimic.instances.\"${iface}\".port")
+    [[ -n "$port" ]] || return 0
+    # - запись убирается первой: не убралась - состояние привязки остаётся целым -
+    if ! book_del ".mimic.instances.\"${iface}\""; then
+        print_err "Запись привязки ${iface} не убрана из книги: отвязка отменена"
+        return 1
+    fi
+    _mim_ufw_close "$iface" "$port"
+    _mim_apply || print_warn "Инстанс mimic не перечитался после снятия привязки: journalctl -u $(_mim_unit "$(_mim_wan_iface)")"
+    return 0
+}
+
 # --> MIM: ОТВЯЗКА ОТ ИНТЕРФЕЙСА <--
 mim_unbind() {
     _mim_installed || { print_err "mimic не установлен"; return 1; }
-    local bound; bound=$(_mim_bound_list)
+    local bound
+    if ! bound=$(_mim_bound_list); then
+        print_err "Книга недоступна: привязки mimic не прочитать (${_BOOK})"
+        return 1
+    fi
     [[ -z "${bound// /}" ]] && { print_warn "Нет привязанных интерфейсов"; return 0; }
 
     print_section "Отвязать mimic от интерфейса"
@@ -1133,9 +1278,7 @@ mim_unbind() {
 
     local port
     port=$(book_read ".mimic.instances.\"${iface}\".port")
-    book_del ".mimic.instances.\"${iface}\""
-    [[ -n "$port" ]] && _mim_ufw_close "$port"
-    _mim_apply || print_warn "Инстанс после отвязки не поднялся, проверь: journalctl -u $(_mim_unit "$(_mim_wan_iface)")"
+    mim_detach "$iface"
 
     print_ok "mimic отвязан от ${iface}"
     print_info "Порт ${port}/udp остаётся открыт: туннель работает как обычный AWG."
@@ -1151,14 +1294,23 @@ mim_remove() {
     ask_yn "Удалить mimic полностью?" "n" confirm
     [[ "$confirm" != "yes" ]] && return 0
 
-    local wan iface port
+    local wan iface port bound
     wan=$(_mim_wan_iface)
-    for iface in $(_mim_bound_list); do
+    if ! bound=$(_mim_bound_list); then
+        print_err "Книга недоступна: привязки mimic не прочитать (${_BOOK})"
+        return 1
+    fi
+    for iface in $bound; do
         port=$(book_read ".mimic.instances.\"${iface}\".port")
-        [[ -n "$port" ]] && _mim_ufw_close "$port"
+        [[ -n "$port" ]] && _mim_ufw_close "$iface" "$port"
     done
 
-    systemctl disable --now "$(_mim_unit "$wan")" 2>/dev/null
+    # - каждый шаг подтверждается фактом: "mimic удалён" печатается только тогда, -
+    # - когда снято всё; остатки перехвата после удаления недопустимы -
+    local unit leftover=0
+    unit=$(_mim_unit "$wan")
+    systemctl disable --now "$unit" 2>/dev/null
+    eli_fact_unit "$unit" 3 inactive || leftover=1
     rm -f "$(_mim_conf "$wan")"
     rm -f /etc/modules-load.d/mimic.conf
 
@@ -1167,16 +1319,33 @@ mim_remove() {
     # - после этого уже нечем, до перезагрузки он остаётся в памяти -
     if [[ -n "$wan" ]]; then
         tc qdisc del dev "$wan" clsact 2>/dev/null || true
+        if tc qdisc show dev "$wan" 2>/dev/null | grep -q clsact; then
+            print_warn "Точка clsact осталась на ${wan}: сними вручную (tc qdisc del dev ${wan} clsact)"
+            leftover=1
+        fi
     fi
     modprobe -r mimic 2>/dev/null || true
+    if lsmod 2>/dev/null | grep -q '^mimic'; then
+        print_warn "Модуль mimic остался загружен: до перезагрузки перехват возможен (rmmod mimic)"
+        leftover=1
+    fi
 
     export DEBIAN_FRONTEND=noninteractive
-    apt-get purge -y -qq mimic mimic-dkms 2>/dev/null || print_warn "apt-get purge отработал с ошибкой, проверь dpkg -l | grep mimic"
+    apt-get purge -y -qq mimic mimic-dkms 2>/dev/null || true
     apt-get autoremove -y -qq 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null
+    if dpkg -l 2>/dev/null | grep -qE '^ii +mimic'; then
+        print_warn "Пакеты mimic остались в dpkg: проверь dpkg -l | grep mimic"
+        leftover=1
+    fi
 
     rm -rf "$MIM_KIT_DIR"
-    book_del ".mimic"
+    book_del ".mimic" || { print_warn "Запись .mimic в книге не убрана: проверь книгу"; leftover=1; }
+
+    if (( leftover )); then
+        print_err "mimic удалён не полностью: смотри предупреждения выше"
+        return 1
+    fi
     print_ok "mimic удалён"
     print_info "Туннели работают как обычный AWG, порты открыты."
     return 0

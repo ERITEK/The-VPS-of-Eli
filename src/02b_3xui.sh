@@ -24,21 +24,21 @@ XUI_REPO_BRANCH="master"
 XUI_GITHUB_REPO="MHSanaei/3x-ui"
 XUI_RAW_URL="https://raw.githubusercontent.com/${XUI_GITHUB_REPO}/${XUI_REPO_BRANCH}"
 XUI_API_URL="https://api.github.com/repos/${XUI_GITHUB_REPO}/releases/latest"
-# - пин версии апстрима: пусто = последний релиз. Модуль понимает контракты -
-# - 2.x и 3.x; пин пригодится, если апстрим снова сломает совместимость -
+# - пин версии релиза: пусто = последний релиз; модуль понимает контракты 2.x и 3.x -
 XUI_PIN_TAG=""
 
-# - установка "на самом деле 'нет'" требует бинарь и unit -
-# - is-active проверяем отдельно через xui_running (иначе после падения сервиса нельзя переустановить) -
+# - установка "на самом деле 'нет'" требует бинарь и unit; list-unit-files матчит -
+# - имя юнит-файла целиком: unit спрашивается полным именем; is-active через xui_running: -
+# - после падения сервиса переустановка должна оставаться возможной -
 xui_installed() {
-    [[ -f "$XUI_BIN" ]] && systemctl list-unit-files "$XUI_SERVICE" 2>/dev/null | grep -q "$XUI_SERVICE"
+    [[ -f "$XUI_BIN" ]] && systemctl list-unit-files "${XUI_SERVICE}.service" 2>/dev/null | grep -q "^${XUI_SERVICE}\.service"
 }
 
 xui_running() {
     systemctl is-active --quiet "$XUI_SERVICE" 2>/dev/null
 }
 
-# - автодетект фактического пути к БД: апстрим мог сменить дефолт -
+# - автодетект фактического пути к БД: путь зависит от версии -
 # - /etc/x-ui/x-ui.db (v2.x дефолт) | ${XUI_DIR}/db/x-ui.db (legacy) -
 # - при нахождении обновляет глобальную XUI_DB, иначе оставляет как есть -
 _xui_detect_db() {
@@ -46,7 +46,7 @@ _xui_detect_db() {
     for _cand in "/etc/x-ui/x-ui.db" "${XUI_DIR}/db/x-ui.db"; do
         if [[ -f "$_cand" ]]; then XUI_DB="$_cand"; return 0; fi
     done
-    # - fallback через find, если апстрим уедет ещё раз -
+    # - fallback через find, если стандартных путей нет -
     local _found
     _found=$(find /etc/x-ui "$XUI_DIR" -maxdepth 3 -name "x-ui.db" -type f 2>/dev/null | head -1 || true)
     [[ -n "$_found" ]] && { XUI_DB="$_found"; return 0; }
@@ -74,7 +74,7 @@ _xui_arch() {
 _xui_fetch_release_info() {
     local arch
     arch=$(_xui_arch)
-    # - непустой пин важнее апстрима: latest может сломать совместимость модуля -
+    # - непустой пин важнее последнего релиза: новый может сломать совместимость модуля -
     if [[ -n "${XUI_PIN_TAG:-}" ]]; then
         XUI_TAG="$XUI_PIN_TAG"
         XUI_TARBALL_URL="https://github.com/${XUI_GITHUB_REPO}/releases/download/${XUI_TAG}/x-ui-linux-${arch}.tar.gz"
@@ -97,7 +97,7 @@ _xui_fetch_release_info() {
 }
 
 # --> 3X-UI: СКАЧАТЬ И РАСПАКОВАТЬ tar.gz <--
-# - чистая установка без вызова upstream install.sh (там интерактивные prompts) -
+# - установка распаковкой релиза: штатный установщик интерактивен -
 _xui_fetch_and_extract() {
     local arch tmpdir tarball exdir
     arch=$(_xui_arch)
@@ -173,6 +173,13 @@ _xui_install_cli_and_unit() {
     fi
     [[ -f /usr/bin/x-ui ]] && chmod +x /usr/bin/x-ui
 
+    # - CLI подтверждается правом запуска: молчаливый провал оставляет -
+    # - установку без управляющего скрипта -
+    if [[ ! -x /usr/bin/x-ui ]]; then
+        print_err "CLI /usr/bin/x-ui не установлен (${XUI_RAW_URL}/x-ui.sh)"
+        return 1
+    fi
+
     # - systemd unit: сначала из архива (x-ui.service или x-ui.service.debian), иначе raw -
     local unit_src=""
     if [[ -f "${XUI_DIR}/x-ui.service" ]]; then
@@ -191,12 +198,21 @@ _xui_install_cli_and_unit() {
             return 1
         fi
     fi
+    # - unit подтверждается содержимым файла, автозапуск - состоянием юнита -
+    if [[ ! -s "$XUI_UNIT" ]]; then
+        print_err "unit ${XUI_UNIT} пуст или не создан"
+        return 1
+    fi
 
     chown root:root "$XUI_UNIT"
     chmod 644 "$XUI_UNIT"
     mkdir -p /var/log/x-ui
     systemctl daemon-reload
-    systemctl enable "$XUI_SERVICE" >/dev/null 2>&1
+    systemctl enable "$XUI_SERVICE" >/dev/null 2>&1 || true
+    if ! systemctl is-enabled --quiet "$XUI_SERVICE" 2>/dev/null; then
+        print_err "Автозапуск ${XUI_SERVICE} не включился: systemctl enable ${XUI_SERVICE}"
+        return 1
+    fi
     return 0
 }
 
@@ -214,9 +230,12 @@ _xui_fix_nofile() {
         fi
         systemctl daemon-reload
         systemctl restart "$XUI_SERVICE" 2>/dev/null || true
-        sleep 2
+        # - правка подтверждается строкой в unit, рестарт - состоянием юнита -
+        eli_fact_line "$XUI_UNIT" '^LimitNOFILE=65536$' "LimitNOFILE в ${XUI_UNIT}" || return 1
+        eli_fact_unit "$XUI_SERVICE" 5 || return 1
         print_ok "LimitNOFILE=65536 добавлен в unit"
     fi
+    return 0
 }
 
 # --> 3X-UI: УСТАНОВКА <--
@@ -241,13 +260,16 @@ xui_install() {
     # - параметры -
     print_section "Параметры 3X-UI"
 
-    local panel_port
+    local panel_port _listen
     panel_port=$(rand_port)
     echo -e "  ${CYAN}Порт веб-панели 3X-UI. Случайный порт безопаснее стандартного 2053.${NC}"
     while true; do
         ask "Порт панели" "$panel_port" panel_port
         if ! validate_port "$panel_port"; then print_err "Порт 1-65535"; continue; fi
-        if ss -tlnp 2>/dev/null | grep -q ":${panel_port} "; then print_warn "Занят"; continue; fi
+        # - вывод ss читается строкой: в конвейере grep -q обрывает поток и -
+        # - под pipefail исход 141 переворачивает вердикт занятости -
+        _listen=$(ss -tlnp 2>/dev/null || true)
+        if [[ "$_listen" == *":${panel_port} "* ]]; then print_warn "Занят"; continue; fi
         break
     done
     print_ok "Порт панели: ${panel_port}"
@@ -301,10 +323,9 @@ xui_install() {
     mkdir -p "$XUI_ENV_DIR" "$XUI_BACKUP_DIR"
     chmod 700 "$XUI_ENV_DIR"
 
-    # - прямое скачивание tar.gz вместо upstream install.sh -
-    # - причина: install.sh на master имеет 2-3 интерактивных prompts (port/SSL/IPv6) -
-    # - и сам генерит webBasePath/username/password, игнорируя наши аргументы -
-    # - базовые зависимости (curl/tar/tzdata/socat/ca-certificates) -
+    # - панель ставится распаковкой tar.gz: штатный установщик интерактивен (prompts -
+    # - port/SSL/IPv6), сам генерит webBasePath/username/password и игнорирует аргументы; -
+    # - базовые зависимости: curl/tar/tzdata/socat/ca-certificates -
     apt-get install -y -qq curl tar tzdata socat ca-certificates 2>/dev/null || true
 
     if ! _xui_fetch_release_info; then
@@ -323,11 +344,9 @@ xui_install() {
         return 1
     fi
 
-    # - первый запуск для инициализации БД (генерит дефолтные user/pass/path) -
-    # - ждём появления БД до 30 сек, sleep 3 не хватает на слабых VPS -
-    # - без БД setting -username ниже уйдёт в пустоту -
-    # - 3X-UI v2+ держит БД в /etc/x-ui/x-ui.db (дефолт из апстрима), -
-    # - старые версии - в /usr/local/x-ui/db/x-ui.db. Проверяем оба пути. -
+    # - первый запуск для инициализации БД (дефолтные user/pass/path); ждём БД до 30 сек -
+    # - (sleep 3 не хватает на слабых VPS), без БД setting -username уйдёт в пустоту; -
+    # - БД: /etc/x-ui/x-ui.db (v2+) или /usr/local/x-ui/db/x-ui.db (старые) -
     systemctl start "$XUI_SERVICE" || true
     local retries=0 _db_found=""
     while (( retries < 30 )); do
@@ -362,20 +381,32 @@ xui_install() {
         print_err "Не удалось применить webBasePath через 'x-ui setting -webBasePath'"
         return 1
     fi
+    # - CLI принимает пароль только флагом: значение видно в argv процесса -
     if ! "$XUI_BIN" setting -username "$panel_user" -password "$panel_pass" >/dev/null 2>&1; then
         print_err "Не удалось применить логин/пароль через 'x-ui setting'"
         return 1
     fi
     "$XUI_BIN" migrate >/dev/null 2>&1 || true
     systemctl restart "$XUI_SERVICE" 2>/dev/null || true
-    sleep 3
+    # - живость панели после правок сверяется опросом: иначе установка -
+    # - объявляет успех, а панель лежит -
+    if ! eli_fact_unit "$XUI_SERVICE" 5; then
+        return 1
+    fi
 
-    _xui_fix_nofile
+    # - лимит файлов: побочная правка, её провал панель не отменяет -
+    if ! _xui_fix_nofile; then
+        print_warn "LimitNOFILE не применён: проверь ${XUI_UNIT} и перезапусти панель"
+    fi
 
     # - UFW -
     if command -v ufw &>/dev/null; then
         ufw allow "${panel_port}/tcp" comment "3X-UI panel" 2>/dev/null || true
-        print_ok "UFW: ${panel_port}/tcp"
+        if _ufw_has_rule "$panel_port" "tcp"; then
+            print_ok "UFW: ${panel_port}/tcp"
+        else
+            print_err "UFW не разрешил ${panel_port}/tcp: проверь ufw status verbose"
+        fi
     fi
 
     # - сохранение -
@@ -472,9 +503,8 @@ xui_show_creds() {
 }
 
 # --> 3X-UI: INBOUND'Ы ЧЕРЕЗ API <--
-# - ВНИМАНИЕ: endpoint /panel/api/inbounds/list, curl с -L и -c cookie -
-# - логин в панель, общий для API-функций модуля -
-# - контракт 2.x: форма + cookie сессии; контракт 3.x: CSRF-токен из -
+# - endpoint /panel/api/inbounds/list, curl с -L и -c cookie; логин в панель общий -
+# - для API-функций модуля; контракт 2.x: форма + cookie, 3.x: CSRF-токен из -
 # - GET /csrf-token + заголовок X-CSRF-Token на POST /login -
 _xui_api_login() {
     local jar="$1"
@@ -487,17 +517,17 @@ _xui_api_login() {
     [[ "$path" != "/" ]] && path="${path%/}"
     local base_url="http://127.0.0.1:${port}${path}"
     local result csrf
-    result=$(curl -sk --connect-timeout 5 -c "$jar" -X POST "${base_url}/login" \
+    result=$(printf '%s' "$panel_pass" | curl -sk --connect-timeout 5 -c "$jar" -X POST "${base_url}/login" \
         --data-urlencode "username=${panel_user}" \
-        --data-urlencode "password=${panel_pass}" 2>/dev/null || echo "")
+        --data-urlencode "password@-" 2>/dev/null || echo "")
     echo "$result" | grep -q '"success":true' && return 0
     csrf=$(curl -sk --connect-timeout 5 -c "$jar" "${base_url}/csrf-token" 2>/dev/null \
         | jq -r '.obj // empty' 2>/dev/null || echo "")
     [[ -z "$csrf" ]] && return 1
-    result=$(curl -sk --connect-timeout 5 -b "$jar" -c "$jar" -X POST "${base_url}/login" \
+    result=$(printf '%s' "$panel_pass" | curl -sk --connect-timeout 5 -b "$jar" -c "$jar" -X POST "${base_url}/login" \
         -H "X-CSRF-Token: ${csrf}" \
         --data-urlencode "username=${panel_user}" \
-        --data-urlencode "password=${panel_pass}" 2>/dev/null || echo "")
+        --data-urlencode "password@-" 2>/dev/null || echo "")
     echo "$result" | grep -q '"success":true'
 }
 
@@ -553,12 +583,19 @@ xui_backup_db() {
     mkdir -p "$XUI_BACKUP_DIR"
     local backup_file
     backup_file="${XUI_BACKUP_DIR}/x-ui_$(date +%Y%m%d_%H%M%S).db"
-    # - согласованный снимок: копия только при остановленной панели -
+    # - согласованный снимок: копия только при подтверждённо -
+    # - остановленной панели - незавершённый стоп даёт снимок живой базы -
     local _was_active=0
     systemctl is-active --quiet "$XUI_SERVICE" 2>/dev/null && {
-        _was_active=1; systemctl stop "$XUI_SERVICE" 2>/dev/null || true; sleep 1; }
+        _was_active=1
+        systemctl stop "$XUI_SERVICE" 2>/dev/null || true
+        if ! eli_fact_unit "$XUI_SERVICE" 3 inactive; then
+            print_err "Панель не остановилась: бэкап не снят"
+            return 1
+        fi
+    }
     if ! cp -f "$XUI_DB" "$backup_file" || [[ ! -s "$backup_file" ]]; then
-        [[ $_was_active -eq 1 ]] && systemctl start "$XUI_SERVICE" 2>/dev/null || true
+        [[ $_was_active -eq 1 ]] && { systemctl start "$XUI_SERVICE" 2>/dev/null || true; eli_fact_unit "$XUI_SERVICE" || true; }
         print_err "Бэкап не создан: ${backup_file}"
         print_info "Проверь доступ к ${XUI_DB} и место в ${XUI_BACKUP_DIR}"
         rm -f "$backup_file"
@@ -567,7 +604,15 @@ xui_backup_db() {
     [[ $_was_active -eq 1 ]] && systemctl start "$XUI_SERVICE" 2>/dev/null || true
     chmod 600 "$backup_file"
     print_ok "Бэкап: ${backup_file} ($(du -h "$backup_file" | awk '{print $1}'))"
-    find "$XUI_BACKUP_DIR" -type f -name "x-ui_*.db" -mtime +30 -delete 2>/dev/null || true
+    # - возврат панели подтверждается опросом: панель не должна молча лежать -
+    if [[ $_was_active -eq 1 ]] && ! eli_fact_unit "$XUI_SERVICE" 5; then
+        print_warn "Бэкап снят, но панель ${XUI_SERVICE} не поднялась"
+        return 1
+    fi
+    # - ретеншн 30 дней касается только автоматических копий: именованные -
+    # - копии переустановки и удаления сохраняются обещанным сроком хранения -
+    find "$XUI_BACKUP_DIR" -type f -name "x-ui_*.db" \
+        ! -name "x-ui_pre_reinstall_*" ! -name "x-ui_final_*" -mtime +30 -delete 2>/dev/null || true
     return 0
 }
 
@@ -579,8 +624,30 @@ xui_reinstall() {
     ask_yn "Подтвердить?" "n" confirm
     [[ "$confirm" != "yes" ]] && return 0
     _xui_detect_db 2>/dev/null || true
-    [[ -f "$XUI_DB" ]] && { mkdir -p "$XUI_BACKUP_DIR"; cp -f "$XUI_DB" "${XUI_BACKUP_DIR}/x-ui_pre_reinstall_$(date +%Y%m%d).db"; }
-    systemctl stop "$XUI_SERVICE" 2>/dev/null || true
+    # - согласованный снимок: копия только при подтверждённо остановленной -
+    # - панели; без успешного бэкапа удаление отменяется -
+    local _was_active=0
+    systemctl is-active --quiet "$XUI_SERVICE" 2>/dev/null && {
+        _was_active=1
+        systemctl stop "$XUI_SERVICE" 2>/dev/null || true
+        if ! eli_fact_unit "$XUI_SERVICE" 3 inactive; then
+            print_err "Панель не остановилась: переустановка отменена"
+            return 1
+        fi
+    }
+    if [[ -f "$XUI_DB" ]]; then
+        local backup_file
+        backup_file="${XUI_BACKUP_DIR}/x-ui_pre_reinstall_$(date +%Y%m%d).db"
+        mkdir -p "$XUI_BACKUP_DIR"
+        if ! cp -f "$XUI_DB" "$backup_file" || [[ ! -s "$backup_file" ]]; then
+            [[ $_was_active -eq 1 ]] && { systemctl start "$XUI_SERVICE" 2>/dev/null || true; eli_fact_unit "$XUI_SERVICE" || true; }
+            rm -f "$backup_file"
+            print_err "Бэкап БД не создан: ${backup_file}"
+            print_info "Переустановка отменена: проверь доступ к ${XUI_DB} и место в ${XUI_BACKUP_DIR}"
+            return 1
+        fi
+        chmod 600 "$backup_file"
+    fi
     systemctl disable "$XUI_SERVICE" 2>/dev/null || true
     # - правило старого порта снимается до удаления env: переустановка даёт порт новый -
     _xui_ufw_close
@@ -600,6 +667,11 @@ _xui_ufw_close() {
     p="${p//[^0-9]/}"
     [[ -n "$p" ]] || return 0
     ufw delete allow "${p}/tcp" 2>/dev/null || true
+    # - факт: правило перечитывается через show added, иначе порт панели -
+    # - остаётся открытым после удаления -
+    if _ufw_has_rule "$p" "tcp"; then
+        print_warn "UFW: правило ${p}/tcp осталось, смотри ufw show added"
+    fi
 }
 
 # --> 3X-UI: УДАЛЕНИЕ <--
@@ -610,8 +682,30 @@ xui_delete() {
     ask_yn "Подтвердить?" "n" confirm
     [[ "$confirm" != "yes" ]] && return 0
     _xui_detect_db 2>/dev/null || true
-    [[ -f "$XUI_DB" ]] && { mkdir -p "$XUI_BACKUP_DIR"; cp -f "$XUI_DB" "${XUI_BACKUP_DIR}/x-ui_final_$(date +%Y%m%d).db" 2>/dev/null || true; }
-    systemctl stop "$XUI_SERVICE" 2>/dev/null || true
+    # - согласованный снимок: копия только при подтверждённо остановленной -
+    # - панели; без успешного бэкапа удаление отменяется -
+    local _was_active=0
+    systemctl is-active --quiet "$XUI_SERVICE" 2>/dev/null && {
+        _was_active=1
+        systemctl stop "$XUI_SERVICE" 2>/dev/null || true
+        if ! eli_fact_unit "$XUI_SERVICE" 3 inactive; then
+            print_err "Панель не остановилась: удаление отменено"
+            return 1
+        fi
+    }
+    if [[ -f "$XUI_DB" ]]; then
+        local backup_file
+        backup_file="${XUI_BACKUP_DIR}/x-ui_final_$(date +%Y%m%d).db"
+        mkdir -p "$XUI_BACKUP_DIR"
+        if ! cp -f "$XUI_DB" "$backup_file" || [[ ! -s "$backup_file" ]]; then
+            [[ $_was_active -eq 1 ]] && { systemctl start "$XUI_SERVICE" 2>/dev/null || true; eli_fact_unit "$XUI_SERVICE" || true; }
+            rm -f "$backup_file"
+            print_err "Бэкап БД не создан: ${backup_file}"
+            print_info "Удаление отменено: проверь доступ к ${XUI_DB} и место в ${XUI_BACKUP_DIR}"
+            return 1
+        fi
+        chmod 600 "$backup_file"
+    fi
     systemctl disable "$XUI_SERVICE" 2>/dev/null || true
     rm -rf "$XUI_DIR" /etc/x-ui 2>/dev/null || true
     rm -f /usr/bin/x-ui "$XUI_UNIT" 2>/dev/null || true

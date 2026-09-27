@@ -1,0 +1,59 @@
+# golden: unbound_sync
+--- вывод ---
+== s1: снятая подсеть уходит, текущие ставятся ==
+rc=0
+--- rules ---
+ufw allow from 10.8.0.0/24 to any port 53 proto udp
+ufw allow from 10.8.0.0/24 to any port 53 proto tcp
+ufw allow from 10.9.0.0/24 to any port 53 proto udp
+ufw allow from 10.9.0.0/24 to any port 53 proto tcp
+book=[10.8.0.0/24 10.9.0.0/24]
+== s2: правило снятой подсети не снимается ==
+  <yellow>[!!!]<off>  UFW: правила снятых подсетей не снялись (10.7.0.0/24), записи оставлены в книге
+rc=1
+--- rules ---
+ufw allow from 10.7.0.0/24 to any port 53 proto udp
+ufw allow from 10.7.0.0/24 to any port 53 proto tcp
+ufw allow from 10.8.0.0/24 to any port 53 proto udp
+ufw allow from 10.8.0.0/24 to any port 53 proto tcp
+ufw allow from 10.9.0.0/24 to any port 53 proto udp
+ufw allow from 10.9.0.0/24 to any port 53 proto tcp
+book=[10.8.0.0/24 10.9.0.0/24 10.7.0.0/24]
+== s3: правило текущей подсети не подтверждается ==
+  <yellow>[!!!]<off>  UFW: часть правил 53/udp+tcp не подтверждена (ufw show added)
+rc=1
+--- rules ---
+book=[10.7.0.0/24]
+== s4: пересборка конфига под текущие интерфейсы ==
+  <green>[-OK-]<off> Интерфейс: awg0 -> 10.8.0.1
+  <green>[-OK-]<off> Интерфейс: awg1 -> 10.9.0.1
+rc=0
+    interface: 127.0.0.1
+    interface: 10.8.0.1
+    interface: 10.9.0.1
+    access-control: 127.0.0.0/8 allow
+    access-control: 10.8.0.0/24 allow
+    access-control: 10.9.0.0/24 allow
+    access-control: 0.0.0.0/0 refuse
+  <green>[-OK-]<off> Интерфейс: awg0 -> 10.8.0.1
+  <green>[-OK-]<off> Интерфейс: awg1 -> 10.9.0.1
+  <green>[-OK-]<off> Unbound: конфиг пересобран под текущие интерфейсы AWG
+rc=0
+    interface: 127.0.0.1
+    interface: 10.8.0.1
+    interface: 10.9.0.1
+    access-control: 127.0.0.0/8 allow
+    access-control: 10.8.0.0/24 allow
+    access-control: 10.9.0.0/24 allow
+    access-control: 0.0.0.0/0 refuse
+== s5: проверка конфига не прошла - прежний остаётся ==
+  <green>[-OK-]<off> Интерфейс: awg0 -> 10.8.0.1
+  <green>[-OK-]<off> Интерфейс: awg1 -> 10.9.0.1
+  <red>[xXx]<off> Unbound: собранный конфиг не прошёл проверку, прежний оставлен на месте
+rc=1
+до=966 после=966
+--- вызовы платформы ---
+CMD flock -n 200
+CMD systemctl restart unbound
+CMD systemctl is-active --quiet unbound
+rc=0

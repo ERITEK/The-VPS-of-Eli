@@ -44,7 +44,9 @@
 
   <cyan>*<off> Путь дампа: <SB>/tmp/<pcap>
   <cyan>*<off> (удаляется автоматически после анализа)
-  <cyan>*<off> Захват до 60 сек на eth0:1618/udp (остановится по хендшейку)
+  <cyan>*<off> Интерфейс привязан к обфускатору: клиенты стучатся на его порт,
+  <cyan>*<off> развернутые пакеты ловлю на lo:1618/udp
+  <cyan>*<off> Захват до 60 сек на lo:1618/udp (остановится по хендшейку)
 
   <green>[-OK-]<off> Хендшейк замечен на 1-й секунде, добираю ответ и данные
 
@@ -64,14 +66,11 @@
   <bold>Первый байт UDP payload (WG type field):<off>
     <cyan>HeaderProtectionKey задан: первый байт шифрован, тип пакета не виден, -
     значит H1-H4 по дампу не проверяются. Raw-байты ниже - справка.<off>
-    пакет #1: 0xde (222) -> тип шифрован HeaderProtection
-    пакет #2: 0x3f (63) -> тип шифрован HeaderProtection
-    пакет #3: 0x07 (7) -> тип шифрован HeaderProtection
-    пакет #4: 0xc1 (193) -> тип шифрован HeaderProtection
+    пакет #4: 0xde (222) -> тип шифрован HeaderProtection
     пакет #5: 0x9a (154) -> тип шифрован HeaderProtection
 
   <bold>Проверка I1 signature chain:<off>
-  <green>[-OK-]<off>     I1 найден в пакете #1 на offset 0 байт
+  <green>[-OK-]<off>     I1 найден в пакете #4 на offset 0 байт
     Искомый фрагмент: deadbeef...
 
   <bold>Итог:<off>
@@ -88,13 +87,13 @@
 
   <cyan>*<off> Дамп был сохранён как <SB>/tmp/<pcap> и сейчас удаляется
 --- вызовы платформы ---
+CMD awg show awg0 latest-handshakes
+CMD awg show awg0 latest-handshakes
 CMD flock -n 200
 CMD ip route show default
-CMD awg show awg0 latest-handshakes
-CMD timeout 60 tcpdump -i eth0 -nn -U -s 0 udp port 1618 -w <SB>/tmp/<pcap>
-CMD tcpdump -i eth0 -nn -U -s 0 udp port 1618 -w <SB>/tmp/<pcap>
-CMD awg show awg0 latest-handshakes
+CMD tcpdump -i lo -nn -U -s 0 udp port 1618 -w <SB>/tmp/<pcap>
 CMD tcpdump -nn -r <SB>/tmp/<pcap>
 CMD tcpdump -nn -r <SB>/tmp/<pcap> -c 100
-CMD tcpdump -nn -r <SB>/tmp/<pcap> -c 10 -x
+CMD tcpdump -nn -r <SB>/tmp/<pcap> -c 100 -x
+CMD timeout 60 tcpdump -i lo -nn -U -s 0 udp port 1618 -w <SB>/tmp/<pcap>
 rc=0

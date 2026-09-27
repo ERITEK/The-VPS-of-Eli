@@ -13,18 +13,20 @@ ufw_active() {
     [[ "$st" == *"Status: active"* ]]
 }
 
-# - проверка наличия правила для порта/протокола, работает и при неактивном UFW -
-# - 'ufw show added' выводит "ufw allow 22/tcp" даже когда UFW disabled, в отличие от 'ufw status' -
+# - проверка наличия правила для порта/протокола, работает и при неактивном UFW: -
+# - 'ufw show added' выводит правила и при disabled, в отличие от 'ufw status'; -
+# - вывод снимком: конвейер с grep -q под pipefail даёт 141 и ложное "правила нет" -
 _ufw_has_rule() {
     local port="$1" proto="${2:-}"
     [[ -z "$port" ]] && return 1
-    local pat
+    local pat out
     if [[ -n "$proto" ]]; then
         pat="${port}/${proto}"
     else
         pat="${port}"
     fi
-    ufw show added 2>/dev/null | grep -Eq "(^|[[:space:]])${pat}([[:space:]]|$)"
+    out=$(ufw show added 2>/dev/null || true)
+    grep -Eq "(^|[[:space:]])${pat}([[:space:]]|$)" <<< "$out"
 }
 
 ufw_show_status() {
@@ -56,6 +58,10 @@ ufw_toggle() {
         ask_yn "Отключить UFW?" "n" confirm
         [[ "$confirm" != "yes" ]] && return 0
         ufw disable
+        if ufw_active; then
+            print_err "UFW не отключился: смотри ufw status verbose"
+            return 1
+        fi
         print_ok "UFW отключён"
         book_write ".ufw.active" "false" bool
     else
@@ -68,6 +74,10 @@ ufw_toggle() {
             ask_yn "Добавить ${ssh_port}/tcp?" "y" add
             if [[ "$add" == "yes" ]]; then
                 ufw allow "${ssh_port}/tcp" comment "SSH" 2>/dev/null || true
+                # - факт: непокрытый SSH-порт означает потерю входа после enable -
+                if ! _ufw_has_rule "$ssh_port" "tcp"; then
+                    print_err "UFW не разрешил ${ssh_port}/tcp: проверь ufw show added"
+                fi
             fi
         fi
         # - полная проверка покрытия всех активных портов перед enable -
@@ -80,12 +90,24 @@ ufw_toggle() {
         # - выключенное состояние; подтверждение живого входа снимает таймер -
         eli_safety_arm "eli-ufw-rollback" 300 "ufw disable"
         ufw --force enable
+        # - факт включения: состояние читается после команды, -
+        # - сервер не должен считать себя защищённым при провале -
+        if ! ufw_active; then
+            print_err "UFW не включился: смотри ufw status verbose"
+            eli_safety_disarm "eli-ufw-rollback"
+            book_write ".ufw.active" "false" bool
+            return 1
+        fi
         print_ok "UFW включён"
         local alive=""
         ask_yn "SSH-подключение живо (проверь из второй сессии)?" "y" alive
         if [[ "$alive" != "yes" ]]; then
             eli_safety_disarm "eli-ufw-rollback"
             ufw disable
+            if ufw_active; then
+                print_err "UFW не отключился: смотри ufw status verbose"
+                return 1
+            fi
             book_write ".ufw.active" "false" bool
             print_warn "UFW отключён обратно"
             return 1
@@ -167,10 +189,34 @@ ufw_add_port() {
     return 0
 }
 
+# - нормализация строки правила: без номера, суффиксов (v6) и выравнивания колонок -
+_ufw_norm_line() {
+    sed 's/^ *\[[^]]*\] *//; s/ (v6)//g' <<< "$1" | tr -s ' ' | sed 's/^ //; s/ $//'
+}
+
+# - число строк списка, нормализующихся в заданное правило -
+_ufw_norm_count() {
+    local norm="$1" out=0 tline
+    while IFS= read -r tline; do
+        [[ "$(_ufw_norm_line "$tline")" == "$norm" ]] && out=$(( out + 1 ))
+    done < <(printf '%s\n' "$2")
+    echo "$out"
+}
+
 ufw_delete_rule() {
     _ufw_guard || return 0
     print_section "Удалить правило"
-    ufw status numbered 2>/dev/null | grep -v "^Status:" | sed 's/^/  /'
+    local list
+    list=$(ufw status numbered 2>/dev/null | grep -v "^Status:")
+    # - пустой нумерованный список = правила не пронумерованы: удаление -
+    # - по номеру снимает правило по внутренней позиции, мимо глаз -
+    if [[ -z "$list" ]]; then
+        print_warn "Нумерованный список правил пуст: удалять по номеру нельзя"
+        print_info "UFW неактивен - номера видны только при активном файрволе"
+        print_info "Включи UFW (меню UFW) и повтори удаление"
+        return 1
+    fi
+    echo "$list" | sed 's/^/  /'
     echo ""
     local num=""
     while true; do
@@ -180,10 +226,57 @@ ufw_delete_rule() {
     local confirm=""
     ask_yn "Удалить #${num}?" "n" confirm
     [[ "$confirm" != "yes" ]] && return 0
-    if echo "y" | ufw delete "$num" 2>/dev/null; then
-        print_ok "Удалено"
+    # - строка правила нужна для проверки факта и поиска пары v4/v6 -
+    local line
+    line=$(echo "$list" | sed -n "s/^ *\[ *${num}\] *//p" | head -1)
+    if [[ -z "$line" ]]; then
+        print_err "Правило #${num} не найдено в списке"
+        return 1
+    fi
+    if ! echo "y" | ufw delete "$num" 2>/dev/null; then
+        print_err "Не удалось удалить #${num}"
+        return 1
+    fi
+
+    # --> ПАРА V4/V6 <--
+    # - одно правило это две строки (v4 и v6), ufw delete снимает одну: близнец ищется -
+    # - нормализацией без суффиксов (v6) и выравниванием колонок; побайтная копия - отдельный дубль -
+    local norm after twin_num="" tline tnum
+    norm=$(_ufw_norm_line "$line")
+    after=$(ufw status numbered 2>/dev/null | grep -v "^Status:")
+    if [[ -n "$after" ]]; then
+        while IFS= read -r tline; do
+            [[ "$tline" == "$line" ]] && continue
+            tnum=$(sed 's/^ *\[\ *\([0-9][0-9]*\)\]\ *.*/\1/' <<< "$tline")
+            if [[ "$(_ufw_norm_line "$tline")" == "$norm" ]]; then
+                twin_num="$tnum"
+                break
+            fi
+        done < <(printf '%s\n' "$after")
+        if [[ -n "$twin_num" ]]; then
+            if ! echo "y" | ufw delete "$twin_num" 2>/dev/null; then
+                print_err "Пара #${twin_num} не удалена: смотри раздел Статус UFW"
+                return 1
+            fi
+        fi
+    fi
+
+    # --> ПРОВЕРКА ФАКТА <--
+    # - строк этого правила (нормализованно, включая дубли) становится ровно -
+    # - на удалённое число меньше: один или оба семейства -
+    local final expect=1 n_before n_after
+    [[ -n "$twin_num" ]] && expect=2
+    final=$(ufw status numbered 2>/dev/null | grep -v "^Status:")
+    n_before=$(_ufw_norm_count "$norm" "$list")
+    n_after=$(_ufw_norm_count "$norm" "$final")
+    if (( n_after != n_before - expect )); then
+        print_err "Правило #${num} числится в списке после удаления: смотри раздел Статус UFW"
+        return 1
+    fi
+    if [[ -n "$twin_num" ]]; then
+        print_ok "Удалено (оба семейства v4/v6)"
     else
-        print_err "Не удалось"
+        print_ok "Удалено"
     fi
     return 0
 }
@@ -193,7 +286,13 @@ ufw_check_ports() {
     print_section "Активные порты vs UFW"
 
     local ufw_rules
-    ufw_rules=$(ufw status 2>/dev/null || true)
+    # - при выключенном UFW status пуст: правила читаются через show added, -
+    # - иначе каждый порт объявляется без правила и дописывается повторно -
+    if ufw_active; then
+        ufw_rules=$(ufw status 2>/dev/null || true)
+    else
+        ufw_rules=$(ufw show added 2>/dev/null || true)
+    fi
 
     local missing_rules=()
 

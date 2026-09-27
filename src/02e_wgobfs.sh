@@ -1,9 +1,8 @@
 # --> МОДУЛЬ: WG-OBFUSCATOR <--
-# - userspace UDP-прокси: прячет туннель WG от провайдера КЛИЕНТА -
-# - обфускация XOR и маскировка под STUN -
-# - движок ClusterM/wg-obfuscator, требует vanilla-WG: заголовки AWG он примет за обфускацию -
+# - userspace UDP-прокси (ClusterM/wg-obfuscator): прячет туннель WG от провайдера КЛИЕНТА -
+# - (XOR + STUN-маскировка), требует vanilla-WG: заголовки AWG примет за обфускацию -
 # - схема: клиент -> его обфускатор -> наш source-lport -> 127.0.0.1:<порт vanilla-awg> -
-# - один инстанс на awg-интерфейс: свой конфиг с одной секцией и свой юнит из шаблона -
+# - один инстанс на awg-интерфейс -
 
 WGO_REPO="ClusterM/wg-obfuscator"
 WGO_DIR="/opt/wg-obfuscator"
@@ -17,7 +16,7 @@ WGO_UNIT_TPL="/etc/systemd/system/wgobfs-eli@.service"
 WGO_CLIENT_LPORT=3333
 
 # - метка для разрыва петли маршрутизации у клиента с AllowedIPs = 0.0.0.0/0 -
-# - парсер апстрима режет марку до uint16, поэтому 0xdead, а не наши 32-битные марки -
+# - парсер обфускатора режет марку до uint16, поэтому 0xdead, а не 32-битные марки -
 WGO_CLIENT_FWMARK="0xdead"
 
 # - результат _wgo_ensure_vanilla, stdout занят интерактивом awg_create_iface -
@@ -79,7 +78,7 @@ _wgo_env_val() {
 }
 
 # --> WGO: ИНТЕРФЕЙС VANILLA? <--
-# - is_obfuscated() апстрима считает пакет обфусцированным, если первые 4 байта не в 1..4 -
+# - обфускатор считает пакет обфусцированным, если первые 4 байта не в 1..4 -
 # - AWG с H1-H4 туда не попадает, обфускатор его "деобфусцирует" и выдаст мусор -
 _wgo_iface_is_vanilla() {
     [[ "$(_wgo_env_val "$1" "AWG_VERSION")" == "wg" ]]
@@ -131,7 +130,7 @@ _wgo_install_prereq() {
 }
 
 # --> WGO: BUILD-ТУЛЧЕЙН <--
-# - апстрим без внешних библиотек, хватает make и gcc -
+# - внешних библиотек нет, хватает make и gcc -
 _wgo_install_buildtools() {
     print_warn "Готового бинаря под эту архитектуру нет -> ставим make и gcc"
     export DEBIAN_FRONTEND=noninteractive
@@ -213,9 +212,22 @@ _wgo_fetch_binary() {
         print_err "Бинарь wg-obfuscator не получен"
         rm -rf "$tmp"; return 1
     fi
-    cp -a "$src" "$WGO_BIN"
+    # - живые инстансы держат текст бинаря: замена без остановки -
+    # - провалится с ETXTBSY, остановленные возвращаются на место -
+    local u
+    local stopped=()
+    for u in $(_wgo_bound_list); do
+        systemctl stop "$(_wgo_unit "$u")" 2>/dev/null && stopped+=("$u")
+    done
+    if ! cp -a "$src" "$WGO_BIN" || ! cmp -s "$src" "$WGO_BIN"; then
+        print_err "Бинарь ${WGO_BIN} не заменён (занят процессом или нет места)"
+        rm -rf "$tmp"
+        for u in "${stopped[@]}"; do systemctl start "$(_wgo_unit "$u")" 2>/dev/null; done
+        return 1
+    fi
     chmod 755 "$WGO_BIN"
     rm -rf "$tmp"
+    for u in "${stopped[@]}"; do systemctl start "$(_wgo_unit "$u")" 2>/dev/null; done
 
     # - проверка запуска: --help единственный безопасный пробник, --version не существует -
     if ! "$WGO_BIN" --help 2>&1 | grep -q "WireGuard Obfuscator"; then
@@ -227,10 +239,9 @@ _wgo_fetch_binary() {
 }
 
 # --> WGO: SYSTEMD ШАБЛОН <--
-# - один юнит на интерфейс. Мультисекционный конфиг апстрима форкается на каждой секции -
-# - и systemd видит только родителя: упавшего ребёнка никто не поднимет -
-# - StartLimit обязателен: неизвестный ключ в конфиге = exit(1), иначе вечный рестарт-луп -
-# - fwmark и SO_MARK требуют CAP_NET_ADMIN, привилегии обфускатор не сбрасывает -
+# - один юнит на интерфейс: мультисекционный конфиг форкается, systemd видит только -
+# - родителя - упавшего ребёнка никто не поднимет; StartLimit обязателен (неизвестный -
+# - ключ = exit(1), иначе вечный рестарт-луп); fwmark и SO_MARK требуют CAP_NET_ADMIN -
 _wgo_write_unit_template() {
     cat > "$WGO_UNIT_TPL" << EOF
 [Unit]
@@ -256,11 +267,9 @@ EOF
 }
 
 # --> WGO: ЗАПИСЬ КОНФИГА ИНСТАНСА <--
-# - ровно одна секция на файл: множественные секции апстрим разводит через fork() -
-# - только ключи из options[] апстрима; неизвестный ключ роняет процесс на старте -
-# - штатный wg-obfuscator.conf апстрима как шаблон не годится: в нём max-dummy-length-data, -
-# - которого парсер не знает (спасает только то, что строка закомментирована) -
-# - verbose принимает error|warn|info|debug|trace или 0-4, ERRORS/WARNINGS не понимает -
+# - ровно одна секция на файл (иначе fork()), только известные парсеру ключи: -
+# - неизвестный роняет процесс на старте; штатный wg-obfuscator.conf шаблоном -
+# - не годится (max-dummy-length-data парсер не знает); verbose: error|warn|info|debug|trace или 0-4 -
 _wgo_write_conf() {
     local iface="$1" lport="$2" target="$3" key="$4" masking="$5" conf
     conf=$(_wgo_conf "$iface")
@@ -292,11 +301,10 @@ _wgo_verify_active() {
 }
 
 # --> WGO: ЗАКРЫТИЕ ПОРТА VANILLA-AWG СНАРУЖИ <--
-# - весь смысл модуля в том, чтобы наружу не торчал голый WireGuard -
-# - bind на loopback не сделать: у WireGuard нет опции адреса прослушивания -
-# - основной путь: UFW с дефолтом deny incoming, allow-правила на порт просто нет -
-# - запасной: DROP в PostUp/PostDown конфига интерфейса, живёт и умирает вместе с ним -
-_wgo_lock_awg_port() {
+# - весь смысл модуля: наружу не торчит голый WireGuard; bind на loopback невозможен -
+# - (у WireGuard нет опции адреса); основной путь - UFW с дефолтом deny incoming без -
+# - allow на порт; запасной - DROP в PostUp/PostDown, живёт и умирает с интерфейсом -
+wgo_lock_awg_port() {
     local iface="$1" port="$2" wan conf tmp up down
     conf=$(awg_iface_conf "$iface")
 
@@ -331,6 +339,9 @@ _wgo_lock_awg_port() {
         iptables -C INPUT -i "$wan" -p udp --dport "$port" -j DROP 2>/dev/null || \
             iptables -I INPUT -i "$wan" -p udp --dport "$port" -j DROP 2>/dev/null
         if ! iptables -C INPUT -i "$wan" -p udp --dport "$port" -j DROP 2>/dev/null; then
+            # - правило не встало: запись снимаем, иначе ближайший рестарт интерфейса -
+            # - применит её и закроет порт туннеля снаружи молча -
+            wgo_unlock_awg_port "$iface" "$port"
             print_err "Правило DROP не применилось, порт ${port}/udp остался бы открыт"
             return 1
         fi
@@ -346,7 +357,7 @@ _wgo_lock_awg_port() {
 }
 
 # --> WGO: СНЯТИЕ ЗАПАСНОГО ПРАВИЛА <--
-_wgo_unlock_awg_port() {
+wgo_unlock_awg_port() {
     local iface="$1" port="$2" wan conf tmp
     wan=$(_wgo_wan_iface)
     conf=$(awg_iface_conf "$iface")
@@ -359,6 +370,36 @@ _wgo_unlock_awg_port() {
     while iptables -C INPUT -i "$wan" -p udp --dport "$port" -j DROP 2>/dev/null; do
         iptables -D INPUT -i "$wan" -p udp --dport "$port" -j DROP 2>/dev/null || break
     done
+    return 0
+}
+
+# --> WGO: ПРИВЯЗКА ИНТЕРФЕЙСА ЕСТЬ? <--
+# - привязка = существует конфиг инстанса на диске -
+wgo_iface_bound() {
+    [[ -f "$(_wgo_conf "$1")" ]]
+}
+
+# --> WGO: ПЕРЕЕЗД ЦЕЛИ ИНСТАНСА НА НОВЫЙ ПОРТ AWG <--
+# - цель переписывается на новый порт и перечитывается рестартом; запасное -
+# - правило старого порта снимается после подтверждённого переезда -
+wgo_retarget() {
+    local iface="$1" old_port="$2" new_port="$3" conf unit tmp
+    conf=$(_wgo_conf "$iface")
+    [[ -f "$conf" ]] || { print_err "Конфиг инстанса ${iface} не найден"; return 1; }
+    tmp=$(mktemp) || return 1
+    if ! sed "s|^target = .*|target = 127.0.0.1:${new_port}|" "$conf" > "$tmp" || ! [[ -s "$tmp" ]]; then
+        rm -f "$tmp"
+        print_err "Цель инстанса ${iface} не переписалась"
+        return 1
+    fi
+    mv "$tmp" "$conf"
+    chmod 600 "$conf"
+    eli_fact_line "$conf" "^target = 127[.]0[.]0[.]1:${new_port}$" "Цель инстанса ${iface}" || return 1
+    book_write ".wgobfs.instances.\"${iface}\".target" "127.0.0.1:${new_port}"
+    unit=$(_wgo_unit "$iface")
+    systemctl restart "$unit" 2>/dev/null
+    _wgo_verify_active "$iface" || return 1
+    wgo_unlock_awg_port "$iface" "$old_port"
     return 0
 }
 
@@ -479,18 +520,26 @@ _wgo_fix_client() {
     [[ -f "$cconf" ]] || return 0
     cdir=$(dirname "$cconf")
 
+    # - конфиг обфускатора собирается первым: клиент не должен остаться -
+    # - с Endpoint на несуществующий локальный обфускатор -
+    if ! _wgo_client_obfconf "$iface" "${cdir}/wg-obfuscator.conf"; then
+        print_warn "Конфиг обфускатора для клиента не собран: нет данных в книге"
+        print_info "client.conf не переписан, Endpoint остался прямым"
+        return 1
+    fi
     sed -i "s|^Endpoint = .*|Endpoint = 127.0.0.1:${WGO_CLIENT_LPORT}|" "$cconf"
+    # - факт: Endpoint переписан; иначе клиент остаётся с прямым адресом, -
+    # - а порт туннеля после привязки закрыт -
+    if ! eli_fact_line "$cconf" "^Endpoint = 127[.]0[.]0[.]1:${WGO_CLIENT_LPORT}$" "Endpoint клиента"; then
+        print_info "Его конфиг обфускатора собран, но client.conf не переписан"
+        return 1
+    fi
     if grep -q '^AllowedIPs = .*0\.0\.0\.0/0' "$cconf" && ! grep -q '^FwMark = ' "$cconf"; then
         sed -i "/^\[Interface\]/a FwMark = ${WGO_CLIENT_FWMARK}" "$cconf"
     fi
     chmod 600 "$cconf"
-
-    if _wgo_client_obfconf "$iface" "${cdir}/wg-obfuscator.conf"; then
-        print_info "Интерфейс за обфускатором: Endpoint переписан на 127.0.0.1:${WGO_CLIENT_LPORT}"
-        print_info "Комплект клиента: ${cdir} (client.conf + wg-obfuscator.conf)"
-    else
-        print_warn "Конфиг обфускатора для клиента не собран: нет данных в книге"
-    fi
+    print_info "Интерфейс за обфускатором: Endpoint переписан на 127.0.0.1:${WGO_CLIENT_LPORT}"
+    print_info "Комплект клиента: ${cdir} (client.conf + wg-obfuscator.conf)"
     return 0
 }
 
@@ -625,7 +674,7 @@ wgo_bind_iface() {
         ask "Порт обфускатора" "$def_port" lport
         if ! validate_port "$lport"; then print_err "Порт 1-65535"; continue; fi
         if [[ "$lport" == "$awg_port" ]]; then print_err "Порт занят самим ${iface}"; continue; fi
-        if ss -H -uln 2>/dev/null | grep -Eq "[:.]${lport}[[:space:]]"; then print_warn "Порт занят"; continue; fi
+        if eli_port_busy "$lport" udp; then print_warn "Порт занят"; continue; fi
         break
     done
 
@@ -657,7 +706,10 @@ wgo_bind_iface() {
     done
 
     # - порт AWG наружу закрываем ДО подъёма обфускатора: иначе окно с голым WG наружу -
-    _wgo_lock_awg_port "$iface" "$awg_port" || {
+    # - снятое allow помним: откат возвращает состояние "не за обфускатором" -
+    local had_allow=""
+    command -v ufw &>/dev/null && _ufw_has_rule "$awg_port" "udp" && had_allow="yes"
+    wgo_lock_awg_port "$iface" "$awg_port" || {
         print_err "Не удалось закрыть порт ${awg_port}/udp -> привязка отменена"
         return 1
     }
@@ -676,7 +728,9 @@ wgo_bind_iface() {
         systemctl disable --now "$unit" 2>/dev/null
         rm -f "$(_wgo_conf "$iface")"
         command -v ufw &>/dev/null && ufw delete allow "${lport}/udp" >/dev/null 2>&1
-        _wgo_unlock_awg_port "$iface" "$awg_port"
+        wgo_unlock_awg_port "$iface" "$awg_port"
+        [[ -n "$had_allow" ]] && command -v ufw &>/dev/null && \
+            ufw allow "${awg_port}/udp" comment "AWG ${iface}" >/dev/null 2>&1
         print_err "Привязка отменена -> инстанс не стартовал"
         return 1
     fi
@@ -685,15 +739,23 @@ wgo_bind_iface() {
     book_write ".wgobfs.installed" "true" bool
     print_ok "Обфускатор для ${iface} запущен: ${lport}/udp -> 127.0.0.1:${awg_port}"
 
-    # - существующие клиенты этого интерфейса переезжают на локальный Endpoint -
-    local c cdir n=0
+    # - существующие клиенты этого интерфейса переезжают на локальный Endpoint; -
+    # - в сводку идут только подтверждённые перезаписи, отказ хука считаем отдельно -
+    local c cdir n=0 fail=0
     for c in $(awg_get_client_list "$iface"); do
         cdir="$(awg_iface_clients "$iface")/${c}"
         [[ -f "${cdir}/client.conf" ]] || continue
-        _wgo_fix_client "$iface" "${cdir}/client.conf" >/dev/null
-        n=$(( n + 1 ))
+        if _wgo_fix_client "$iface" "${cdir}/client.conf"; then
+            n=$(( n + 1 ))
+        else
+            fail=$(( fail + 1 ))
+        fi
     done
-    [[ $n -gt 0 ]] && print_ok "Переписаны конфиги существующих клиентов: ${n}"
+    [[ $(( n + fail )) -gt 0 ]] && print_ok "Переписаны конфиги существующих клиентов: ${n} из $(( n + fail ))"
+    if [[ $fail -gt 0 ]]; then
+        print_warn "Клиенты с прямым Endpoint: ${fail} (порт туннеля после привязки закрыт)"
+        print_info "Пересобери их конфиги: управление -> Клиентский комплект"
+    fi
 
     echo ""
     print_info "Комплект клиента забирается через управление -> Клиентский комплект."
@@ -739,8 +801,12 @@ wgo_client_kit() {
     cdir="$(awg_iface_clients "$iface")/${name}"
     [[ -f "${cdir}/client.conf" ]] || { print_err "Конфиг клиента не найден"; return 1; }
 
-    # - конфиги могли устареть, пересобираем перед выдачей -
-    _wgo_fix_client "$iface" "${cdir}/client.conf" >/dev/null
+    # - конфиги могли устареть, пересобираем перед выдачей; без собранного -
+    # - конфига обфускатора комплект не выдаётся -
+    if ! _wgo_fix_client "$iface" "${cdir}/client.conf"; then
+        print_err "Комплект не собран: конфиг обфускатора для клиента не выходит"
+        return 1
+    fi
 
     local tmp kit
     tmp=$(mktemp -d) || { print_err "mktemp failed"; return 1; }
@@ -757,7 +823,15 @@ wgo_client_kit() {
     _wgo_kit_readme "$iface" "$name" "${kit}/README.txt"
 
     local tarball="${WGO_ELI_DIR}/${iface}-${name}-wgobfs.tar.gz"
-    tar -czf "$tarball" -C "$tmp" "$(basename "$kit")" 2>/dev/null
+    # - факт сборки: код tar, непустой и читаемый архив; усечённый комплект -
+    # - клиенту не отдаём -
+    if ! tar -czf "$tarball" -C "$tmp" "$(basename "$kit")" 2>/dev/null \
+        || [[ ! -s "$tarball" ]] || ! tar -tzf "$tarball" >/dev/null 2>&1; then
+        print_err "Комплект не собран: архив не создан (${tarball})"
+        print_info "Проверь место на диске и права каталога ${WGO_ELI_DIR}"
+        rm -rf "$tmp"
+        return 1
+    fi
     chmod 600 "$tarball"
     rm -rf "$tmp"
 
@@ -877,7 +951,7 @@ wgo_test() {
             print_err "  инстанс не активен: journalctl -u ${unit} -n 20 --no-pager"
         fi
 
-        if ss -H -uln 2>/dev/null | grep -Eq "[:.]${lport}[[:space:]]"; then
+        if eli_port_busy "$lport" udp; then
             print_ok "  слушает ${lport}/udp"
         else
             print_err "  порт ${lport}/udp не слушается"
@@ -960,6 +1034,22 @@ wgo_update() {
     return 0
 }
 
+# --> WGO: СНЯТИЕ ПРИВЯЗКИ БЕЗ ВОПРОСОВ <--
+# - юнит, конфиг, UFW-порт обфускатора, запасное правило AWG и запись -
+# - книги: интерфейс без инстанса - пустой ход -
+wgo_detach() {
+    local iface="$1" lport awg_port
+    [[ -f "$(_wgo_conf "$iface")" ]] || return 0
+    lport=$(book_read ".wgobfs.instances.\"${iface}\".lport")
+    awg_port=$(_wgo_iface_port "$iface")
+    systemctl disable --now "$(_wgo_unit "$iface")" 2>/dev/null
+    rm -f "$(_wgo_conf "$iface")"
+    [[ -n "$lport" ]] && command -v ufw &>/dev/null && ufw delete allow "${lport}/udp" >/dev/null 2>&1
+    [[ -n "$awg_port" ]] && wgo_unlock_awg_port "$iface" "$awg_port"
+    book_del ".wgobfs.instances.\"${iface}\""
+    return 0
+}
+
 # --> WGO: ОТВЯЗКА ОТ ИНТЕРФЕЙСА <--
 # - клиенты возвращаются на прямой Endpoint, порт AWG открывается обратно -
 wgo_unbind() {
@@ -981,14 +1071,10 @@ wgo_unbind() {
     ask_yn "Отвязать ${iface}?" "n" confirm
     [[ "$confirm" != "yes" ]] && return 0
 
-    local lport awg_port c cdir
-    lport=$(book_read ".wgobfs.instances.\"${iface}\".lport")
+    local awg_port c cdir
     awg_port=$(_wgo_iface_port "$iface")
 
-    systemctl disable --now "$(_wgo_unit "$iface")" 2>/dev/null
-    rm -f "$(_wgo_conf "$iface")"
-    [[ -n "$lport" ]] && command -v ufw &>/dev/null && ufw delete allow "${lport}/udp" >/dev/null 2>&1
-    [[ -n "$awg_port" ]] && _wgo_unlock_awg_port "$iface" "$awg_port"
+    wgo_detach "$iface"
 
     for c in $(awg_get_client_list "$iface"); do
         cdir="$(awg_iface_clients "$iface")/${c}"
@@ -1001,7 +1087,6 @@ wgo_unbind() {
         [[ "$reopen" == "yes" ]] && ufw allow "${awg_port}/udp" comment "AWG ${iface}" 2>/dev/null
     fi
 
-    book_del ".wgobfs.instances.\"${iface}\""
     print_ok "Обфускатор отвязан от ${iface}"
     print_info "Раздай клиентам конфиги заново: меню AmneziaWG -> Показать конфиг клиента."
     return 0
@@ -1022,7 +1107,7 @@ wgo_remove() {
         awg_port=$(_wgo_iface_port "$iface")
         systemctl disable --now "$(_wgo_unit "$iface")" 2>/dev/null
         [[ -n "$lport" ]] && command -v ufw &>/dev/null && ufw delete allow "${lport}/udp" >/dev/null 2>&1
-        [[ -n "$awg_port" ]] && _wgo_unlock_awg_port "$iface" "$awg_port"
+        [[ -n "$awg_port" ]] && wgo_unlock_awg_port "$iface" "$awg_port"
         for c in $(awg_get_client_list "$iface"); do
             cdir="$(awg_iface_clients "$iface")/${c}"
             _wgo_unfix_client "$iface" "${cdir}/client.conf"

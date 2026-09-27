@@ -15,7 +15,37 @@ otl_get_api_url() {
     grep -oP '"apiUrl":\s*"\K[^"]+' "$OTL_KEY" | head -1
 }
 
+# --> OUTLINE: ВЫЗОВ API <--
+# - URL с ключом живёт в конфиг-файле (600) и подаётся curl через -K: в argv ключа нет -
+# - сертификат сверяется с отпечатком установки, несовпадение останавливает вызов -
+_otl_api() {
+    local url="$1"; shift
+    local cert_sha hostport
+    cert_sha=$(jq -r '.certSha256 // empty' "$OTL_KEY" 2>/dev/null)
+    hostport=$(printf '%s' "$url" | grep -oP '://\K[^/]+')
+    if [[ -n "$cert_sha" && -n "$hostport" ]]; then
+        local fp want
+        fp=$(echo | timeout 8 openssl s_client -connect "$hostport" 2>/dev/null \
+            | openssl x509 -noout -fingerprint -sha256 2>/dev/null \
+            | cut -d= -f2 | tr -d ':' | tr 'A-F' 'a-f')
+        want=$(printf '%s' "$cert_sha" | tr -d ':' | tr 'A-F' 'a-f')
+        if [[ -n "$fp" && "$fp" != "$want" ]]; then
+            print_err "Сертификат ${hostport} не совпал с отпечатком установки"
+            return 1
+        fi
+        [[ -z "$fp" ]] && print_warn "Сертификат ${hostport} не сверен (отпечаток получить не удалось)"
+    fi
+    local cfg rc=0
+    cfg="${OTL_KEY}.curl"
+    printf 'url = "%s"\n' "$url" > "$cfg" || { print_err "Не удалось создать конфиг curl"; return 1; }
+    chmod 600 "$cfg"
+    curl -fsk --connect-timeout 5 -K "$cfg" "$@" || rc=$?
+    rm -f "$cfg"
+    return "$rc"
+}
+
 otl_install() {
+    local i pkg
     print_section "Установка Outline"
     if otl_installed 2>/dev/null; then
         print_warn "Outline уже установлен"; return 0
@@ -34,12 +64,15 @@ otl_install() {
         validate_ip "$server_ip" && break; print_err "Некорректный IP"
     done
 
-    local api_port
+    local api_port _listen
     api_port=$(rand_port)
     while true; do
         echo -e "  ${CYAN}Порт для управления Outline (через него работает Outline Manager). Случайный порт безопаснее.${NC}"
         ask "Порт management API" "$api_port" api_port
-        validate_port "$api_port" && ! ss -tlnp 2>/dev/null | grep -q ":${api_port} " && break
+        # - вывод ss читается строкой: в конвейере grep -q обрывает поток и -
+        # - под pipefail исход 141 переворачивает вердикт занятости -
+        _listen=$(ss -tlnp 2>/dev/null || true)
+        if validate_port "$api_port" && [[ "$_listen" != *":${api_port} "* ]]; then break; fi
         print_err "Порт некорректен или занят"
     done
 
@@ -47,7 +80,7 @@ otl_install() {
     # - уникальный лог на каждый запуск, иначЕ tail -1 может вытащить apiUrl прошлой битой установки -
     local install_log
     install_log=$(mktemp /tmp/outline-install-XXXXXX.log)
-    print_info "Запуск установщика OutlineFoundation... (лог: ${install_log})"
+    print_info "Запуск установщика OutlineFoundation... (вывод ниже)"
 
     # - синхронный pipe: tee в одну ветку, stderr слит в stdout -
     # - фоновый tee мог не сбросить последнюю строку с apiUrl к моменту grep ниже, -
@@ -62,8 +95,9 @@ otl_install() {
     local api_json
     api_json=$(grep -oP '\{"apiUrl":"[^"]*","certSha256":"[^"]*"\}' "$install_log" | tail -1 || true)
     if [[ -z "$api_json" ]]; then
-        print_err "Не удалось извлечь apiUrl из лога"
-        print_info "Лог: ${install_log}"
+        # - лог хранит ключ Manager: он не остаётся ни при успехе, ни при провале -
+        rm -f "$install_log"
+        print_err "Не удалось извлечь apiUrl из вывода установщика (лог удалён: в нём ключ)"
         return 1
     fi
     local api_url cert_sha
@@ -74,13 +108,22 @@ otl_install() {
 {"apiUrl":"${api_url}","certSha256":"${cert_sha}","serverIp":"${server_ip}","apiPort":"${api_port}"}
 EOF
     chmod 600 "$OTL_KEY"
+    rm -f "$install_log"
     print_ok "Ключ сохранён: ${OTL_KEY}"
 
-    # - ждём запуска контейнера -
-    for i in $(seq 1 15); do
-        docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^shadowbox$" && break
-        (( i < 15 )) && sleep 2
+    # - запуск контейнера подтверждается опросом: упавший контейнер не даёт -
+    # - считать установку состоявшейся и писать её в книгу -
+    local _up=0 _i _names
+    for _i in $(seq 1 15); do
+        _names=$(docker ps --format '{{.Names}}' 2>/dev/null || true)
+        [[ "$_names" == *shadowbox* ]] && { _up=1; break; }
+        (( _i < 15 )) && sleep 2
     done
+    if (( _up == 0 )); then
+        print_err "Контейнер shadowbox не поднялся: docker logs shadowbox"
+        print_info "Ключ Manager оставлен: ${OTL_KEY}; состояние в книгу не записано"
+        return 1
+    fi
 
     local mgmt_port keys_port
     mgmt_port=$(echo "$api_url" | grep -oP ':\K[0-9]+(?=/)' || echo "$api_port")
@@ -92,7 +135,7 @@ EOF
     while [[ -z "$keys_port" ]] && (( kp_tries < 30 )); do
         [[ -f "$sbconf" ]] && keys_port=$(jq -r '.accessKeys[0].port // empty' "$sbconf" 2>/dev/null || true)
         if [[ -z "$keys_port" ]]; then
-            keys_port=$(curl -fsk --connect-timeout 5 "${api_url}/server" 2>/dev/null \
+            keys_port=$(_otl_api "${api_url}/server" 2>/dev/null \
                 | grep -oP '"portForNewAccessKeys":\s*\K[0-9]+' || true)
         fi
         [[ -n "$keys_port" ]] && break
@@ -163,7 +206,7 @@ otl_show_status() {
         print_info "IP: ${server_ip:-?}, API: ${api_port:-?}, Keys: ${keys_port:-?}"
     fi
     local api_url; api_url=$(otl_get_api_url 2>/dev/null || echo "")
-    if [[ -n "$api_url" ]] && curl -fsk --connect-timeout 5 "${api_url}/access-keys" >/dev/null 2>&1; then
+    if [[ -n "$api_url" ]] && _otl_api "${api_url}/access-keys" >/dev/null 2>&1; then
         print_ok "API отвечает"
     elif [[ -n "$api_url" ]]; then
         print_err "API не отвечает"
@@ -186,7 +229,7 @@ otl_show_keys() {
     local api_url; api_url=$(otl_get_api_url 2>/dev/null || echo "")
     [[ -z "$api_url" ]] && { print_err "apiUrl не найден"; return 0; }
     local result
-    result=$(curl -fsk --connect-timeout 5 "${api_url}/access-keys" 2>/dev/null || echo "")
+    result=$(_otl_api "${api_url}/access-keys" 2>/dev/null || echo "")
     if ! echo "$result" | grep -q '"accessKeys"'; then
         print_err "API не ответил"; return 0
     fi
@@ -206,7 +249,7 @@ otl_add_key() {
     echo -e "  ${CYAN}Имя ключа - для кого этот ключ (например: мама, коллега-Вася). Можно оставить пустым.${NC}"
     ask_raw "$(printf '  \033[1mИмя ключа:\033[0m ')" key_name
     local result
-    result=$(curl -fsk --connect-timeout 5 -X POST "${api_url}/access-keys" 2>/dev/null || echo "")
+    result=$(_otl_api "${api_url}/access-keys" -X POST 2>/dev/null || echo "")
     if ! echo "$result" | grep -q '"id"'; then
         print_err "Не удалось создать ключ"; return 0
     fi
@@ -220,8 +263,9 @@ otl_add_key() {
         # - сырое тело "{\"name\":\"${key_name}\"}" ломается если name содержит " или \ -
         local name_json status
         name_json=$(jq -nc --arg n "$key_name" '{name: $n}' 2>/dev/null || echo "{}")
-        status=$(curl -fsk -o /dev/null -w "%{http_code}" \
-            -X PUT "${api_url}/access-keys/${key_id}/name" \
+        status=$(_otl_api "${api_url}/access-keys/${key_id}/name" \
+            -o /dev/null -w "%{http_code}" \
+            -X PUT \
             -H "Content-Type: application/json" \
             -d "$name_json" 2>/dev/null || echo "000")
         [[ "$status" == "204" || "$status" == "200" ]] && print_ok "Имя: ${key_name}" \
@@ -244,6 +288,14 @@ otl_reinstall() {
     _otl_ufw_close
     rm -f "$OTL_KEY" "$OTL_ENV" 2>/dev/null || true
     rm -rf /opt/outline 2>/dev/null || true
+    # - перед установкой снос подтверждается: остатки контейнера или каталога -
+    # - исказят новую установку -
+    local _left=""
+    _left=$(docker ps -a --format '{{.Names}}' 2>/dev/null || true)
+    if [[ "$_left" == *shadowbox* || "$_left" == *watchtower* ]] || [[ -e /opt/outline ]]; then
+        print_err "Старая установка не снесена: переустановка отменена"
+        return 1
+    fi
     print_ok "Старая установка удалена"
     otl_install
 }
@@ -281,6 +333,16 @@ otl_delete() {
     _otl_ufw_close
     rm -rf "$OTL_DIR" 2>/dev/null || true
     rm -rf /opt/outline 2>/dev/null || true
+    # - логи прежних установок хранят ключ Manager: при удалении не остаются -
+    rm -f /tmp/outline-install-*.log 2>/dev/null || true
+    # - снос подтверждается: контейнеров нет и каталоги не на месте, иначе -
+    # - книга не переводится в "снято" -
+    local _left=""
+    _left=$(docker ps -a --format '{{.Names}}' 2>/dev/null || true)
+    if [[ "$_left" == *shadowbox* || "$_left" == *watchtower* ]] || [[ -e "$OTL_DIR" || -e /opt/outline ]]; then
+        print_err "Удаление не завершено: проверь docker ps -a и ${OTL_DIR}"
+        return 1
+    fi
     book_write ".outline.installed" "false" bool
     book_write ".outline.server_ip" ""
     book_write ".outline.api_url" ""

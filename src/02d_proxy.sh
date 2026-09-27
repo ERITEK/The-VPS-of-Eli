@@ -1,8 +1,6 @@
 # --> МОДУЛЬ: ПРОКСИ <--
-# - MTProto (Telegram) на mtg, мультиинстанс (один секрет на инстанс) -
-# - SOCKS5 мультиинстанс -
-# - Hysteria 2 мультиинстанс + мультиюзер (userpass) -
-# - Signal TLS Proxy -
+# - MTProto на mtg (секрет на инстанс), SOCKS5, Hysteria 2 (мультиюзер userpass): -
+# - мультиинстанс; Signal TLS Proxy -
 
 # --> ОБЩИЕ ПЕРЕМЕННЫЕ <--
 MTP_DIR="/etc/mtproto"
@@ -11,11 +9,12 @@ HY2_DIR="/etc/hysteria"
 HY2_BIN="/usr/local/bin/hysteria"
 SIG_ENV="/etc/signal-proxy/signal.env"
 SIG_DIR="/opt/signal-proxy"
+# - ожидаемое число контейнеров: nginx-terminate, nginx-relay, certbot -
+SIG_EXPECT=3
 
 # --> MTPROTO PROXY (TELEGRAM) - МУЛЬТИИНСТАНС <--
-# - образ: nineseconds/mtg:2 (актуальный mtg) -
-# - один инстанс = один секрет (mtg без мультисекрета) -
-# - секрет содержит в себе домен (генерится mtg generate-secret --hex DOMAIN) -
+# - образ nineseconds/mtg:2; один инстанс = один секрет (mtg без мультисекрета), -
+# - секрет несёт домен (mtg generate-secret --hex DOMAIN) -
 
 MTG_IMAGE="nineseconds/mtg:2"
 
@@ -105,7 +104,7 @@ mtp_add() {
         ask "Порт" "$port" port
         if ! validate_port "$port"; then print_err "Порт 1-65535"; continue; fi
         # - MTProto слушает TCP: тот же номер на UDP (например Hysteria) не мешает -
-        if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+        if eli_port_busy "$port" tcp; then
             print_warn "Порт ${port} занят"; continue
         fi
         break
@@ -184,6 +183,7 @@ TOMLEOF
 
 # --> MTPROTO: СПИСОК <--
 mtp_list() {
+    local envf
     print_section "MTProto Proxy - список"
     local found=0
     for envf in "${MTP_DIR}"/instance_*.env; do
@@ -288,7 +288,7 @@ s5_add() {
         echo -e "  ${CYAN}TCP порт для SOCKS5 прокси (1-65535). Случайный сгенерирован автоматически.${NC}"
         ask "Порт SOCKS5" "$port" port
         if ! validate_port "$port"; then print_err "Порт 1-65535"; continue; fi
-        if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+        if eli_port_busy "$port" tcp; then
             print_warn "Порт ${port} занят"; continue
         fi
         break
@@ -309,16 +309,23 @@ s5_add() {
 
     # - запуск -
     print_section "Запуск SOCKS5 #${inst_id}"
+    # - логин и пароль уходят в env-файл (600) и подаются --env-file: -
+    # - в командной строке контейнера секрета нет -
+    local denv
+    denv=$(mktemp) || { print_err "Не удалось создать env-файл"; return 1; }
+    chmod 600 "$denv"
+    printf 'PROXY_USER=%s\nPROXY_PASSWORD=%s\n' "$user" "$pass" > "$denv"
     if ! docker run -d \
         --name "${container}" \
         --restart always \
         -p "${port}:1080" \
-        -e "PROXY_USER=${user}" \
-        -e "PROXY_PASSWORD=${pass}" \
+        --env-file "$denv" \
         serjs/go-socks5-proxy:v0.0.4; then
+        rm -f "$denv"
         print_err "Не удалось запустить контейнер"
         return 1
     fi
+    rm -f "$denv"
     sleep 2
 
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${container}$"; then
@@ -367,6 +374,7 @@ S5EOF
 
 # --> SOCKS5: СПИСОК <--
 s5_list() {
+    local envf
     print_section "SOCKS5 Proxy - список"
     local found=0
     for envf in "${S5_DIR}"/instance_*.env; do
@@ -562,12 +570,20 @@ HY2UNIT
     systemctl daemon-reload
     systemctl enable "hysteria-1" 2>/dev/null || true
     systemctl start "hysteria-1" 2>/dev/null || true
+    # - факт: новый инстанс держится; legacy-юнит к этому моменту уже снят, -
+    # - поэтому провал старта показывается отдельно, а успех не печатается -
+    if ! eli_fact_unit "hysteria-1"; then
+        print_err "Инстанс hysteria-1 не поднялся: миграция не завершена"
+        print_info "Конфиг и users.list перенесены в ${idir}, legacy-юнит снят"
+        return 1
+    fi
     print_ok "Миграция: legacy -> instance_1 (admin:${auth_pass})"
     return 0
 }
 
 # - выбор инстанса (хелпер) -
 _hy2_select_instance() {
+    local d
     local dirs=()
     for d in "${HY2_DIR}"/instance_*/; do [[ -d "$d" ]] && dirs+=("$d"); done
     [[ ${#dirs[@]} -eq 0 ]] && { print_warn "Hysteria 2 не установлен" >&2; echo ""; return; }
@@ -594,15 +610,29 @@ hy2_add() {
     print_section "Добавить инстанс Hysteria 2"
     _hy2_migrate_legacy
 
-    if [[ ! -f "$HY2_BIN" ]]; then
+    # - движок признаётся по исполняемому файлу: обрыв загрузки оставляет -
+    # - частичный файл, запускать его нельзя -
+    if [[ ! -x "$HY2_BIN" ]]; then
         print_info "Скачиваю Hysteria 2..."
         local arch="amd64"; [[ "$(uname -m)" == "aarch64" ]] && arch="arm64"
         local dl_url
         dl_url=$(eli_github_fetch "https://api.github.com/repos/apernet/hysteria/releases/latest" \
             | jq -r ".assets[] | select(.name | test(\"hysteria-linux-${arch}$\")) | .browser_download_url" 2>/dev/null)
         [[ -z "$dl_url" ]] && { print_err "Ссылка на релиз Hysteria 2: $(eli_github_reason)"; return 1; }
-        curl -fsSL -o "$HY2_BIN" "$dl_url" || { print_err "Не скачал"; return 1; }
-        chmod +x "$HY2_BIN"
+        # - загрузка рядом с целью: бинарь подменяется только после проверки -
+        local dl_tmp="${HY2_BIN}.part.$$"
+        if ! curl -fsSL -o "$dl_tmp" "$dl_url" || [[ ! -s "$dl_tmp" ]]; then
+            rm -f "$dl_tmp"
+            print_err "Не скачал"
+            return 1
+        fi
+        chmod 755 "$dl_tmp"
+        if ! "$dl_tmp" version >/dev/null 2>&1; then
+            rm -f "$dl_tmp"
+            print_err "Скачанный бинарь не запускается: образец не для этой системы?"
+            return 1
+        fi
+        mv "$dl_tmp" "$HY2_BIN" || { rm -f "$dl_tmp"; print_err "Не удалось заменить ${HY2_BIN}"; return 1; }
     fi
     # - версия лежит в баннере, который бинарь печатает о stderr, первой строкой пусто -
     local hy2_ver
@@ -620,29 +650,60 @@ hy2_add() {
         ask "UDP порт" "$port" port
         if ! validate_port "$port"; then print_err "1-65535"; continue; fi
         # - Hysteria слушает UDP: TCP на том же номере (например MTProto 443) не мешает -
-        if ss -ulnp 2>/dev/null | grep -q ":${port} "; then
+        if eli_port_busy "$port" udp; then
             print_warn "Порт ${port} занят"; continue
         fi
         break
     done
 
+    # - первый пользователь проходит те же проверки, что добавление через меню: -
+    # - ':' в имени и пароле рвёт разбор users.list, пробел и '#' ломают URI -
     local first_user="" first_pass=""
     first_pass=$(rand_str 24)
     echo -e "  ${CYAN}Первый пользователь. Ещё можно добавить через меню.${NC}"
-    ask "Имя" "admin" first_user
-    ask "Пароль" "$first_pass" first_pass
-    [[ -z "$first_user" || -z "$first_pass" ]] && { print_err "Имя и пароль обязательны"; return 1; }
+    while true; do
+        ask "Имя" "admin" first_user
+        if [[ -z "$first_user" ]]; then print_err "Обязательно"; continue; fi
+        if ! validate_name "$first_user"; then
+            print_err "Имя: только буквы, цифры, дефис, подчёркивание (без ':' и пробелов)"
+            continue
+        fi
+        break
+    done
+    while true; do
+        ask "Пароль" "$first_pass" first_pass
+        if [[ -z "$first_pass" ]]; then print_err "Обязательно"; continue; fi
+        if [[ "$first_pass" == *:* ]]; then
+            print_err "Пароль не должен содержать ':'"
+            continue
+        fi
+        if [[ "$first_pass" =~ [[:space:]] ]]; then
+            print_err "Пароль не должен содержать пробельных символов"
+            continue
+        fi
+        if [[ "$first_pass" == *"#"* ]]; then
+            print_err "Пароль не должен содержать '#' (обрывает ссылку)"
+            continue
+        fi
+        break
+    done
 
     local inst_id; inst_id=$(_hy2_next_id)
     local idir; idir=$(_hy2_inst_dir "$inst_id")
     local svc; svc=$(_hy2_service "$inst_id")
     mkdir -p "$idir"; chmod 700 "$idir"
+    # - откат раннего провала: каталог снимается, иначе номер инстанса -
+    # - сгорает - _hy2_next_id сканирует каталоги instance_* -
+    _hy2_rollback_new_instance() {
+        rm -rf "${idir:?}"
+        print_info "Инстанс #${inst_id} не собран, каталог снят, номер свободен"
+    }
 
     print_info "Генерация self-signed сертификата..."
     openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
         -keyout "${idir}/server.key" -out "${idir}/server.crt" \
         -subj "/CN=hy2-${inst_id}.local" -days 3650 2>/dev/null \
-        || { print_err "Ошибка сертификата"; return 1; }
+        || { print_err "Ошибка сертификата"; _hy2_rollback_new_instance; return 1; }
     chmod 600 "${idir}/server.key" "${idir}/server.crt"
 
     cat > "${idir}/hysteria.env" << HY2ENV
@@ -653,7 +714,11 @@ HY2ENV
     chmod 600 "${idir}/hysteria.env"
 
     echo "${first_user}:${first_pass}" > "${idir}/users.list"; chmod 600 "${idir}/users.list"
-    _hy2_gen_config "$inst_id" || return 1
+    if ! _hy2_gen_config "$inst_id"; then
+        print_err "Сборка конфига не удалась"
+        _hy2_rollback_new_instance
+        return 1
+    fi
 
     cat > "/etc/systemd/system/${svc}.service" << HY2UNIT
 [Unit]
@@ -670,8 +735,18 @@ WantedBy=multi-user.target
 HY2UNIT
     systemctl daemon-reload
     systemctl enable "$svc" 2>/dev/null; systemctl start "$svc"; sleep 2
-    systemctl is-active --quiet "$svc" && print_ok "Hysteria 2 #${inst_id} на UDP:${port}" \
-        || { print_err "Не запустился: journalctl -u ${svc} | tail -20"; return 1; }
+    if ! systemctl is-active --quiet "$svc"; then
+        print_err "Не запустился: journalctl -u ${svc} | tail -20"
+        # - провал старта: инстанс убирается целиком, иначе он числится -
+        # - в списке, печатает URI и занимает номер -
+        systemctl disable "$svc" 2>/dev/null || true
+        rm -f "/etc/systemd/system/${svc}.service"
+        systemctl daemon-reload
+        rm -rf "$idir"
+        print_warn "Инстанс #${inst_id} убран: каталог и юнит сняты"
+        return 1
+    fi
+    print_ok "Hysteria 2 #${inst_id} на UDP:${port}"
 
     command -v ufw &>/dev/null && { ufw allow "${port}/udp" comment "Hy2 #${inst_id}" 2>/dev/null || true; }
 
@@ -689,6 +764,7 @@ HY2UNIT
 
 # --> HY2: СПИСОК <--
 hy2_list() {
+    local idir
     print_section "Hysteria 2 - инстансы"
     _hy2_migrate_legacy
     local found=0
@@ -759,17 +835,32 @@ hy2_add_user() {
             print_err "Пароль не должен содержать пробельных символов"
             continue
         fi
+        # - '#' в URI открывает фрагмент: ссылка обрывается на нём -
+        if [[ "$upass" == *"#"* ]]; then
+            print_err "Пароль не должен содержать '#' (обрывает ссылку)"
+            continue
+        fi
         break
     done
 
     echo "${uname}:${upass}" >> "$uf"
+    # - факт: строка пользователя обязана появиться в списке -
+    if ! grep -qxF "${uname}:${upass}" "$uf"; then
+        print_err "Строка пользователя не записалась в ${uf}"
+        return 1
+    fi
     local count; count=$(wc -l < "$uf")
     print_ok "${uname} добавлен (#${inst_id}, всего: ${count})"
 
     _hy2_gen_config "$inst_id" || return 1
     local svc; svc=$(_hy2_service "$inst_id")
-    systemctl restart "$svc" 2>/dev/null; sleep 1
-    systemctl is-active --quiet "$svc" && print_ok "Перезапущен" || print_err "Не запустился"
+    systemctl restart "$svc" 2>/dev/null
+    # - факт: сервис перечитал список; без этого выданная ссылка не работает -
+    if ! eli_fact_unit "$svc"; then
+        print_err "Сервис не перечитал конфиг: ссылка заработает после запуска ${svc}"
+        return 1
+    fi
+    print_ok "Перезапущен"
 
     book_write ".hysteria2.instances.${inst_id}.user_count" "$count" number
     echo ""; _hy2_print_uri "$server_ip" "$port" "$uname" "$upass" "$inst_id"; echo ""
@@ -814,14 +905,20 @@ hy2_remove_user() {
 
     _hy2_gen_config "$inst_id" || return 1
     local svc; svc=$(_hy2_service "$inst_id")
-    systemctl restart "$svc" 2>/dev/null; sleep 1
-    systemctl is-active --quiet "$svc" && print_ok "Перезапущен" || print_err "Не запустился"
+    systemctl restart "$svc" 2>/dev/null
+    # - факт: сервис перечитал список пользователей -
+    if ! eli_fact_unit "$svc"; then
+        print_err "Пользователь снят из списка, но ${svc} не перечитал конфиг"
+        return 1
+    fi
+    print_ok "Перезапущен"
     book_write ".hysteria2.instances.${inst_id}.user_count" "$nc" number
     return 0
 }
 
 # --> HY2: УДАЛИТЬ ИНСТАНС <--
 hy2_remove() {
+    local d dd
     print_section "Удалить инстанс Hysteria 2"
     _hy2_migrate_legacy
     local dirs=()
@@ -874,6 +971,49 @@ hy2_remove() {
 
 # --> SIGNAL TLS PROXY <--
 
+# --> SIGNAL: ПРИЗНАКИ УСТАНОВКИ <--
+# - контейнер: проект signal*, сервис compose (номер опционален), якоря с обеих -
+# - сторон - похожие подстроки мимо; сервисы прокси: nginx-terminate, nginx-relay, certbot -
+_sig_is_name() {
+    [[ "$1" =~ ^signal[-a-z0-9]*[-_](nginx-terminate|nginx-relay|certbot)([-_][0-9]+)?$ ]]
+}
+
+_sig_count() {
+    # - число запущенных контейнеров прокси по точным именам -
+    local n c=0
+    for n in $(docker ps --format '{{.Names}}' 2>/dev/null); do
+        _sig_is_name "$n" && c=$(( c + 1 ))
+    done
+    echo "$c"
+}
+
+# - любой след установки: каталог, env или контейнеры compose; единый -
+# - признак для установки и удаления - частичный запуск не должен -
+# - оставлять состояние, которое не чинится из меню -
+_sig_present() {
+    [[ -d "$SIG_DIR" || -f "$SIG_ENV" ]] && return 0
+    local n
+    for n in $(docker ps -a --format '{{.Names}}' 2>/dev/null); do
+        _sig_is_name "$n" && return 0
+    done
+    return 1
+}
+
+# - состояние установки одним словом: none - следов нет, partial - есть -
+# - только часть (контейнеры без env, env без контейнеров, неполный up), -
+# - ready - env на месте и подняты все ${SIG_EXPECT} контейнеров -
+_sig_state() {
+    local running
+    running=$(_sig_count)
+    if [[ -f "$SIG_ENV" ]] && (( running >= SIG_EXPECT )); then
+        echo "ready"
+    elif _sig_present; then
+        echo "partial"
+    else
+        echo "none"
+    fi
+}
+
 # --> SIGNAL: УСТАНОВКА <--
 sig_install() {
     print_section "Установка Signal TLS Proxy"
@@ -883,22 +1023,29 @@ sig_install() {
         return 1
     fi
 
-    if [[ -d "$SIG_DIR" ]] && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "signal"; then
+    local state
+    state=$(_sig_state)
+    if [[ "$state" == "ready" ]]; then
         print_warn "Signal Proxy уже установлен"
         print_info "Удали через меню перед переустановкой"
+        return 0
+    fi
+    if [[ "$state" == "partial" ]]; then
+        print_warn "Signal Proxy установлен частично: остались контейнеры или каталог"
+        print_info "Удали через меню -> Удаление, затем ставь заново"
         return 0
     fi
 
     # - проверка портов 80 и 443 -
     local port_busy=""
-    if ss -tlnp 2>/dev/null | grep -q ":443 "; then
+    if eli_port_busy 443 tcp; then
         port_busy=$(ss -tlnp 2>/dev/null | grep ":443 " | head -1)
         print_err "Порт 443 занят: ${port_busy}"
         print_info "Signal Proxy требует порт 443 (жёстко, не настраивается)"
         print_info "Если там 3X-UI или MTProto - сначала смени их порт"
         return 1
     fi
-    if ss -tlnp 2>/dev/null | grep -q ":80 "; then
+    if eli_port_busy 80 tcp; then
         port_busy=$(ss -tlnp 2>/dev/null | grep ":80 " | head -1)
         print_err "Порт 80 занят: ${port_busy}"
         print_info "Порт 80 нужен для Let's Encrypt сертификата"
@@ -988,20 +1135,22 @@ sig_install() {
     rm -f "$sig_up_log"
     sleep 3
 
+    # - факт: поднялись все контейнеры установки, иначе env и книга не пишутся -
     local running
-    running=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -c "signal\|nginx-terminate\|nginx-relay" || true)
-    if [[ "$running" -ge 2 ]]; then
-        print_ok "Signal Proxy запущен (${running} контейнеров)"
-    else
-        print_warn "Запущено ${running} контейнеров, ожидалось 2+"
-        print_info "Проверь: docker ps"
+    running=$(_sig_count)
+    if (( running < SIG_EXPECT )); then
+        print_err "Запущено ${running} контейнеров из ${SIG_EXPECT}: env и книга не изменены"
+        print_info "Смотри docker compose logs в ${SIG_DIR}"
+        return 1
     fi
+    print_ok "Signal Proxy запущен (${running} контейнеров)"
 
     # - UFW -
     if command -v ufw &>/dev/null; then
         ufw allow 80/tcp comment "Signal Proxy LE" 2>/dev/null || true
         ufw allow 443/tcp comment "Signal Proxy" 2>/dev/null || true
-        print_ok "UFW: разрешены 80/tcp, 443/tcp"
+        # - docker вставляет DNAT раньше фильтра UFW: порты открыты контейнером независимо от правила -
+        print_info "Порты 80/tcp и 443/tcp публикуются docker-ом (фильтр UFW их не закрывает)"
     fi
 
     # - env -
@@ -1036,8 +1185,15 @@ _sig_print_link() {
 # --> SIGNAL: СТАТУС <--
 sig_status() {
     print_section "Статус Signal Proxy"
-    if [[ ! -f "$SIG_ENV" ]]; then
+    local state
+    state=$(_sig_state)
+    if [[ "$state" == "none" ]]; then
         print_warn "Signal Proxy не установлен"
+        return 0
+    fi
+    if [[ "$state" == "partial" ]]; then
+        print_warn "Signal Proxy установлен частично: env или контейнеры не на месте"
+        print_info "Удали через меню -> Удаление, затем ставь заново"
         return 0
     fi
 
@@ -1045,8 +1201,8 @@ sig_status() {
     domain=$(eli_source_env "$SIG_ENV" DOMAIN || true)
 
     local running
-    running=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -c "signal\|nginx-terminate\|nginx-relay")
-    if [[ "$running" -ge 2 ]]; then
+    running=$(_sig_count)
+    if (( running >= SIG_EXPECT )); then
         echo -e "  ${GREEN}(*)${NC} ${BOLD}Signal Proxy${NC}  ${running} контейнеров"
     else
         echo -e "  ${RED}( )${NC} ${BOLD}Signal Proxy${NC} [${YELLOW}${running} контейнеров${NC}]"
@@ -1060,28 +1216,54 @@ sig_status() {
 # --> SIGNAL: ОБНОВЛЕНИЕ <--
 sig_update() {
     print_section "Обновление Signal Proxy"
-    if [[ ! -d "$SIG_DIR" ]]; then
+    local state
+    state=$(_sig_state)
+    if [[ "$state" == "none" ]]; then
         print_warn "Signal Proxy не установлен"
         return 0
     fi
+    if [[ "$state" != "ready" ]]; then
+        print_warn "Signal Proxy установлен частично: обновлять нечего"
+        print_info "Удали через меню -> Удаление, затем ставь заново"
+        return 1
+    fi
     (
         cd "$SIG_DIR" || exit 1
-        git pull 2>/dev/null || { print_warn "git pull не удался"; }
+        # - провал pull отменяет обновление: контейнеры не трогаются -
+        if ! git pull 2>/dev/null; then
+            print_err "git pull не удался: обновление отменено, контейнеры не тронуты"
+            exit 1
+        fi
         if docker compose down 2>/dev/null || docker-compose down 2>/dev/null; then
-            docker compose build 2>/dev/null || docker-compose build 2>/dev/null
-            docker compose up --detach 2>/dev/null || docker-compose up --detach 2>/dev/null
+            if ! { docker compose build 2>/dev/null || docker-compose build 2>/dev/null; }; then
+                print_err "Сборка образов не удалась: смотри docker compose build в ${SIG_DIR}"
+                exit 1
+            fi
+            if ! { docker compose up --detach 2>/dev/null || docker-compose up --detach 2>/dev/null; }; then
+                print_err "Контейнеры не поднялись: смотри docker compose logs в ${SIG_DIR}"
+                exit 1
+            fi
+            # - факт: контейнеры снова в работе -
+            local running
+            running=$(_sig_count)
+            if (( running < SIG_EXPECT )); then
+                print_err "После обновления в docker ps только ${running} контейнеров Signal"
+                exit 1
+            fi
             print_ok "Signal Proxy обновлён и перезапущен"
         else
             print_err "Не удалось перезапустить"
+            exit 1
         fi
-    )
+    ) || return 1
     return 0
 }
 
 # --> SIGNAL: УДАЛЕНИЕ <--
 sig_remove() {
+    local c
     print_section "Удаление Signal Proxy"
-    if [[ ! -f "$SIG_ENV" ]]; then
+    if ! _sig_present; then
         print_warn "Signal Proxy не установлен"
         return 0
     fi
@@ -1097,7 +1279,8 @@ sig_remove() {
     fi
 
     # - удаляем контейнеры если compose не сработал -
-    for c in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E "signal|nginx-terminate|nginx-relay"); do
+    for c in $(docker ps -a --format '{{.Names}}' 2>/dev/null); do
+        _sig_is_name "$c" || continue
         docker stop "$c" 2>/dev/null || true
         docker rm "$c" 2>/dev/null || true
     done
@@ -1105,14 +1288,26 @@ sig_remove() {
     rm -rf "$SIG_DIR"
     rm -rf "$(dirname "$SIG_ENV")"
 
-    # - UFW -
+    # - UFW: снятие правил подтверждается проверкой, иначе порт остаётся открыт -
     if command -v ufw &>/dev/null; then
+        local left=""
         ufw delete allow 80/tcp 2>/dev/null || true
         ufw delete allow 443/tcp 2>/dev/null || true
-        print_ok "UFW: закрыты 80/tcp, 443/tcp"
+        _ufw_has_rule 80 tcp && left="${left} 80/tcp"
+        _ufw_has_rule 443 tcp && left="${left} 443/tcp"
+        if [[ -n "$left" ]]; then
+            print_warn "UFW: правила не сняты:${left} - сними их вручную (ufw status numbered)"
+        else
+            print_ok "UFW: закрыты 80/tcp, 443/tcp"
+        fi
     fi
 
     book_write ".signal_proxy.installed" "false" bool
+    # - факт: после уборки не остаётся ни контейнеров, ни каталога, ни env -
+    if _sig_present; then
+        print_err "Signal Proxy удалён не полностью: остались следы (docker ps -a, ${SIG_DIR})"
+        return 1
+    fi
     print_ok "Signal Proxy удалён"
     return 0
 }

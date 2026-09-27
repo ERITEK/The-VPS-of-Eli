@@ -3,6 +3,8 @@
 
 TGBOT_ENV="/etc/vps-eli-stack/telegrambot.env"
 TGBOT_SCRIPT="/usr/local/bin/eli-tgbot-monitor.sh"
+# - форма своей строки расписания: cron-поля и вызов eli-tgbot-monitor.sh -
+TGBOT_CRON_JOB_RE="^[0-9*/,]+( +[0-9*/,]+){4} +[^ ]*eli-tgbot-monitor\.sh( .*)?$"
 TGBOT_STATE_DIR="/var/lib/eli-tgbot-monitor"
 
 # --> TGBOT: ОТПРАВКА СООБЩЕНИЯ <--
@@ -119,12 +121,15 @@ _alert() {
     ALERT_COUNT=$(( ALERT_COUNT + 1 ))
 }
 
+# - включённость через is-enabled: list-unit-files не видит инстансы шаблонов -
+# - и считает PRESET (vendor preset: enabled) рабочим состоянием -
 _chk() {
     local svc="$1" label="$2"
-    if systemctl list-unit-files "$svc" 2>/dev/null | grep -q 'enabled'; then
-        if ! systemctl is-active --quiet "$svc" 2>/dev/null; then
-            _alert "${label} не работает"
-        fi
+    if ! systemctl is-enabled "$svc" >/dev/null 2>&1; then
+        return 0
+    fi
+    if ! systemctl is-active --quiet "$svc" 2>/dev/null; then
+        _alert "${label} не работает"
     fi
 }
 
@@ -155,19 +160,17 @@ if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker 2>/de
         fi
     done
 
-    while read -r cn; do
+    # - контейнеры стека читаются из записей инстансов: чужой контейнер с похожим -
+    # - именем под префикс не подходит и ложного "остановлен" не даёт -
+    for _ef in /etc/mtproto/instance_*.env /etc/socks5/instance_*.env; do
+        [ -f "$_ef" ] || continue
+        cn="$(grep -m1 '^CONTAINER=' "$_ef" 2>/dev/null | cut -d'"' -f2)"
         [ -n "$cn" ] || continue
-        if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq "$cn"; then
+        if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -Fxq "$cn" && \
+           ! docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq "$cn"; then
             _alert "${cn} остановлен"
         fi
-    done < <(docker ps -a --format '{{.Names}}' 2>/dev/null | grep '^mtproto-')
-
-    while read -r cn; do
-        [ -n "$cn" ] || continue
-        if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -Fxq "$cn"; then
-            _alert "${cn} остановлен"
-        fi
-    done < <(docker ps -a --format '{{.Names}}' 2>/dev/null | grep '^socks5-')
+    done
 fi
 
 HY2_FOUND=0
@@ -230,10 +233,16 @@ MONEOF
         return 1
     }
 
-    crontab -l 2>/dev/null | grep -v 'eli-tgbot-monitor' | grep -v '# Telegram monitor' > "$tmp_cron"
+    # - отказ чтения: чужие задачи не уносим, установка отменяется -
+    local cur_cron=""
+    if ! eli_cron_read cur_cron; then
+        rm -f "$tmp_cron"
+        print_info "Cron-задача не установлена"
+        return 1
+    fi
+    printf '%s\n' "$cur_cron" | _tgbot_cron_not_ours > "$tmp_cron"
     echo "# Telegram monitor каждые ${interval} мин" >> "$tmp_cron"
     echo "*/${interval} * * * * ${TGBOT_SCRIPT}" >> "$tmp_cron"
-
     if crontab "$tmp_cron"; then
         print_ok "Cron: каждые ${interval} минут"
     else
@@ -291,6 +300,13 @@ Uptime: ${uptime_str_esc}"
     return 0
 }
 
+# --> TELEGRAMBOT: СВОИ СТРОКИ CRON <--
+# - своя строка расписания - та, что вызывает eli-tgbot-monitor.sh; -
+# - свой комментарий - точная форма; чужие упоминания не трогаются -
+_tgbot_cron_not_ours() {
+    grep -vE "^# Telegram monitor( каждые [0-9]+ мин)?$" | grep -vE "$TGBOT_CRON_JOB_RE"
+}
+
 # --> TGBOT: СТАТУС <--
 tgbot_status() {
     print_section "Статус Telegram бота"
@@ -309,7 +325,13 @@ tgbot_status() {
     echo -e "  Chat ID: ${chat_id}"
     echo -e "  Скрипт: ${TGBOT_SCRIPT}"
 
-    if crontab -l 2>/dev/null | grep -q 'eli-tgbot-monitor'; then
+    # - отказ чтения crontab отличается от "задачи нет" -
+    local _cron=""
+    if ! eli_cron_read _cron; then
+        print_warn "Cron задача: crontab не прочитан, состояние неизвестно"
+        return 0
+    fi
+    if grep -qE "$TGBOT_CRON_JOB_RE" <<< "$_cron"; then
         print_ok "Cron задача активна"
     else
         print_warn "Cron задача не найдена"
@@ -330,7 +352,14 @@ tgbot_disable() {
         return 1
     }
 
-    crontab -l 2>/dev/null | grep -v 'eli-tgbot-monitor' | grep -v '# Telegram monitor' > "$tmp_cron"
+    # - отказ чтения: чужие задачи не уносим, отключение отменяется -
+    local cur_cron=""
+    if ! eli_cron_read cur_cron; then
+        rm -f "$tmp_cron"
+        print_info "Файлы монитора не сняты"
+        return 1
+    fi
+    printf '%s\n' "$cur_cron" | _tgbot_cron_not_ours > "$tmp_cron"
     if crontab "$tmp_cron"; then
         print_ok "Cron задача удалена"
     else
@@ -344,6 +373,15 @@ tgbot_disable() {
     rm -f "$TGBOT_ENV"
     # - каталог состояния держит только файл-метку: убирается вместе с ним -
     rm -rf "$TGBOT_STATE_DIR" 2>/dev/null || true
+    # - факт: файлы монитора сняты -
+    local left="" p
+    for p in "$TGBOT_SCRIPT" "$TGBOT_ENV" "$TGBOT_STATE_DIR"; do
+        [[ -e "$p" ]] && left="${left} ${p}"
+    done
+    if [[ -n "$left" ]]; then
+        print_err "Не сняты:${left}"
+        return 1
+    fi
     book_write ".telegram_bot.enabled" "false" bool
     print_ok "Telegram мониторинг отключён"
     return 0

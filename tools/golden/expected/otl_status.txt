@@ -11,5 +11,6 @@
 CMD flock -n 200
 CMD docker ps --format {{.Names}}
 CMD docker stats shadowbox --no-stream --format CPU: {{.CPUPerc}}  RAM: {{.MemUsage}}
-CMD curl -fsk --connect-timeout 5 https://203.0.113.9:8443/abc123/access-keys
+CMD timeout 8 openssl s_client -connect 203.0.113.9:8443
+CMD curl -fsk --connect-timeout 5 -K <SB>/etc/outline/manager_key.json.curl
 rc=0

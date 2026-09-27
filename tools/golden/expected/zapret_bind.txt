@@ -1,0 +1,108 @@
+# golden: zapret_bind
+--- вывод ---
+== s1: awg0 уже привязан ==
+
+<cyan><bold>>> Привязка zapret2 к интерфейсу<off>
+<cyan>------------------------------------------------------<off>
+  <green>1)<off> awg0
+  <green>2)<off> awg1
+
+  <red>[xXx]<off> К awg0 zapret2 уже привязан
+  <cyan>*<off> Сменить стратегию: Автоподбор стратегии или Задать стратегию вручную
+rc=1
+== s2: awg1 отключён, сохранённый конфиг, инстанс не удержался ==
+
+<cyan><bold>>> Привязка zapret2 к интерфейсу<off>
+<cyan>------------------------------------------------------<off>
+  <green>1)<off> awg0
+  <green>2)<off> awg1
+
+  <red>[xXx]<off> Привязка отменена -> инстанс nfqws2 не стартовал
+rc=1
+есть: <SB>/etc/vps-eli-stack/zapret2/awg1.conf
+есть: <SB>/opt/zapret2/eli/awg1.hosts
+есть: <SB>/etc/systemd/system/zeli-nft-awg1.service
+bound=false
+== s3: awg1 без сохранённого, инстанс не удержался ==
+
+<cyan><bold>>> Привязка zapret2 к интерфейсу<off>
+<cyan>------------------------------------------------------<off>
+  <green>1)<off> awg0
+  <green>2)<off> awg1
+
+  <red>[xXx]<off> Привязка отменена -> инстанс nfqws2 не стартовал
+rc=1
+нет:  <SB>/etc/vps-eli-stack/zapret2/awg1.conf
+нет:  <SB>/opt/zapret2/eli/awg1.hosts
+нет:  <SB>/etc/systemd/system/zeli-nft-awg1.service
+bound=false
+== s4: успешная привязка ==
+
+<cyan><bold>>> Привязка zapret2 к интерфейсу<off>
+<cyan>------------------------------------------------------<off>
+  <green>1)<off> awg0
+  <green>2)<off> awg1
+
+  <cyan>*<off> таймер поставлен (подпорка)
+  <green>[-OK-]<off> Правила применены. Страховочный откат через 90 сек, если не подтвердишь.
+  <cyan>*<off> Проверь на клиенте: трафик через awg1 жив, целевые сервисы открываются.
+  <green>[-OK-]<off> Правила зафиксированы для awg1
+  <green>[-OK-]<off> Инстанс zapret2 для awg1 запущен (queue 4201)
+rc=0
+есть: <SB>/etc/vps-eli-stack/zapret2/awg1.conf
+есть: <SB>/opt/zapret2/eli/awg1.hosts
+есть: <SB>/etc/systemd/system/zeli-nft-awg1.service
+bound=true strategy=baseline
+--- conf ---
+--qnum=4201
+--fwmark=0x20000000
+--lua-init=@<SB>/opt/zapret2/lua/zapret-lib.lua
+--lua-init=@<SB>/opt/zapret2/lua/zapret-antidpi.lua
+--filter-tcp=80 --filter-l7=http --hostlist=<SB>/opt/zapret2/eli/awg1.hosts --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5 --new
+--filter-tcp=443 --filter-l7=tls --hostlist=<SB>/opt/zapret2/eli/awg1.hosts --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5 --lua-desync=multisplit:pos=1 --new
+--filter-udp=443 --filter-l7=quic --hostlist=<SB>/opt/zapret2/eli/awg1.hosts --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=6
+== s5: страховочный таймер сработал до подтверждения ==
+
+<cyan><bold>>> Привязка zapret2 к интерфейсу<off>
+<cyan>------------------------------------------------------<off>
+  <green>1)<off> awg0
+  <green>2)<off> awg1
+
+  <cyan>*<off> таймер поставлен (подпорка)
+  <green>[-OK-]<off> Правила применены. Страховочный откат через 90 сек, если не подтвердишь.
+  <cyan>*<off> Проверь на клиенте: трафик через awg1 жив, целевые сервисы открываются.
+  <red>[xXx]<off> Страховочный откат сработал раньше подтверждения (90 сек): правила сняты
+  <cyan>*<off> Повтори применение и подтверди в пределах таймера
+rc=1
+нет:  <SB>/etc/vps-eli-stack/zapret2/awg1.conf
+нет:  <SB>/opt/zapret2/eli/awg1.hosts
+нет:  <SB>/etc/systemd/system/zeli-nft-awg1.service
+bound=false
+--- вызовы платформы ---
+CMD flock -n 200
+CMD systemctl daemon-reload
+CMD systemctl enable zeli-nft-awg1.service
+CMD systemctl enable zapret2-eli@awg1.service
+CMD systemctl restart zapret2-eli@awg1.service
+CMD systemctl disable --now zapret2-eli@awg1.service
+CMD systemctl disable --now zeli-nft-awg1.service
+CMD systemctl daemon-reload
+CMD systemctl daemon-reload
+CMD systemctl enable zeli-nft-awg1.service
+CMD systemctl enable zapret2-eli@awg1.service
+CMD systemctl restart zapret2-eli@awg1.service
+CMD systemctl disable --now zapret2-eli@awg1.service
+CMD systemctl disable --now zeli-nft-awg1.service
+CMD systemctl daemon-reload
+CMD systemctl daemon-reload
+CMD systemctl enable zeli-nft-awg1.service
+CMD systemctl enable zapret2-eli@awg1.service
+CMD systemctl restart zapret2-eli@awg1.service
+CMD systemctl daemon-reload
+CMD systemctl enable zeli-nft-awg1.service
+CMD systemctl enable zapret2-eli@awg1.service
+CMD systemctl restart zapret2-eli@awg1.service
+CMD systemctl disable --now zapret2-eli@awg1.service
+CMD systemctl disable --now zeli-nft-awg1.service
+CMD systemctl daemon-reload
+rc=0

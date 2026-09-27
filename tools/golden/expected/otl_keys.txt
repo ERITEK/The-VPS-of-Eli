@@ -6,5 +6,6 @@
   <red>[xXx]<off> API не ответил
 --- вызовы платформы ---
 CMD flock -n 200
-CMD curl -fsk --connect-timeout 5 https://203.0.113.9:8443/abc123/access-keys
+CMD timeout 8 openssl s_client -connect 203.0.113.9:8443
+CMD curl -fsk --connect-timeout 5 -K <SB>/etc/outline/manager_key.json.curl
 rc=0

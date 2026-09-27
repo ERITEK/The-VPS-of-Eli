@@ -11,7 +11,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC_DIR="${SCRIPT_DIR}/src"
 # - выход можно переопределить окружением: так проверка артефакта собирает -
 # - монолит во временный файл и сверяет с отгруженным -
-OUT_FILE="${ELI_BUILD_OUT:-${SCRIPT_DIR}/the_vps_of_eli.sh}"
+ART_NAME="the_vps_of_eli.sh"
+OUT_FILE="${ELI_BUILD_OUT:-${SCRIPT_DIR}/${ART_NAME}}"
 TMP_FILE="${OUT_FILE}.building.$$"
 
 # - порядок сборки: платформа (io -> validate -> book -> sys) -> модули -> меню -> entry -
@@ -80,8 +81,8 @@ done
 # - инструменты в сборку не входят, но входят в состав репозитория: гейт -
 # - запускает из них детекторы структуры и golden, а сами файлы проверяет -
 # - на синтаксис, чтобы сломанный инструмент находился сборкой, а не прогоном -
-# - отсутствие каталога или инструмента печатается явно: пропуск проверки -
-# - не проходит молча -
+# - отсутствие каталога или обязательного инструмента останавливает -
+# - сборку: проверки структуры и поведения не пропускаются -
 if [[ -d "${SCRIPT_DIR}/tools" ]]; then
     tools_fail=0
     while IFS= read -r tool; do
@@ -96,10 +97,14 @@ if [[ -d "${SCRIPT_DIR}/tools" ]]; then
         GATE_FAIL=$((GATE_FAIL + tools_fail))
     fi
 else
-    echo "  [!] каталог tools/ не найден: детекторы структуры и golden не проверялись"
+    echo "  [ГЕЙТ] каталог tools/ не найден: проверки структуры и поведения обязательны"
+    GATE_FAIL=$((GATE_FAIL + 1))
 fi
 for tool in detectors.sh golden.sh; do
-    [[ -f "${SCRIPT_DIR}/tools/${tool}" ]] || echo "  [!] нет tools/${tool}: проверка пропущена"
+    if [[ ! -f "${SCRIPT_DIR}/tools/${tool}" ]]; then
+        echo "  [ГЕЙТ] нет обязательного инструмента tools/${tool}"
+        GATE_FAIL=$((GATE_FAIL + 1))
+    fi
 done
 
 # --> ГЕЙТ: МАНИФЕСТ VS SRC <--
@@ -195,21 +200,31 @@ echo "  [OK] синтаксис склейки"
 
 # --> ГЕЙТ: ИНВЕНТАРЬ ФУНКЦИЙ <--
 # - функции прошлой сборки, пропавшие из новой: сторож против осиротевших удалений -
-# - первая сборка в репозитории фиксирует базовую линию и пропускает сравнение -
-# - путь к монолиту берётся от корня репозитория: сборка идёт из подкаталога -
-# - осознанное удаление или переименование функции вносится в список ниже -
-FUNC_GONE_ALLOW=( )
+# - сверка идёт с монолитом прошлого коммита по его пути в репозитории: -
+# - имя артефакта не зависит от OUT_FILE, иначе сборка во внешний файл -
+# - сверку пропускает; путь берётся от корня репозитория, сборка идёт из -
+# - подкаталога. Репозиторий без коммитов - первая сборка, базовая линия -
+# - инвентаря без сравнения. Осознанное удаление или переименование функции -
+# - вносится в список ниже -
+FUNC_GONE_ALLOW=( "_wgo_lock_awg_port" "_wgo_unlock_awg_port" "_bkp_add" )
 missing_funcs=""
+inventory_skip=""
 repo_root="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
-mono_rel="$(git -C "$SCRIPT_DIR" ls-files --full-name --error-unmatch "$(basename "$OUT_FILE")" 2>/dev/null || true)"
-if [[ -n "$repo_root" ]]; then
-    if [[ -n "$mono_rel" ]] && git -C "$repo_root" show "HEAD:${mono_rel}" > "${TMP_FILE}.oldmono" 2>/dev/null; then
+if [[ -z "$repo_root" ]]; then
+    inventory_skip="вне git-репозитория: сверка не выполняется"
+else
+    mono_rel="$(git -C "$SCRIPT_DIR" rev-parse --show-prefix 2>/dev/null || true)${ART_NAME}"
+    if ! git -C "$repo_root" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+        inventory_skip="репозиторий без коммитов: базовая линия инвентаря"
+    elif git -C "$repo_root" show "HEAD:${mono_rel}" > "${TMP_FILE}.oldmono" 2>/dev/null; then
         grep -oE '^[a-zA-Z_][a-zA-Z0-9_]*\(\)' "${TMP_FILE}.oldmono" | sed 's/()//' | sort -u > "${TMP_FILE}.oldfuncs"
         grep -oE '^[a-zA-Z_][a-zA-Z0-9_]*\(\)' "$TMP_FILE" | sed 's/()//' | sort -u > "${TMP_FILE}.newfuncs"
         missing_funcs="$(comm -23 "${TMP_FILE}.oldfuncs" "${TMP_FILE}.newfuncs" || true)"
     else
-        echo "  [ГЕЙТ] не прочитан монолит прошлого коммита: сверка инвентаря не выполнена"
-        GATE_FAIL=$((GATE_FAIL + 1))
+        rm -f "${TMP_FILE}.oldmono" "${TMP_FILE}.oldfuncs" "${TMP_FILE}.newfuncs"
+        echo "  [ГЕЙТ] не прочитан монолит прошлого коммита (${mono_rel}): сверка инвентаря не выполнена"
+        echo "        монолит не изменён"
+        exit 1
     fi
     rm -f "${TMP_FILE}.oldmono" "${TMP_FILE}.oldfuncs" "${TMP_FILE}.newfuncs"
 fi
@@ -235,7 +250,9 @@ if (( gone_gate > 0 )); then
     echo "        осознанное удаление или переименование: добавь имя в FUNC_GONE_ALLOW или отмени правку"
     exit 1
 fi
-if (( gone_allow > 0 )); then
+if [[ -n "$inventory_skip" ]]; then
+    echo "  [INFO] инвентарь функций: ${inventory_skip}"
+elif (( gone_allow > 0 )); then
     echo "  [OK] инвентарь функций: потерь нет (осознанных снятий: ${gone_allow})"
 else
     echo "  [OK] инвентарь функций: потерь нет"
@@ -298,14 +315,14 @@ done
 if (( env_src_hits == 0 )); then
     echo "  [OK] source для env не найден"
 else
-    echo "  [WARN] мест чтения env через source: ${env_src_hits} (перевод - П5.2, ROADMAP)"
+    echo "  [WARN] мест чтения env через source: ${env_src_hits}"
 fi
 
 # --> ГЕЙТ: ПОВЕДЕНИЕ (GOLDEN-СНАПШОТ) <--
 # - read-only пути новой сборки прогоняются в песочнице и сверяются с эталоном: -
 # - расхождение вывода, порядка вызовов платформы или кода возврата -
-# - останавливает сборку до замены монолита. Кейсы книги требуют jq: -
-# - без него они пропускаются, остальные сверяются как обычно -
+# - останавливает сборку до замены монолита. Кейсы с требованием jq без -
+# - него не прогоняются: пропуск останавливает сборку, как и расхождение -
 if [[ -f "${SCRIPT_DIR}/tools/golden.sh" ]]; then
     echo ""
     echo "Проверка поведения (golden-снапшот):"
@@ -314,7 +331,7 @@ if [[ -f "${SCRIPT_DIR}/tools/golden.sh" ]]; then
     if (( gold_rc != 0 )); then
         printf '%s\n' "$gold_out" | head -5 | sed 's/^/  [ГЕЙТ] /'
         printf '%s\n' "$gold_out" | grep -E 'РАСХОЖДЕНИЕ|НАРУШЕНИЕ|НЕТ ЭТАЛОНА|^      |Кейсов:' | sed 's/^/  [ГЕЙТ] /'
-        echo "        поведение изменилось: обнови эталон тем же коммитом или отмени правку"
+        echo "        поведение не подтверждено: расхождение - обнови эталон тем же коммитом или отмени правку, пропуск - поставь jq"
         exit 1
     fi
     echo "  [OK] $(printf '%s\n' "$gold_out" | tail -1)"

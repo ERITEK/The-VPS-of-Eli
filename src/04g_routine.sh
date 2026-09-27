@@ -95,8 +95,18 @@ DISKMON
 
     # --> CRON <--
     print_section "5. Cron задачи"
-    local current_cron
-    current_cron=$(crontab -l 2>/dev/null || echo "")
+    local current_cron cron_err
+    # - отказ чтения отличается от отсутствия crontab: иначе чужие -
+    # - задачи молча заменяются нашим списком -
+    if cron_err=$(crontab -l 2>&1); then
+        current_cron="$cron_err"
+    elif [[ "$cron_err" == *"no crontab"* ]]; then
+        current_cron=""
+    else
+        print_err "Не удалось прочитать crontab: ${cron_err}"
+        print_info "Cron-задачи не изменены"
+        return 1
+    fi
 
     _add_cron() {
         local entry="$1" comment="$2"
@@ -116,7 +126,26 @@ DISKMON
     _add_cron "0 3 * * 1 apt-get update -qq && apt-get upgrade --dry-run 2>/dev/null | grep -E '^[0-9]+ upgraded' | logger -t apt-check" "Проверка обновлений пн 3:00 UTC"
     _add_cron "@reboot sleep 90; /usr/local/bin/eli-healthcheck.sh" "Healthcheck через 90 сек после reboot"
 
-    echo "$current_cron" | crontab -
+    local cron_tmp
+    cron_tmp=$(mktemp) || { print_err "Не удалось создать временный файл для cron"; return 1; }
+    printf '%s\n' "$current_cron" > "$cron_tmp"
+    if ! crontab "$cron_tmp"; then
+        rm -f "$cron_tmp"
+        print_err "Не удалось установить crontab"
+        print_info "Cron-задачи не изменены"
+        return 1
+    fi
+    rm -f "$cron_tmp"
+    # - установленный список перечитывается: успех печатается по факту; сверка по -
+    # - строкам задач: комментарии и пустые строки не входят, служебная шапка crontab -l -
+    # - сверке не мешает -
+    local want_tasks got_tasks
+    want_tasks=$(printf '%s\n' "$current_cron" | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$')
+    got_tasks=$(crontab -l 2>/dev/null | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$')
+    if [[ "$got_tasks" != "$want_tasks" ]]; then
+        print_err "Crontab установлен, но перечитанный список отличается"
+        return 1
+    fi
     print_ok "Crontab обновлён"
 
     # --> HEALTHCHECK ПОСЛЕ REBOOT <--
@@ -135,10 +164,11 @@ _log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOG"; }
 _log "=== healthcheck start ==="
 
 # --> ПРОВЕРКА СЕРВИСА <--
-# - если enabled и не active - пробуем restart -
+# - включённый (is-enabled) и не активный - пробуем restart: is-enabled -
+# - работает и для инстансов шаблонов, PRESET не считается состоянием -
 _check_svc() {
     local svc="$1" label="$2"
-    if ! systemctl list-unit-files "${svc}" 2>/dev/null | grep -q "enabled"; then
+    if ! systemctl is-enabled "$svc" >/dev/null 2>&1; then
         return 0
     fi
     if systemctl is-active --quiet "$svc" 2>/dev/null; then
@@ -169,17 +199,18 @@ if [ -f /etc/awg-setup/pending_dkms ]; then
     if apt-get install -y amneziawg >/dev/null 2>&1; then
         if lsmod | grep -q '^amneziawg'; then
             _log "OK AWG модуль уже загружен, установка не потребовалась"
+            rm -f /etc/awg-setup/pending_dkms
         elif modprobe amneziawg 2>/dev/null; then
             _log "FIXED AWG модуль установлен после reboot"
             FIXES=$(( FIXES + 1 ))
+            rm -f /etc/awg-setup/pending_dkms
         else
-            _log "WARN AWG пакет установлен, но модуль не загрузился"
+            _log "WARN AWG пакет установлен, но модуль не загрузился - маркер ждёт следующего ребута"
         fi
     else
-        _log "FAIL не удалось установить amneziawg"
+        _log "FAIL не удалось установить amneziawg - маркер ждёт следующего ребута"
         FAILS=$(( FAILS + 1 ))
     fi
-    rm -f /etc/awg-setup/pending_dkms
 fi
 
 # --> AWG ИНТЕРФЕЙСЫ <--
@@ -254,7 +285,10 @@ if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker 2>/de
     done
 
     # --> MTPROTO КОНТЕЙНЕРЫ (МУЛЬТИИНСТАНС) <--
+    # - контейнер поднимается только свой: имя сверяется с записями стека, -
+    # - иначе чужой контейнер с похожим именем уходил бы в docker start -
     for cn in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep "^mtproto-"); do
+        eli_own_container "$cn" || continue
         if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${cn}$"; then
             _log "DOWN ${cn} - starting"
             docker start "$cn" 2>/dev/null && _log "FIXED ${cn}" && FIXES=$(( FIXES + 1 )) \
@@ -266,6 +300,7 @@ if command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker 2>/de
 
     # --> SOCKS5 КОНТЕЙНЕРЫ (МУЛЬТИИНСТАНС) <--
     for cn in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep "^socks5-"); do
+        eli_own_container "$cn" || continue
         if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${cn}$"; then
             _log "DOWN ${cn} - starting"
             docker start "$cn" 2>/dev/null && _log "FIXED ${cn}" && FIXES=$(( FIXES + 1 )) \

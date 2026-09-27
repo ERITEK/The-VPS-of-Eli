@@ -22,6 +22,7 @@ CMD flock -n 200
 CMD systemctl is-active --quiet mimic@eth0.service
 CMD ip -4 route get 1.1.1.1
 CMD systemctl is-active --quiet awg-quick@awg0
+CMD awg show awg0 listen-port
 CMD ufw show added
 CMD ufw show added
 CMD awg show awg0 latest-handshakes

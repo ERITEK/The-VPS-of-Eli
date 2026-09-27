@@ -20,17 +20,10 @@ ssh_get_permitrootlogin() {
     echo "${val:-yes}"
 }
 
-# - drop-in /etc/ssh/sshd_config.d/00-eli.conf: на Ubuntu cloud-init и Debian с -
-# - 50-cloud-init.conf правка sshd_config теряется. Для однозначных ключей -
-# - sshd применяет первое полученное значение (first-match), файлы -
-# - sshd_config.d обрабатываются лексикографически, 00-eli.conf читается первым; -
-# - Port и ListenAddress из этого правила исключение: они накапливаются (см. ниже) -
-# - при равном префиксе 00-* порядок решает алфавит полного имени -
-# - конкурентов 00-* функция предупреждает -
-# - arg1: ключ (Port, PermitRootLogin, PasswordAuthentication, ...) -
-# - arg2: значение -
-# - инклюзив-проверка: создаёт Include sshd_config.d/*.conf если его нет в основном -
-# - миграция: прежнее имя 99-eli.conf переименовывается в 00-eli.conf -
+# - drop-in /etc/ssh/sshd_config.d/00-eli.conf: правка sshd_config на Ubuntu/Debian -
+# - теряется за cloud-init; first-match и лексикографический порядок дают победу 00-* -
+# - Port и ListenAddress накапливаются (исключение), о конкурентах 00-* предупреждает -
+# - arg1: ключ, arg2: значение; Include добавляется, прежний 99-eli.conf переименовывается -
 ssh_apply_dropin() {
     local key="$1" val="$2" dropin="/etc/ssh/sshd_config.d/00-eli.conf"
     local legacy="/etc/ssh/sshd_config.d/99-eli.conf"
@@ -80,10 +73,8 @@ ssh_restart() {
 }
 
 # --> СТРАХОВОЧНЫЙ ТАЙМЕР <--
-# - одноразовый таймер systemd для опасных действий (смена SSH-порта, -
-# - включение UFW): если оператор потерял доступ и не отменил таймер, -
-# - через заданный срок выполняется команда отката; команду отката -
-# - передаёт вызывающий -
+# - одноразовый таймер systemd для опасных действий (смена SSH-порта, UFW): нет -
+# - доступа и таймер не отменён - через заданный срок выполняется команда отката -
 # - arg1: имя юнита, arg2: срок в секундах, arg3: команда отката целиком -
 eli_safety_arm() {
     local unit="$1" secs="$2" cmd="$3"
@@ -91,7 +82,9 @@ eli_safety_arm() {
         print_warn "systemd-run недоступен: страховочный откат не поставлен"
         return 1
     fi
-    if ! systemd-run --on-active="${secs}s" --unit="$unit" bash -c "$cmd" &>/dev/null; then
+    # - точность ставится явно: у таймера по умолчанию AccuracySec=1min, и откат -
+    # - срабатывает позже назначенного срока на случайную часть этой минуты -
+    if ! systemd-run --on-active="${secs}s" --timer-property=AccuracySec=1s --unit="$unit" bash -c "$cmd" &>/dev/null; then
         print_warn "Страховочный таймер ${unit} не поставлен (юнит существует?)"
         return 1
     fi
@@ -108,24 +101,25 @@ eli_safety_disarm() {
 }
 
 # --> ПРОВЕРКА ФАКТА ПОСЛЕ ЗАПИСИ <--
-# - канон: изменение состояния заканчивается проверкой факта, а не кодом -
-# - возврата команды. Ответ команды говорит про сам вызов, факт - про -
-# - состояние: sed без совпадения возвращает 0 и файл не меняет, restart -
-# - службы с ошибкой в конфиге оставляет её лежать, а скрипт идёт дальше -
-# - проверка молчит при успехе: успех формулирует вызывающий, он знает, что -
-# - именно изменил; провал печатается здесь, с подсказкой по причине -
+# - изменение состояния заканчивается проверкой факта, а не кодом возврата: -
+# - sed без совпадения даёт 0 и файл не меняет, restart с ошибкой в конфиге -
+# - оставляет службу лежать. При успехе хелпер молчит: успех печатает вызывающий -
 
 # - факт: служба активна. Ожидание внутри: после restart состояние меняется -
 # - не мгновенно, сразу за командой is-active ещё отвечает inactive -
 # - arg1: юнит, arg2: срок ожидания в секундах (по умолчанию 3) -
 eli_fact_unit() {
-    local unit="$1" secs="${2:-3}" try tries
+    local unit="$1" secs="${2:-3}" want="${3:-active}" try tries
     tries=$(( secs * 4 ))
     for (( try=0; try<tries; try++ )); do
-        systemctl is-active --quiet "$unit" 2>/dev/null && return 0
+        if [[ "$want" == "active" ]]; then
+            systemctl is-active --quiet "$unit" 2>/dev/null && return 0
+        else
+            systemctl is-active --quiet "$unit" 2>/dev/null || return 0
+        fi
         sleep 0.25
     done
-    print_err "Служба ${unit} не активна: journalctl -xeu ${unit} --no-pager | tail -20"
+    print_err "Служба ${unit} не в состоянии ${want}: journalctl -xeu ${unit} --no-pager | tail -20"
     return 1
 }
 
@@ -145,33 +139,122 @@ eli_fact_line() {
     return 0
 }
 
+# --> CRONTAB: ЧТЕНИЕ СПИСКА ЗАДАЧ <--
+# - отказ чтения отличается от отсутствия crontab: иначе пустой список -
+# - принимается за "задач нет" и чужие строки уходят при записи -
+eli_cron_read() {
+    local varname="$1" out="" err=""
+    if err=$(crontab -l 2>&1); then
+        out="$err"
+    elif [[ "$err" == *"no crontab"* ]]; then
+        out=""
+    else
+        print_err "Не удалось прочитать crontab: ${err}"
+        return 1
+    fi
+    printf -v "$varname" '%s' "$out"
+    return 0
+}
+
+# --> ЗАНЯТОСТЬ ПОРТА: СНИМОК SS <--
+# - вывод ss читается строкой: конвейер с grep -q под pipefail даёт 141 и занятый -
+# - порт принимается за свободный; proto: tcp или udp; 0 = порт занят -
+eli_port_busy() {
+    local port="${1:-}" proto="${2:-tcp}" out
+    [[ -z "$port" ]] && return 1
+    case "$proto" in
+        tcp) out=$(ss -H -tln 2>/dev/null || true) ;;
+        udp) out=$(ss -H -uln 2>/dev/null || true) ;;
+        *)   return 1 ;;
+    esac
+    [[ "$out" == *":${port} "* || "$out" == *".${port} "* ]]
+}
+
+# --> DOCKER: ПРИНАДЛЕЖНОСТЬ КОНТЕЙНЕРА СТЕКУ <--
+# - свой контейнер опознаётся записями стека: env инстансов (ключ CONTAINER), имя -
+# - Outline и канон Signal; чужой с похожим именем не опознаётся (отчёты, автозапуск) -
+eli_own_container() {
+    local cn="$1" envf name
+    [[ -n "$cn" ]] || return 1
+    [[ "$cn" == "shadowbox" ]] && return 0
+    for envf in /etc/mtproto/instance_*.env /etc/socks5/instance_*.env; do
+        [[ -f "$envf" ]] || continue
+        name=$(eli_source_env "$envf" CONTAINER || true)
+        [[ -n "$name" && "$name" == "$cn" ]] && return 0
+    done
+    declare -f _sig_is_name >/dev/null 2>&1 && _sig_is_name "$cn"
+}
+
 # --> GITHUB RELEASES: ОБЩАЯ МЕХАНИКА <--
-# - тело ответа в stdout, код ответа в ELI_HTTP_CODE (000 = связи не было) -
-# - код нужен вызывающему: сеть, отказ API и отсутствие файла в ответе -
-# - без него выглядят одинаково - пустой строкой -
+# - тело ответа в stdout, код ответа в ELI_HTTP_CODE (000 = связи не было): без кода -
+# - сеть, отказ API и отсутствующий файл неразличимы; код дублируется в файл: вызов -
+# - идёт через пайп/подстановку, переменная из subshell теряется; файл в /run (root-only) -
 ELI_HTTP_CODE=""
+ELI_HTTP_CODE_FILE="/run/eli-http-code"
+
+# - запись кода ответа: симлинк отменяет запись, результат подтверждается -
+# - перечитыванием файла; провал печатается в stderr, потому что stdout -
+# - занят телом ответа -
+_eli_http_code_put() {
+    local code="$1" back=""
+    if [[ -L "$ELI_HTTP_CODE_FILE" ]]; then
+        printf '%s\n' "  [!!!]  HTTP-код: ${ELI_HTTP_CODE_FILE} - симлинк, запись отменена" >&2
+        return 1
+    fi
+    if ! printf '%s' "$code" 2>/dev/null > "$ELI_HTTP_CODE_FILE"; then
+        rm -f "$ELI_HTTP_CODE_FILE" 2>/dev/null
+        printf '%s\n' "  [!!!]  HTTP-код: не записался в ${ELI_HTTP_CODE_FILE}" >&2
+        return 1
+    fi
+    chmod 600 "$ELI_HTTP_CODE_FILE" 2>/dev/null
+    back=$(cat "$ELI_HTTP_CODE_FILE" 2>/dev/null)
+    if [[ "$back" != "$code" ]]; then
+        rm -f "$ELI_HTTP_CODE_FILE" 2>/dev/null
+        printf '%s\n' "  [!!!]  HTTP-код: ${ELI_HTTP_CODE_FILE} разошёлся с записанным" >&2
+        return 1
+    fi
+    return 0
+}
+
 eli_github_fetch() {
     local url="$1" tmp code
-    tmp=$(mktemp) || { ELI_HTTP_CODE="000"; return 1; }
+    tmp=$(mktemp) || { ELI_HTTP_CODE="000"; _eli_http_code_put "000" || true; return 1; }
+    # - прежний код убирается: объяснение относится к текущему вызову; -
+    # - симлинк не трогается - его отвергнет запись, и отказ будет виден -
+    [[ -L "$ELI_HTTP_CODE_FILE" ]] || rm -f "$ELI_HTTP_CODE_FILE" 2>/dev/null
     code=$(curl -sSL --connect-timeout 10 --max-time 30 \
         -o "$tmp" -w '%{http_code}' "$url" 2>/dev/null) || code=""
     [[ "$code" =~ ^[0-9]{3}$ ]] || code="000"
     ELI_HTTP_CODE="$code"
+    _eli_http_code_put "$code" || true
     cat "$tmp"
     rm -f "$tmp"
     [[ "$code" == "200" ]]
 }
 
 # --> GITHUB RELEASES: ПРИЧИНА ДЛЯ СООБЩЕНИЯ <--
-# - читает ELI_HTTP_CODE после eli_github_fetch и объясняет провал словами -
+# - объясняет провал последнего eli_github_fetch словами; недоступный файл кода -
+# - отдельная причина: иначе отказ записи выглядел бы отсутствием связи -
 eli_github_reason() {
-    case "${ELI_HTTP_CODE:-000}" in
+    local code="${ELI_HTTP_CODE:-}"
+    if [[ -z "$code" ]]; then
+        if [[ -r "$ELI_HTTP_CODE_FILE" ]]; then
+            code=$(cat "$ELI_HTTP_CODE_FILE" 2>/dev/null || true)
+        else
+            echo "код ответа недоступен: ${ELI_HTTP_CODE_FILE} не читается (запись кода не прошла)"
+            return 0
+        fi
+    fi
+    case "${code:-000}" in
         000) echo "нет связи с api.github.com (сеть, DNS или таймаут)";;
         403|429) echo "GitHub отклонил запрос: лимит обращений без токена (60 в час)";;
         404) echo "в репозитории нет такого релиза";;
         200) echo "в ответе нет подходящего файла";;
-        *) echo "GitHub ответил кодом ${ELI_HTTP_CODE}";;
+        *) echo "GitHub ответил кодом ${code}";;
     esac
+    # - файл одноразовый: следующий ответ пишет fetch заново -
+    rm -f "$ELI_HTTP_CODE_FILE" 2>/dev/null
+    return 0
 }
 
 # - последняя версия релиза репозитория: пусто при провале, причина в ELI_HTTP_CODE -
@@ -196,10 +279,9 @@ eli_book_section_init() {
 }
 
 # --> ENV-ФАЙЛЫ: ЧТЕНИЕ БЕЗ ИСПОЛНЕНИЯ <--
-# - env-файлы пишутся от root и читаются разбором текста, а не source: текст -
-# - из свободных полей (описание интерфейса, allowed_ips, пароль панели) -
-# - иначе исполнился бы как команды от root. Пара хелперов делает разбор -
-# - текста: запись экранирует значение, чтение снимает экранирование -
+# - env читается разбором текста, а не source: текст из свободных полей (описание -
+# - интерфейса, пароль панели) иначе исполнился бы как команды root; запись -
+# - экранирует значение, чтение снимает экранирование -
 
 # - значение для env-строки в двойных кавычках: нейтрализует \ " $ ` -
 eli_env_escape() {
@@ -263,8 +345,7 @@ _eli_env_unquote() {
 }
 
 # - значение ключа из env-файла: разбор строк KEY=VALUE, файл не исполняется -
-# - arg1: путь к файлу, arg2: имя ключа; значение печатается в stdout -
-# - rc=1: файл нечитаем или ключ не найден (stdout пуст) -
+# - arg1: путь, arg2: ключ; значение в stdout; rc=1: нечитаем или ключа нет -
 # - повтор ключа: побеждает последнее присваивание, как в source -
 eli_source_env() {
     local file="$1" name="$2"
@@ -284,10 +365,9 @@ eli_source_env() {
     printf '%s\n' "$out"
 }
 
-# - чтение набора ключей env-файла в переменные вызывающей функции -
-# - arg1: файл, далее пары КЛЮЧ=переменная; значения кладёт printf -v -
-# - переменные объявляет вызывающий (local): раскладка идёт в его область видимости -
-# - отсутствующий ключ оставляет переменную пустой, как ${VAR:-} после source -
+# - чтение набора ключей env-файла в переменные вызывающей функции: arg1 файл, -
+# - далее пары КЛЮЧ=переменная; значения кладёт printf -v, переменные объявляет -
+# - вызывающий (local); отсутствующий ключ оставляет переменную пустой -
 eli_env_read_into() {
     local file="$1"; shift
     local pair key name val

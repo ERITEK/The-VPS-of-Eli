@@ -71,10 +71,16 @@ boot_install_packages() {
         fi
     fi
 
-    # - unbound ставим сейчас, но запускать будем позже через меню Unbound -
-    systemctl stop unbound 2>/dev/null || true
-    systemctl disable unbound 2>/dev/null || true
-    print_ok "Unbound установлен (настройка через меню Обслуживание -> Unbound)"
+    # - unbound ставится пакетом, но запускается настройкой через меню: -
+    # - пока резолвер не настроен, служба гасится и снимается с автозапуска; -
+    # - настроенный unbound обслуживает клиентов и не трогается -
+    if [[ "$(book_read ".unbound.installed")" == "true" ]]; then
+        print_info "Unbound уже настроен - служба не трогается"
+    else
+        systemctl stop unbound 2>/dev/null || true
+        systemctl disable unbound 2>/dev/null || true
+        print_ok "Unbound установлен (настройка через меню Обслуживание -> Unbound)"
+    fi
     return 0
 }
 
@@ -123,6 +129,7 @@ boot_install_docker() {
             fi
         fi
     else
+        mkdir -p /etc/docker
         cat > "$daemon_json" << 'EODAEMON'
 {
   "default-ulimits": {
@@ -134,6 +141,11 @@ boot_install_docker() {
   }
 }
 EODAEMON
+        # - факт: файл перечитывается как JSON с нашим лимитом -
+        if ! jq -e '."default-ulimits".nofile' "$daemon_json" >/dev/null 2>&1; then
+            print_err "Docker daemon.json не записан: ${daemon_json}"
+            return 1
+        fi
         print_ok "Docker daemon.json: создан с ulimit nofile=65536"
     fi
 
@@ -164,45 +176,59 @@ _boot_create_swapfile() {
             return 0
         fi
         print_info "Swapfile ${old_mb} MB меньше нужного, пересоздаём на ${size_mb} MB"
+    fi
+    print_info "Создаём /swapfile ${size_mb} MB"
+    # - новый файл готовится рядом с целью под временным именем: старый -
+    # - swapfile остаётся на месте, пока новый не готов -
+    local new_file
+    new_file=$(mktemp /swapfile.XXXXXX) || { print_err "не смог создать временный файл для /swapfile"; return 1; }
+    # - шаг 1: fallocate, если не сработал - fallback на dd -
+    if ! fallocate -l "${size_mb}M" "$new_file" 2>/dev/null; then
+        print_info "fallocate не поддерживается на этой FS, fallback на dd"
+        if ! dd if=/dev/zero of="$new_file" bs=1M count="$size_mb" status=none 2>/dev/null; then
+            print_err "dd не смог создать /swapfile"
+            rm -f "$new_file"
+            return 1
+        fi
+    fi
+    # - шаг 2: права строго 600, иначе mkswap даст warning и swapon может отказаться -
+    if ! chmod 600 "$new_file"; then
+        print_err "chmod 600 /swapfile не удался"
+        rm -f "$new_file"
+        return 1
+    fi
+    # - шаг 3: mkswap -
+    if ! mkswap "$new_file" >/dev/null 2>&1; then
+        print_err "mkswap /swapfile не удался"
+        rm -f "$new_file"
+        return 1
+    fi
+    # - старый swapfile снимается только под готовую замену -
+    if [[ -f /swapfile ]]; then
         swapoff /swapfile 2>/dev/null || true
         # - проверяем что swap действительно отключился -
         if swapon --show 2>/dev/null | grep -q "/swapfile"; then
             print_warn "Не удалось отключить /swapfile (RAM мало, swap активен)"
             print_warn "Пропускаю пересоздание, текущий swap остаётся"
+            rm -f "$new_file"
             return 0
         fi
         rm -f /swapfile
     fi
-    print_info "Создаём /swapfile ${size_mb} MB"
-    # - шаг 1: fallocate, если не сработал - fallback на dd -
-    if ! fallocate -l "${size_mb}M" /swapfile 2>/dev/null; then
-        print_info "fallocate не поддерживается на этой FS, fallback на dd"
-        if ! dd if=/dev/zero of=/swapfile bs=1M count="$size_mb" status=none 2>/dev/null; then
-            print_err "dd не смог создать /swapfile"
-            rm -f /swapfile
-            return 1
-        fi
-    fi
-    # - шаг 2: права строго 600, иначе mkswap даст warning и swapon может отказаться -
-    if ! chmod 600 /swapfile; then
-        print_err "chmod 600 /swapfile не удался"
-        rm -f /swapfile
-        return 1
-    fi
-    # - шаг 3: mkswap -
-    if ! mkswap /swapfile >/dev/null 2>&1; then
-        print_err "mkswap /swapfile не удался"
-        rm -f /swapfile
+    if ! mv "$new_file" /swapfile; then
+        print_err "не смог подменить /swapfile готовым файлом"
+        rm -f "$new_file"
         return 1
     fi
     # - шаг 4: swapon -
     if ! swapon /swapfile 2>/dev/null; then
         print_err "swapon /swapfile не удался"
-        rm -f /swapfile
         return 1
     fi
-    if ! grep -q "/swapfile" /etc/fstab; then
+    # - строка fstab опознаётся якорем: комментарий или /swapfile2 её не заменяют -
+    if ! grep -qE '^/swapfile[[:space:]]' /etc/fstab; then
         echo '/swapfile none swap sw 0 0' >> /etc/fstab
+        eli_fact_line "/etc/fstab" '^/swapfile[[:space:]]' "fstab: строка /swapfile" || return 1
     fi
     print_ok "Swapfile ${size_mb} MB создан и активирован"
     return 0
@@ -225,14 +251,15 @@ boot_setup_swap() {
         print_warn "Swap активен но мал (${active_swap_mb} MB < ${swap_min_mb} MB)"
         print_info "Добавляем /swapfile ${swap_min_mb} MB поверх существующего"
         swapon --show | sed 's/^/      /'
-        _boot_create_swapfile "$swap_min_mb"
+        _boot_create_swapfile "$swap_min_mb" || return 1
     elif [[ -f /swapfile ]]; then
         local swapfile_mb
         swapfile_mb=$(du -m /swapfile 2>/dev/null | awk '{print $1}')
         if [[ "${swapfile_mb:-0}" -ge "$swap_min_mb" ]]; then
             print_info "Swapfile ${swapfile_mb} MB существует, активируем"
-            if ! grep -q "/swapfile" /etc/fstab; then
+            if ! grep -qE '^/swapfile[[:space:]]' /etc/fstab; then
                 echo '/swapfile none swap sw 0 0' >> /etc/fstab
+                eli_fact_line "/etc/fstab" '^/swapfile[[:space:]]' "fstab: строка /swapfile" || return 1
             fi
             if swapon /swapfile 2>/dev/null; then
                 print_ok "Swapfile активирован"
@@ -242,15 +269,23 @@ boot_setup_swap() {
             fi
         else
             print_warn "Swapfile ${swapfile_mb:-0} MB меньше ${swap_min_mb} MB, пересоздаём"
-            _boot_create_swapfile "$swap_min_mb"
+            _boot_create_swapfile "$swap_min_mb" || return 1
         fi
     else
-        _boot_create_swapfile "$swap_min_mb"
+        _boot_create_swapfile "$swap_min_mb" || return 1
     fi
 
     # - swappiness=20: дефолт Debian 60, для VPS с VPN лучше 20 -
     echo 'vm.swappiness=20' > /etc/sysctl.d/99-swap.conf
-    sysctl -w vm.swappiness=20 >/dev/null
+    eli_fact_line "/etc/sysctl.d/99-swap.conf" '^vm.swappiness=20$' "99-swap.conf" || return 1
+    sysctl -w vm.swappiness=20 >/dev/null 2>&1
+    # - факт: живое значение читается после команды -
+    local sw_now
+    sw_now=$(sysctl -n vm.swappiness 2>/dev/null || echo "")
+    if [[ "$sw_now" != "20" ]]; then
+        print_err "swappiness не применился (сейчас: ${sw_now:-?}): sysctl -w vm.swappiness=20"
+        return 1
+    fi
     print_ok "swappiness=20"
     return 0
 }
@@ -266,7 +301,9 @@ boot_setup_sysctl() {
         || print_info "nf_conntrack уже загружен"
 
     # - гарантируем загрузку модуля при каждом boot ДО применения sysctl -
+    mkdir -p /etc/modules-load.d
     echo "nf_conntrack" > /etc/modules-load.d/nf_conntrack.conf
+    eli_fact_line "/etc/modules-load.d/nf_conntrack.conf" '^nf_conntrack$' "автозагрузка nf_conntrack" || return 1
     print_ok "nf_conntrack добавлен в автозагрузку модулей"
 
     # - BBR -
@@ -274,6 +311,7 @@ boot_setup_sysctl() {
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 EOBBR
+    eli_fact_line "/etc/sysctl.d/99-bbr.conf" '^net.ipv4.tcp_congestion_control=bbr$' "99-bbr.conf" || return 1
     print_ok "99-bbr.conf записан"
 
     # - conntrack_max = 5% RAM / 300 байт на запись, минимум 65536 -
@@ -317,9 +355,18 @@ net.netfilter.nf_conntrack_udp_timeout_stream = 300
 net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
 EOVPN
+    eli_fact_line "/etc/sysctl.d/99-vpn-tune.conf" '^net.core.rmem_max = 134217728$' "99-vpn-tune.conf" || return 1
     print_ok "99-vpn-tune.conf записан"
 
     sysctl --system 2>&1 | grep -E "^\* Applying" | sed 's/^/  /' || true
+    # - факт: живые значения - bbr и посчитанный conntrack_max -
+    local bbr_live ctn_live
+    bbr_live=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "")
+    ctn_live=$(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo "")
+    if [[ "$bbr_live" != "bbr" || "$ctn_live" != "$conntrack_max" ]]; then
+        print_err "sysctl применён не целиком (bbr=${bbr_live:-?}, conntrack_max=${ctn_live:-?} из ${conntrack_max}): смотри sysctl --system"
+        return 1
+    fi
     print_ok "sysctl применён"
     return 0
 }
@@ -347,7 +394,7 @@ boot_setup_ssh_port() {
         return 1
     fi
 
-    if ss -H -tln 2>/dev/null | grep -Eq "[:.]${new_port}[[:space:]]"; then
+    if eli_port_busy "$new_port" tcp; then
         print_err "Порт ${new_port} уже занят"
         return 1
     fi
@@ -365,10 +412,9 @@ boot_setup_ssh_port() {
     fi
     print_ok "sshd_config OK"
 
-    # - страховка: если новый порт не пустит снаружи (правила провайдера, -
-    # - файрвол), таймер вернёт прежний порт; подтверждение живого входа -
-    # - снимает таймер. Команда отката самодостаточна: в юните systemd -
-    # - функций скрипта нет -
+    # - страховка: если новый порт не пустит снаружи, таймер вернёт прежний порт; -
+    # - подтверждение живого входа снимает таймер; откат самодостаточен: в юните -
+    # - systemd функций скрипта нет -
     local rollback_cmd
     rollback_cmd="sed -i '/^[[:space:]]*Port[[:space:]]/Id' /etc/ssh/sshd_config.d/00-eli.conf; printf 'Port ${BOOT_SSH_PORT}\n' >> /etc/ssh/sshd_config.d/00-eli.conf; systemctl restart ssh || systemctl restart sshd"
     eli_safety_arm "eli-ssh-rollback" 300 "$rollback_cmd"
@@ -403,6 +449,14 @@ boot_setup_ssh_port() {
         return 1
     fi
     eli_safety_disarm "eli-ssh-rollback"
+    # - откат мог сработать во время ожидания ответа: эффективный порт -
+    # - сверяется снова, иначе итог запишет в книгу порт без sshd -
+    local eff_final
+    eff_final=$(ssh_get_port)
+    if [[ "$eff_final" != "$new_port" ]]; then
+        print_err "Откат таймера уже выполнен: sshd слушает ${eff_final}, ожидался ${new_port}; порт не помечен изменённым"
+        return 1
+    fi
 
     BOOT_SSH_PORT="$new_port"
     BOOT_SSH_CHANGED="yes"
@@ -505,11 +559,19 @@ boot_setup_ufw() {
     fi
 
     ufw allow "${BOOT_SSH_PORT}/tcp" comment "SSH" 2>/dev/null || true
-    print_ok "UFW: разрешён порт ${BOOT_SSH_PORT}/tcp"
+    if _ufw_has_rule "${BOOT_SSH_PORT}" "tcp"; then
+        print_ok "UFW: разрешён порт ${BOOT_SSH_PORT}/tcp"
+    else
+        print_err "UFW не разрешил ${BOOT_SSH_PORT}/tcp: проверь ufw status verbose"
+    fi
 
     if [[ "$BOOT_SSH_CHANGED" == "yes" ]]; then
         ufw delete allow "22/tcp" 2>/dev/null || true
-        print_ok "UFW: закрыт стандартный порт 22/tcp"
+        if _ufw_has_rule "22" "tcp"; then
+            print_err "UFW не закрыт 22/tcp: ufw delete allow 22/tcp и проверь ufw status verbose"
+        else
+            print_ok "UFW: закрыт стандартный порт 22/tcp"
+        fi
     fi
 
     # - предупреждение если UFW не активен -

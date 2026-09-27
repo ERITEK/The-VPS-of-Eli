@@ -4,7 +4,7 @@
 <cyan><bold>>> Тест обфускации AmneziaWG<off>
 <cyan>------------------------------------------------------<off>
 
-  <bold>Интерфейс:<off>      <cyan>awg0<off>
+  <bold>Интерфейс:<off>      <cyan>awg2<off>
   <bold>Порт:<off>           <cyan>151515/udp<off>
   <bold>Версия AWG:<off>     <cyan>wg<off>
   <bold>Внешний iface:<off>  <cyan>eth0<off>
@@ -65,13 +65,13 @@
 
   <cyan>*<off> Дамп был сохранён как <SB>/tmp/<pcap> и сейчас удаляется
 --- вызовы платформы ---
+CMD awg show awg2 latest-handshakes
+CMD awg show awg2 latest-handshakes
 CMD flock -n 200
 CMD ip route show default
-CMD awg show awg0 latest-handshakes
-CMD timeout 60 tcpdump -i eth0 -nn -U -s 0 udp port 151515 -w <SB>/tmp/<pcap>
 CMD tcpdump -i eth0 -nn -U -s 0 udp port 151515 -w <SB>/tmp/<pcap>
-CMD awg show awg0 latest-handshakes
 CMD tcpdump -nn -r <SB>/tmp/<pcap>
 CMD tcpdump -nn -r <SB>/tmp/<pcap> -c 100
-CMD tcpdump -nn -r <SB>/tmp/<pcap> -c 10 -x
+CMD tcpdump -nn -r <SB>/tmp/<pcap> -c 100 -x
+CMD timeout 60 tcpdump -i eth0 -nn -U -s 0 udp port 151515 -w <SB>/tmp/<pcap>
 rc=0

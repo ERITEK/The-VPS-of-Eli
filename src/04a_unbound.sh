@@ -7,9 +7,8 @@ UNBOUND_MODE_FILE="/etc/unbound/unbound.conf.d/.dns_mode"
 
 
 # --> ГЕНЕРАЦИЯ КОНФИГА <--
-# - адреса и подсети берутся из env интерфейсов AWG: клиенты ходят в резолвер -
-# - через туннель, поэтому адрес туннеля обязан быть в списке interface -
-# - строка root-hints попадает в конфиг, только если подсказки уже скачаны -
+# - адреса и подсети из env интерфейсов AWG: клиенты ходят в резолвер через туннель, -
+# - адрес туннеля обязан быть в interface; root-hints попадает в конфиг, только если подсказки скачаны -
 unbound_write_conf() {
     local dns_mode="${1:-recursive}"
     local hints_file="/var/lib/unbound/root.hints"
@@ -40,9 +39,10 @@ unbound_write_conf() {
     [[ -f "$hints_file" ]] && hints_line='    root-hints: "/var/lib/unbound/root.hints"'
 
     mkdir -p /etc/unbound/unbound.conf.d/
-    # - сборка идёт во временный файл: рабочий конфиг заменяется только после проверки -
-    local conf_tmp
-    conf_tmp=$(mktemp) || { print_err "Unbound: не удалось создать временный файл"; return 1; }
+    # - сборка идёт во временный файл рядом с целью: перенос внутри каталога -
+    # - атомарен, обрыв не оставляет усечённый рабочий конфиг -
+    local conf_tmp conf_size
+    conf_tmp=$(mktemp "${UNBOUND_CONF}.tmp.XXXXXX") || { print_err "Unbound: нет временного файла рядом с ${UNBOUND_CONF}"; return 1; }
     if [[ "$dns_mode" == "recursive" ]]; then
         cat > "$conf_tmp" << EOF
 # - режим: рекурсивный -
@@ -107,8 +107,18 @@ EOF
         rm -f "$conf_tmp"
         return 1
     fi
-    mv "$conf_tmp" "$UNBOUND_CONF"
+    conf_size=$(wc -c < "$conf_tmp")
+    if ! mv "$conf_tmp" "$UNBOUND_CONF"; then
+        print_err "Unbound: перенос не удался, рабочий конфиг оставлен прежним"
+        rm -f "$conf_tmp"
+        return 1
+    fi
     chmod 644 "$UNBOUND_CONF"
+    # - факт: временного файла нет, рабочий конфиг совпадает размером с собранным -
+    if [[ -e "$conf_tmp" ]] || [[ "$(wc -c < "$UNBOUND_CONF" 2>/dev/null)" != "$conf_size" ]]; then
+        print_err "Unbound: рабочий конфиг разошёлся с собранным, проверь ${UNBOUND_CONF}"
+        return 1
+    fi
     return 0
 }
 
@@ -116,7 +126,23 @@ EOF
 # - вызывается после изменения состава интерфейсов AWG: адрес снятого туннеля -
 # - иначе остаётся в списке interface, и резолвер не поднимается при запуске -
 unbound_sync_ifaces() {
-    command -v unbound &>/dev/null || return 0
+    # - правила UFW сверяются до проверок пакета: резолвер мог быть снят -
+    # - руками, а правила снятых подсетей должны уйти в любом случае -
+    unbound_ufw_sync || true
+    # - резолвера нет (снят руками): мёртвый nameserver 127.0.0.1 из -
+    # - resolv.conf убирается с проверкой факта, иначе каждый lookup -
+    # - первым делом стучится в снятый резолвер -
+    if ! command -v unbound &>/dev/null; then
+        if grep -q "^nameserver 127.0.0.1$" /etc/resolv.conf 2>/dev/null; then
+            sed -i "/^nameserver 127.0.0.1$/d" /etc/resolv.conf
+            if grep -q "^nameserver 127.0.0.1$" /etc/resolv.conf; then
+                print_err "/etc/resolv.conf: не удалось убрать nameserver 127.0.0.1, проверь файл руками"
+                return 1
+            fi
+            print_ok "/etc/resolv.conf: nameserver 127.0.0.1 убран (unbound не установлен)"
+        fi
+        return 0
+    fi
     [[ -f "$UNBOUND_CONF" ]] || return 0
 
     # - режим: из файла режима, иначе по текущему конфигу -
@@ -137,8 +163,6 @@ unbound_sync_ifaces() {
     else
         print_err "Unbound не поднялся: journalctl -u unbound | tail -20"; return 1
     fi
-    # - состав подсетей мог измениться вместе с интерфейсами: правила UFW сверяются -
-    unbound_ufw_sync
     return 0
 }
 
@@ -146,10 +170,10 @@ unbound_sync_ifaces() {
 # - правила ставятся на подсети из env интерфейсов AWG, состав запоминается в книге: -
 # - поэтому при следующей сверке правила снятых подсетей можно убрать -
 unbound_ufw_sync() {
-    command -v ufw &>/dev/null || return 0
+    command -v ufw &>/dev/null || return 1
     local state
     state=$(ufw status 2>/dev/null || true)
-    [[ "$state" == *"Status: active"* ]] || return 0
+    [[ "$state" == *"Status: active"* ]] || return 1
 
     local want=" " _envf _sub have _old
     for _envf in "${AWG_SETUP_DIR}"/iface_*.env; do
@@ -158,27 +182,59 @@ unbound_ufw_sync() {
         [[ -n "$_sub" ]] && want+="${_sub} "
     done
 
-    # - снятие правил подсетей, которых больше нет среди интерфейсов -
+    # - снятие правил подсетей, которых больше нет среди интерфейсов: правило, -
+    # - оставшееся в ufw, возвращается в книгу, иначе оно станет вечным -
+    local have _left=" " _p _ufw_out
     have=$(book_read ".unbound.ufw_subnets")
     for _old in $have; do
+        [[ -z "$_old" ]] && continue
         [[ "$want" == *" ${_old} "* ]] && continue
-        ufw delete allow from "$_old" to any port 53 proto udp 2>/dev/null || true
-        ufw delete allow from "$_old" to any port 53 proto tcp 2>/dev/null || true
+        for _p in udp tcp; do
+            ufw delete allow from "$_old" to any port 53 proto $_p 2>/dev/null || true
+            # - вывод собирается снимком: конвейер с grep -q теряет статус писателя -
+            _ufw_out=$(ufw show added 2>/dev/null || true)
+            if grep -qF "allow from ${_old} to any port 53 proto ${_p}" <<< "$_ufw_out"; then
+                [[ "$_left" == *" ${_old} "* ]] || _left+="${_old} "
+            fi
+        done
     done
 
-    # - постановка правил текущих подсетей: повторный allow не создаёт дубля -
+    # - постановка правил текущих подсетей: повторный allow не создаёт дубля, -
+    # - факт каждого правила перечитывается из show added, книга пишется -
+    # - только при подтверждённом покрытии -
+    local failed=0
     for _sub in $want; do
-        ufw allow from "$_sub" to any port 53 proto udp comment "Unbound DNS" >/dev/null 2>&1 || true
-        ufw allow from "$_sub" to any port 53 proto tcp comment "Unbound DNS" >/dev/null 2>&1 || true
+        for _p in udp tcp; do
+            ufw allow from "$_sub" to any port 53 proto $_p comment "Unbound DNS" >/dev/null 2>&1 || true
+            _ufw_out=$(ufw show added 2>/dev/null || true)
+            grep -qF "allow from ${_sub} to any port 53 proto ${_p}" <<< "$_ufw_out" || failed=1
+        done
     done
-    local wt="${want# }"
-    book_write ".unbound.ufw_subnets" "${wt% }"
+    if (( failed )); then
+        print_warn "UFW: часть правил 53/udp+tcp не подтверждена (ufw show added)"
+        return 1
+    fi
+    local wt="${want# }" lt="${_left# }"
+    wt="${wt% }"; lt="${lt% }"
+    book_write ".unbound.ufw_subnets" "${wt}${lt:+${wt:+ }${lt}}"
+    if [[ -n "$lt" ]]; then
+        print_warn "UFW: правила снятых подсетей не снялись (${lt}), записи оставлены в книге"
+        return 1
+    fi
     return 0
 }
 
 unbound_install() {
     print_section "Установка Unbound"
-    command -v unbound &>/dev/null || apt-get install -y -qq unbound
+    if ! command -v unbound &>/dev/null; then
+        # - индекс обновляется перед установкой, результат проверяется -
+        # - повторной проверкой бинаря: отказ виден здесь, а не ниже -
+        apt-get update -qq >/dev/null 2>&1 || true
+        if ! apt-get install -y -qq unbound || ! command -v unbound &>/dev/null; then
+            print_err "Unbound не установлен: проверь apt-get update и повтори"
+            return 1
+        fi
+    fi
 
     # --> ВЫБОР РЕЖИМА DNS <--
     echo ""
@@ -196,7 +252,7 @@ unbound_install() {
     echo -e "     ${CYAN}с деградацией в рекурсию если 853 заблокирован.${NC}"
     echo -e "     ${CYAN}Провайдер клиента всё равно ничего не видит (VPN).${NC}"
     echo ""
-    local dns_mode="recursive"
+    local dns_mode="recursive" _dm
     while true; do
         ask_raw "$(printf '  \033[1mВыбор?\033[0m [1]: ')" _dm
         case "${_dm:-1}" in
@@ -228,12 +284,28 @@ EOF
         print_info "systemd-resolved не установлен -> пропускаем настройку StubListener"
     fi
 
-    # - root.hints: строка в конфиге только если файл реально скачался -
-    if curl -fsSL --connect-timeout 10 "https://www.internic.net/domain/named.cache"         -o /var/lib/unbound/root.hints 2>/dev/null; then
-        chown unbound:unbound /var/lib/unbound/root.hints 2>/dev/null || true
-        print_ok "root.hints обновлён"
+    # - root.hints: скачивается во временный файл рядом с целью, прежние подсказки -
+    # - заменяются только после проверки содержимого; строка в конфиге - по факту файла -
+    local hints_tmp
+    hints_tmp=$(mktemp "/var/lib/unbound/root.hints.tmp.XXXXXX" 2>/dev/null) || hints_tmp=""
+    if [[ -n "$hints_tmp" ]] \
+        && curl -fsSL --connect-timeout 10 "https://www.internic.net/domain/named.cache" -o "$hints_tmp" 2>/dev/null \
+        && [[ -s "$hints_tmp" ]] && grep -qE '[[:space:]]NS[[:space:]]' "$hints_tmp"; then
+        chown unbound:unbound "$hints_tmp" 2>/dev/null || true
+        if mv "$hints_tmp" /var/lib/unbound/root.hints \
+            && eli_fact_line /var/lib/unbound/root.hints '[[:space:]]NS[[:space:]]' "root.hints"; then
+            print_ok "root.hints обновлён"
+        else
+            rm -f "$hints_tmp"
+            print_err "root.hints: перенос не удался, прежние подсказки оставлены на месте"
+        fi
     else
-        print_warn "root.hints: internic.net недоступен, работаем на встроенных корневых подсказках"
+        [[ -n "$hints_tmp" ]] && rm -f "$hints_tmp"
+        if [[ -s /var/lib/unbound/root.hints ]]; then
+            print_warn "root.hints: internic.net недоступен, оставлен прежний файл подсказок"
+        else
+            print_warn "root.hints: internic.net недоступен, работаем на встроенных корневых подсказках"
+        fi
     fi
 
     # - генерация конфига: адреса туннелей и подсети берутся из env интерфейсов AWG -
@@ -276,8 +348,11 @@ EOF
         [[ -n "$_ub_ips" ]] || _ub_ips="[]"
         book_write_obj ".unbound.listen_ips" "$_ub_ips"
         # - UFW: DNS клиентов из туннельных подсетей -
-        unbound_ufw_sync
-        print_ok "UFW: 53/udp+tcp для туннельных подсетей разрешён"
+        if unbound_ufw_sync; then
+            print_ok "UFW: 53/udp+tcp для туннельных подсетей разрешён"
+        else
+            print_warn "UFW: 53/udp+tcp для туннельных подсетей НЕ подтверждён (нет ufw, файрвол выключен или правило не подтвердилось)"
+        fi
     else
         print_err "Не запустился"; return 1
     fi
@@ -303,6 +378,7 @@ EOF
         else
             sed -i '1s/^/nameserver 127.0.0.1\n/' /etc/resolv.conf
         fi
+        eli_fact_line /etc/resolv.conf '^nameserver 127[.]0[.]0[.]1$' "/etc/resolv.conf: nameserver 127.0.0.1" || return 1
         print_ok "/etc/resolv.conf: 127.0.0.1 добавлен"
     fi
 

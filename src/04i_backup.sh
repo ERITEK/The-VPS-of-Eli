@@ -3,17 +3,6 @@
 
 BACKUP_DIR="/root/eli-backups"
 
-# --> БЭКАП: СБОР КОМПОНЕНТА <--
-# - копирует файл/директорию в temp если существует -
-_bkp_add() {
-    local src="$1" dst="$2"
-    if [[ -e "$src" ]]; then
-        mkdir -p "$(dirname "$dst")"
-        cp -a "$src" "$dst" 2>/dev/null && return 0
-    fi
-    return 1
-}
-
 # --> БЭКАП: СОЗДАНИЕ <--
 backup_create() {
     print_section "Создание бэкапа стека"
@@ -24,6 +13,20 @@ backup_create() {
     tmpdir=$(mktemp -d "/tmp/eli-backup-${ts}-XXXX")
     local collected=0
     local failed=0
+
+    # - сбор компонента: копия если источник есть; отсутствие молча, -
+    # - провал копии - warn и счётчик failed -
+    _bkp_add() {
+        local src="$1" dst="$2"
+        [[ -e "$src" ]] || return 1
+        mkdir -p "$(dirname "$dst")"
+        if cp -a "$src" "$dst" 2>/dev/null; then
+            return 0
+        fi
+        print_warn "Не удалось: ${src} -> ${dst}"
+        failed=$(( failed + 1 ))
+        return 1
+    }
 
     # - хелпер с проверкой exit-кода cp -
     # - успех = collected++, провал = failed++ и warn -
@@ -52,13 +55,21 @@ backup_create() {
     fi
     if [[ -d /etc/amnezia/amneziawg ]]; then
         mkdir -p "${tmpdir}/amnezia-conf"
-        if cp -a /etc/amnezia/amneziawg/*.conf "${tmpdir}/amnezia-conf/" 2>/dev/null; then
-            local nconf
-            nconf=$(ls "${tmpdir}/amnezia-conf/"*.conf 2>/dev/null | wc -l)
-            if [[ "$nconf" -gt 0 ]]; then
-                print_ok "AWG конфиги (${nconf} шт)"
-                collected=$(( collected + 1 ))
+        # - каждый конфиг копируется отдельно: провал копии виден как failed, -
+        # - иначе в архиве молча не хватает интерфейса -
+        local nconf=0 _aconf
+        for _aconf in /etc/amnezia/amneziawg/*.conf; do
+            [[ -f "$_aconf" ]] || continue
+            if cp -a "$_aconf" "${tmpdir}/amnezia-conf/" 2>/dev/null; then
+                nconf=$(( nconf + 1 ))
+            else
+                print_warn "Не удалось: AWG конфиг $(basename "$_aconf")"
+                failed=$(( failed + 1 ))
             fi
+        done
+        if [[ "$nconf" -gt 0 ]]; then
+            print_ok "AWG конфиги (${nconf} шт)"
+            collected=$(( collected + 1 ))
         fi
     fi
 
@@ -184,7 +195,12 @@ backup_create() {
         /etc/systemd/system/x-ui.service \
         /etc/systemd/system/teamspeak.service; do
         [[ -f "$u" ]] || continue
-        cp -a "$u" "${tmpdir}/system/systemd/" 2>/dev/null && unit_count=$(( unit_count + 1 ))
+        if cp -a "$u" "${tmpdir}/system/systemd/" 2>/dev/null; then
+            unit_count=$(( unit_count + 1 ))
+        else
+            print_warn "Не удалось: unit $(basename "$u")"
+            failed=$(( failed + 1 ))
+        fi
     done
     eval "$_old_nullglob"
     if [[ $unit_count -gt 0 ]]; then
@@ -199,7 +215,11 @@ backup_create() {
         mkdir -p "${tmpdir}/ufw"
         local ufw_ok=0
         cp -a /etc/ufw/user.rules "${tmpdir}/ufw/" 2>/dev/null && ufw_ok=1
-        cp -a /etc/ufw/user6.rules "${tmpdir}/ufw/" 2>/dev/null || true
+        # - IPv6-правила копируются с проверкой: их отсутствие в архиве -
+        # - не то же самое, что провал копии -
+        if [[ -f /etc/ufw/user6.rules ]]; then
+            cp -a /etc/ufw/user6.rules "${tmpdir}/ufw/" 2>/dev/null                 || { print_warn "Не удалось: UFW user6.rules"; failed=$(( failed + 1 )); }
+        fi
         if [[ "$ufw_ok" -eq 1 ]]; then
             print_ok "UFW rules"
             collected=$(( collected + 1 ))
@@ -209,9 +229,18 @@ backup_create() {
         fi
     fi
 
-    # - Crontab -
-    crontab -l > "${tmpdir}/system/crontab.txt" 2>/dev/null || true
-    [[ -s "${tmpdir}/system/crontab.txt" ]] && { print_ok "Crontab"; collected=$(( collected + 1 )); }
+    # - Crontab: отказ чтения виден, пустой список и сбой не одно и то же -
+    local cur_cron=""
+    if eli_cron_read cur_cron; then
+        printf '%s\n' "$cur_cron" > "${tmpdir}/system/crontab.txt"
+        if [[ -n "$cur_cron" ]]; then
+            print_ok "Crontab"
+            collected=$(( collected + 1 ))
+        fi
+    else
+        print_warn "Crontab: не прочитан"
+        failed=$(( failed + 1 ))
+    fi
 
     # - системный drop-in SSH и fail2ban -
     # - конфиги обфускаторов и Telegram-бота -
@@ -254,7 +283,9 @@ METAEOF
     print_section "Упаковка"
     mkdir -p "$BACKUP_DIR"
     local archive="${BACKUP_DIR}/eli-backup-${ts}.tar.gz"
-    if tar czf "$archive" -C "$(dirname "$tmpdir")" "$(basename "$tmpdir")" 2>/dev/null; then
+    # - архив перечитывается: обрезанный файл не должен числиться готовым -
+    if tar czf "$archive" -C "$(dirname "$tmpdir")" "$(basename "$tmpdir")" 2>/dev/null \
+       && tar tzf "$archive" >/dev/null 2>&1; then
         chmod 600 "$archive"
         local size
         size=$(du -h "$archive" | awk '{print $1}')
@@ -270,7 +301,8 @@ METAEOF
         echo -e "  ${CYAN}Скачать:${NC} scp root@$(curl -4 -fsSL --connect-timeout 3 ifconfig.me 2>/dev/null || echo 'IP'):${archive} ."
         echo ""
     else
-        print_err "Ошибка создания архива"
+        print_err "Ошибка создания архива, неполный файл удалён"
+        rm -f "$archive"
         rm -rf "$tmpdir"
         return 1
     fi
@@ -411,12 +443,11 @@ backup_restore() {
         fi
     }
 
-    # - Book of Eli -
+    # - Book of Eli: подмена через канон book_replace (проверка источника, -
+    # - бэкап текущей книги, атомарный перенос) -
     if [[ -f "${root}/book/book_of_Eli.json" ]]; then
-        mkdir -p /etc/vps-eli-stack; chmod 700 /etc/vps-eli-stack
-        cp -a "${root}/book/book_of_Eli.json" /etc/vps-eli-stack/book_of_Eli.json 2>/dev/null
+        book_replace "${root}/book/book_of_Eli.json"
         _rst_result $? "Book of Eli"
-        chmod 600 /etc/vps-eli-stack/book_of_Eli.json
     fi
 
     # - AWG setup -
@@ -465,7 +496,7 @@ backup_restore() {
         systemctl stop x-ui 2>/dev/null || true
         local xui_db_dst=""
         xui_db_dst=$(find /etc/x-ui /usr/local/x-ui -maxdepth 2 -name "x-ui.db" 2>/dev/null | head -1)
-        # - дефолт для апстрима v2.x: /etc/x-ui/x-ui.db -
+        # - дефолтный путь для v2.x: /etc/x-ui/x-ui.db -
         if [[ -z "$xui_db_dst" ]]; then
             if [[ -f /etc/x-ui/x-ui || -f /usr/local/x-ui/x-ui ]]; then
                 xui_db_dst="/etc/x-ui/x-ui.db"
@@ -721,7 +752,7 @@ backup_restore() {
                 systemctl start "$svc_name" 2>/dev/null || true
             done
             # - x-ui и teamspeak запускаем если их бинари на месте -
-            # - актуальный апстрим v2.x ставит в /etc/x-ui, legacy в /usr/local/x-ui -
+            # - v2.x ставит панель в /etc/x-ui, legacy - в /usr/local/x-ui -
             if [[ -f /usr/local/x-ui/x-ui || -f /etc/x-ui/x-ui ]]; then
                 systemctl enable x-ui 2>/dev/null || true
                 systemctl start x-ui 2>/dev/null || true
@@ -773,18 +804,29 @@ backup_restore() {
             # - удаляются только свои строки: чужие задачи с такими же словами в команде -
             # - совпадать со свободным шаблоном не должны (обещано "сторонние сохранены") -
             local eli_del='/usr/local/bin/(docker-cleanup|disk-monitor|eli-healthcheck|eli-tgbot-monitor|eli-zapret-autoupdate)\.sh|^0 2 \* \* [03] /sbin/reboot|logger -t apt-check'
-            local cron_tmp; cron_tmp=$(mktemp)
-            # - сторонние строки из текущего crontab -
-            crontab -l 2>/dev/null | grep -Ev "$eli_del" > "$cron_tmp" || true
-            # - eli-задачи из бэкапа: выборка шире - старые записи тоже должны вернуться -
-            grep -E "$eli_pat" "${root}/system/crontab.txt" >> "$cron_tmp" 2>/dev/null || true
-            if crontab "$cron_tmp" 2>/dev/null; then
-                print_ok "Crontab merged (eli-задачи восстановлены, сторонние сохранены)"
-                restored=$(( restored + 1 ))
-            else
-                print_warn "Crontab: установить не удалось"
-            fi
-            rm -f "$cron_tmp"
+                # - отказ чтения: сторонние задачи не уносим, merge отменяется -
+                local cur_cron=""
+                if ! eli_cron_read cur_cron; then
+                    print_warn "Crontab: не прочитан, сторонние задачи не тронуты"
+                else
+                    local cron_tmp; cron_tmp=$(mktemp)
+                    # - сторонние строки из текущего crontab -
+                    printf '%s\n' "$cur_cron" | grep -Ev "$eli_del" > "$cron_tmp" || true
+                    # - eli-задачи из бэкапа: выборка шире - старые записи тоже должны вернуться -
+                    grep -E "$eli_pat" "${root}/system/crontab.txt" >> "$cron_tmp" 2>/dev/null || true
+                    # - дубликаты схлопываются: строка широкого шаблона живёт и в -
+                    # - текущем crontab, и в бэкапе - на повторных ресторах множится -
+                    local cron_uniq; cron_uniq=$(mktemp)
+                    awk '!seen[$0]++' "$cron_tmp" > "$cron_uniq"
+                    mv "$cron_uniq" "$cron_tmp"
+                    if crontab "$cron_tmp" 2>/dev/null; then
+                        print_ok "Crontab merged (eli-задачи восстановлены, сторонние сохранены)"
+                        restored=$(( restored + 1 ))
+                    else
+                        print_warn "Crontab: установить не удалось"
+                    fi
+                    rm -f "$cron_tmp"
+                fi
         else
             print_info "Crontab пропущен"
         fi

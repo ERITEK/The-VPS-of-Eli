@@ -10,6 +10,8 @@ x-ui_20260913_120000.db
 CMD flock -n 200
 CMD systemctl is-active --quiet x-ui
 CMD systemctl stop x-ui
+CMD systemctl is-active --quiet x-ui
 CMD systemctl start x-ui
 CMD du -h <SB>/etc/3xui/backups/x-ui_20260913_120000.db
+CMD systemctl is-active --quiet x-ui
 rc=0

@@ -3,3 +3,4 @@ socks5-1
 shadowbox
 signal-nginx-terminate
 signal-nginx-relay
+signal-certbot

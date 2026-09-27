@@ -1,0 +1,93 @@
+# golden: awg_obf_i1pre
+--- вывод ---
+
+<cyan><bold>>> Тест обфускации AmneziaWG<off>
+<cyan>------------------------------------------------------<off>
+
+  <bold>Интерфейс:<off>      <cyan>awg2<off>
+  <bold>Порт:<off>           <cyan>53536/udp<off>
+  <bold>Версия AWG:<off>     <cyan>3.0<off>
+  <bold>Внешний iface:<off>  <cyan>eth0<off>
+
+  <bold>Ожидаемые параметры обфускации:<off>
+    Jc=3  Jmin=40  Jmax=200
+    S1=121  S2=84
+    H1=603995042  H2=511223344  H3=778899001  H4=123456789
+    I1=<b 0x000100002112a442><r 12>...
+
+  <bold>Ожидаемые размеры пакетов (UDP payload):<off>
+    Vanilla WG:          init=148, resp=92
+    AWG S1/S2 padding:   init=269, resp=176
+    Junk (Jc=3):     40..200 байт ДО handshake
+
+  <bold>Длительность захвата:<off>
+    <green>1)<off> 30 секунд
+    <green>2)<off> 60 секунд (по умолчанию)
+    <green>3)<off> 120 секунд
+
+
+  <cyan>*<off> Инструкция:
+    1) На клиенте (Keenetic/Amnezia/etc) <bold>ОТКЛЮЧИ<off> VPN
+    2) Подожди 3-5 секунд
+    3) <bold>ВКЛЮЧИ<off> VPN обратно -> клиент пошлёт handshake
+    4) Жди пока tcpdump завершится (60 сек)
+
+
+  <cyan>*<off> Путь дампа: <SB>/tmp/<pcap>
+  <cyan>*<off> (удаляется автоматически после анализа)
+  <cyan>*<off> Захват до 60 сек на eth0:53536/udp (остановится по хендшейку)
+
+  <green>[-OK-]<off> Хендшейк замечен на 1-й секунде, добираю ответ и данные
+
+
+
+<cyan><bold>>> Анализ дампа<off>
+<cyan>------------------------------------------------------<off>
+  <green>[-OK-]<off> Захвачено пакетов всего: 16
+
+  <bold>Распределение размеров пакетов:<off>
+       20 байт  x1
+       30 байт  x1
+       40 байт  x1    <cyan><- junk до рукопожатия (1 пак.)<off>
+       50 байт  x1    <cyan><- junk до рукопожатия (1 пак.)<off>
+       60 байт  x1    <cyan><- junk до рукопожатия (1 пак.)<off>
+       70 байт  x1    <cyan><- junk до рукопожатия (1 пак.)<off>
+       80 байт  x1    <cyan><- junk до рукопожатия (1 пак.)<off>
+       90 байт  x1    <cyan><- junk до рукопожатия (1 пак.)<off>
+      100 байт  x1    <cyan><- junk до рукопожатия (1 пак.)<off>
+      110 байт  x1    <cyan><- junk до рукопожатия (1 пак.)<off>
+      120 байт  x1    <cyan><- junk до рукопожатия (1 пак.)<off>
+      130 байт  x1    <cyan><- junk до рукопожатия (1 пак.)<off>
+      140 байт  x1    <cyan><- junk до рукопожатия (1 пак.)<off>
+      269 байт  x1    <green><- AWG init с S1=121 padding (S1 работает)<off>
+      300 байт  x1    <off><- data-трафик (после handshake)<off>
+      400 байт  x1    <off><- data-трафик (после handshake)<off>
+
+  <bold>Первый байт UDP payload (WG type field):<off>
+    пакет #14: 0x5d (93) -> обфусцирован (не равен 1-4)
+    пакет #15: 0x5d (93) -> обфусцирован (не равен 1-4)
+    пакет #16: 0x5d (93) -> обфусцирован (не равен 1-4)
+
+  <bold>Проверка I1 signature chain:<off>
+  <green>[-OK-]<off>     I1 найден в пакете #1 на offset 0 байт
+    Искомый фрагмент: 000100002112a442...
+
+  <bold>Итог:<off>
+  <green>[-OK-]<off> S1 padding работает (пакет 269 байт)
+  <yellow>[!!!]<off>  S2: response пакет не видно
+  <green>[-OK-]<off> Jc junk пакеты присутствуют (11 до рукопожатия, ожидалось 3)
+  <green>[-OK-]<off> H1-H4 mangle работает (первые байты payload не vanilla-типа)
+  <green>[-OK-]<off> I1 signature chain применён (найден статичный фрагмент)
+
+  <cyan>*<off> Дамп был сохранён как <SB>/tmp/<pcap> и сейчас удаляется
+--- вызовы платформы ---
+CMD awg show awg2 latest-handshakes
+CMD awg show awg2 latest-handshakes
+CMD flock -n 200
+CMD ip route show default
+CMD tcpdump -i eth0 -nn -U -s 0 udp port 53536 -w <SB>/tmp/<pcap>
+CMD tcpdump -nn -r <SB>/tmp/<pcap>
+CMD tcpdump -nn -r <SB>/tmp/<pcap> -c 100
+CMD tcpdump -nn -r <SB>/tmp/<pcap> -c 100 -x
+CMD timeout 60 tcpdump -i eth0 -nn -U -s 0 udp port 53536 -w <SB>/tmp/<pcap>
+rc=0

@@ -4,6 +4,7 @@
 # --> МЕНЮ: VPN И ПРОКСИ <--
 # - подменю выбора VPN и прокси мессенджеров -
 menu_vpn() {
+    local choice
     while true; do
         eli_header
         eli_banner "VPN и прокси" \
@@ -54,6 +55,7 @@ menu_vpn() {
 # --> МЕНЮ: AWG <--
 # - подменю AmneziaWG: установка и управление -
 menu_awg() {
+    local choice
     while true; do
         eli_header
         eli_banner "AmneziaWG" \
@@ -96,6 +98,7 @@ menu_awg() {
 # --> МЕНЮ: ZAPRET2 <--
 # - подменю zapret2: установка и управление -
 menu_zapret() {
+    local choice
     while true; do
         eli_header
         eli_banner "zapret2 (обход DPI)" \
@@ -148,6 +151,7 @@ menu_zapret() {
 # --> МЕНЮ: WG-OBFUSCATOR <--
 # - подменю обфускатора: установка и управление -
 menu_wgobfs() {
+    local choice
     while true; do
         eli_header
         eli_banner "wg-obfuscator (маскировка WG)" \
@@ -202,6 +206,7 @@ menu_wgobfs() {
 # --> МЕНЮ: MIMIC <--
 # - подменю mimic: установка и управление -
 menu_mimic() {
+    local choice
     while true; do
         eli_header
         eli_banner "mimic (UDP -> TCP)" \
@@ -255,6 +260,7 @@ menu_mimic() {
 
 # --> МЕНЮ: 3X-UI <--
 menu_xui() {
+    local choice
     while true; do
         eli_header
         eli_banner "3X-UI" \
@@ -302,6 +308,7 @@ menu_xui() {
 
 # --> МЕНЮ: OUTLINE <--
 menu_otl() {
+    local choice
     while true; do
         eli_header
         eli_banner "Outline" \
@@ -351,6 +358,7 @@ menu_otl() {
 # --> МЕНЮ: ПРОКСИ <--
 # - хаб с подменю: MTProto, SOCKS5, Hysteria 2, Signal -
 menu_proxy() {
+    local choice
     while true; do
         eli_header
         eli_banner "Прокси" \
@@ -390,6 +398,7 @@ menu_proxy() {
 
 # --> ПОДМЕНЮ: MTPROTO <--
 menu_mtp() {
+    local choice
     while true; do
         eli_header
         eli_banner "MTProto Proxy (Telegram)" \
@@ -431,6 +440,7 @@ menu_mtp() {
 
 # --> ПОДМЕНЮ: SOCKS5 <--
 menu_s5() {
+    local choice
     while true; do
         eli_header
         eli_banner "SOCKS5 Proxy" \
@@ -470,6 +480,7 @@ menu_s5() {
 
 # --> ПОДМЕНЮ: HYSTERIA 2 <--
 menu_hy2() {
+    local choice
     while true; do
         eli_header
         eli_banner "Hysteria 2" \
@@ -514,6 +525,7 @@ menu_hy2() {
 
 # --> ПОДМЕНЮ: SIGNAL <--
 menu_sig() {
+    local choice
     while true; do
         eli_header
         eli_banner "Signal TLS Proxy" \
@@ -557,6 +569,7 @@ menu_sig() {
 # --> МЕНЮ: СВЯЗЬ <--
 # - подменю: TeamSpeak, Mumble -
 menu_comms() {
+    local choice
     while true; do
         eli_header
         eli_banner "Связь" \
@@ -588,6 +601,7 @@ menu_comms() {
 
 # --> МЕНЮ: TEAMSPEAK <--
 menu_ts() {
+    local choice
     while true; do
         eli_header
         eli_banner "TeamSpeak 6" \
@@ -635,6 +649,7 @@ menu_ts() {
 
 # --> МЕНЮ: MUMBLE <--
 menu_mbl() {
+    local choice
     while true; do
         eli_header
         eli_banner "Mumble" \
@@ -678,6 +693,7 @@ menu_mbl() {
 # --> МЕНЮ: ОБСЛУЖИВАНИЕ <--
 # - подменю: Unbound, диагностика, prayer, SSH, UFW, обновления, routine -
 menu_maint() {
+    local choice
     while true; do
         eli_header
         eli_banner "Обслуживание и диагностика" \
@@ -730,6 +746,7 @@ menu_maint() {
 
 # --> МЕНЮ: UNBOUND <--
 menu_unbound() {
+    local choice
     while true; do
         eli_header
         eli_banner "Unbound DNS" \
@@ -770,6 +787,7 @@ menu_unbound() {
 
 # --> МЕНЮ: SSH <--
 menu_ssh() {
+    local choice
     while true; do
         eli_header
         eli_banner "Управление SSH" \
@@ -813,6 +831,7 @@ menu_ssh() {
 
 # --> МЕНЮ: UFW <--
 menu_ufw() {
+    local choice
     while true; do
         eli_header
         eli_banner "Firewall (UFW)" \
@@ -873,6 +892,7 @@ menu_ufw() {
 
 # --> МЕНЮ: ОБНОВЛЕНИЯ <--
 menu_update() {
+    local choice
     while true; do
         eli_header
         eli_banner "Обновления" \
@@ -916,6 +936,7 @@ menu_update() {
 
 # --> МЕНЮ: БЭКАП <--
 menu_backup() {
+    local choice
     while true; do
         eli_header
         eli_banner "Бэкап и восстановление" \
@@ -952,6 +973,7 @@ menu_backup() {
 
 # --> МЕНЮ: TELEGRAM МОНИТОРИНГ <--
 menu_tgbot() {
+    local choice
     while true; do
         eli_header
         eli_banner "Telegram мониторинг" \
@@ -993,6 +1015,7 @@ menu_tgbot() {
 
 # --> ТОЧКА ВХОДА: ГЛАВНОЕ МЕНЮ <--
 eli_main() {
+    local choice
     eli_header
 
     while true; do
