@@ -1,0 +1,12 @@
+# golden: mbl_status
+--- вывод ---
+
+<cyan><bold>>> Статус Mumble<off>
+<cyan>------------------------------------------------------<off>
+  <green>[-OK-]<off> Сервис: активен
+  <cyan>*<off> Порт: 64738
+  <cyan>*<off> Адрес: 203.0.113.9:64738
+--- вызовы платформы ---
+CMD flock -n 200
+CMD systemctl is-active --quiet mumble-server
+rc=0

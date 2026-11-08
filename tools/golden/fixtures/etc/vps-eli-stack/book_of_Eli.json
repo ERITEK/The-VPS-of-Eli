@@ -1,0 +1,31 @@
+{
+  "system": { "main_iface": "eth0" },
+  "mumble": { "server_ip": "203.0.113.9" },
+  "teamspeak": { "db_path": "/opt/teamspeak/tsserver.sqlitedb" },
+  "awg": { "interfaces": { "awg0": { "port": 1618 } } },
+  "wgobfs": {
+    "installed": "true",
+    "version": "1.0.2",
+    "instances": {
+      "awg0": { "lport": 3333, "target": "10.8.0.1:1618", "masking": "quic" },
+      "awg1": { "lport": 3334, "target": "10.9.0.1:1619", "masking": "stun" }
+    }
+  },
+  "zapret": {
+    "installed": "true",
+    "version": "2.1",
+    "autoupdate_enabled": "true",
+    "interfaces": {
+      "awg0": { "qnum": 4200, "strategy": "split", "bound": true, "last_blockcheck": "2026-02-01 10:00" },
+      "awg1": { "strategy": "fake", "bound": true, "last_blockcheck": "2026-02-01 10:05" }
+    }
+  },
+  "mimic": {
+    "installed": "true",
+    "version": "1.4",
+    "source": "repo",
+    "xdp_mode": "native",
+    "wan_iface": "eth0",
+    "instances": { "awg0": { "port": 8443, "local_ip": "203.0.113.9" } }
+  }
+}

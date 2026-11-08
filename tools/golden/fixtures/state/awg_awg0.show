@@ -1,0 +1,8 @@
+interface: awg0
+  public key: c2VydmVyLXB1YmxpYy1rZXktcGxhY2Vob2xkZXIwMDAwMDA=
+  private key: (hidden)
+  listening port: 1618
+
+peer: cGVlci1rZXktcGhvbmUtcGxhY2Vob2xkZXIwMDAwMDAwMDA=
+  latest handshake: 1 minute, 5 seconds ago
+  transfer: 12.34 MiB received, 5.67 MiB sent

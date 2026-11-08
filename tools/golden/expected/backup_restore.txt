@@ -1,0 +1,38 @@
+# golden: backup_restore
+--- вывод ---
+
+<cyan><bold>>> Восстановление стека из бэкапа<off>
+<cyan>------------------------------------------------------<off>
+
+  <green>1)<off> 2026-01-05_031500  (4.0K)
+  <green>2)<off> 2026-02-11_031500  (4.0K)
+  <green>3)<off> 20260913_120000  (4.0K)
+
+
+  <yellow>[!!!]<off>  Восстановление перезапишет текущие конфиги и перезапустит сервисы!
+  <yellow>[!!!]<off>  backup_meta.txt не найден в архиве - восстанавливаю без проверки совместимости
+  <green>[-OK-]<off> AWG setup (env, ключи, клиенты)
+  <green>[-OK-]<off> TeamSpeak SQLite -> <SB>/opt/teamspeak
+  <red>[xXx]<off> Не удалось восстановить: MTProto env
+
+  <green>[-OK-]<off> Восстановлено компонентов: 2
+  <red>[xXx]<off> Не восстановлено: 1 (см. строки выше)
+  <cyan>*<off> Проверь сервисы: Обслуживание -> Диагностика или Prayer of Eli
+--- база TeamSpeak у цели ---
+tsserver.sqlitedb
+TS-DB-ARCHIVE
+--- настройки AWG из архива ---
+AWG_PORT=42003
+--- каталог MTProto в архиве ---
+--- вызовы платформы ---
+CMD flock -n 200
+CMD du -h <SB>/root/eli-backups/eli-backup-2026-01-05_031500.tar.gz
+CMD du -h <SB>/root/eli-backups/eli-backup-2026-02-11_031500.tar.gz
+CMD du -h <SB>/root/eli-backups/eli-backup-20260913_120000.tar.gz
+CMD systemctl stop awg-quick@awg0
+CMD systemctl stop awg-quick@awg1
+CMD systemctl start awg-quick@awg0
+CMD systemctl start awg-quick@awg1
+CMD systemctl stop teamspeak
+CMD systemctl start teamspeak
+rc=0

@@ -1,0 +1,13 @@
+table inet zeli_awg0 {
+	set zeli_hosts {
+		type ipv4_addr
+		flags interval
+	}
+
+	chain post {
+		type filter hook postrouting priority srcnat; policy accept;
+		meta mark 0x20000000 queue num 4200
+		queue num 4200
+		queue num 4200
+	}
+}

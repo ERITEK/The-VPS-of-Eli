@@ -1,0 +1,22 @@
+# golden: awg_status
+--- вывод ---
+
+<cyan><bold>>> Статус AmneziaWG<off>
+<cyan>------------------------------------------------------<off>
+
+  <green>(*)<off> <bold>awg0<off>  (Основной)  AWG 1.5  порт 1618  подсеть 10.8.0.0/24
+    peer cGVlci1r...  1 minute, 5 seconds ago  ^5.67 MiB  v12.34 MiB
+  <cyan>*<off> Клиенты:
+      <cyan>*<off> laptop  ->  10.8.0.3/32
+      <cyan>*<off> phone  ->  10.8.0.2/32
+
+  <red>( )<off> <bold>awg1<off>    WireGuard [<yellow>остановлен<off>]
+  <cyan>*<off> Клиенты:
+      <cyan>*<off> tablet  ->  10.9.0.2/32
+--- вызовы платформы ---
+CMD flock -n 200
+CMD systemctl is-active --quiet awg-quick@awg0
+CMD awg show awg0
+CMD systemctl is-active --quiet awg-quick@awg1
+CMD awg show awg1
+rc=0

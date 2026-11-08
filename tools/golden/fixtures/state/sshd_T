@@ -1,0 +1,4 @@
+port 2222
+permitrootlogin prohibit-password
+passwordauthentication no
+pubkeyauthentication yes
