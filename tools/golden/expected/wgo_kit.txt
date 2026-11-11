@@ -1,0 +1,49 @@
+# golden: wgo_kit
+--- вывод ---
+== s1: архив не создаётся ==
+
+<cyan><bold>>> Клиентский комплект<off>
+<cyan>------------------------------------------------------<off>
+  <green>1)<off> awg0
+  <green>2)<off> awg1
+
+  <green>1)<off> ipad
+  <cyan>*<off> Интерфейс за обфускатором: Endpoint переписан на 127.0.0.1:3333
+  <cyan>*<off> Комплект клиента: <SB>/etc/awg-setup/clients_awg1/ipad (client.conf + wg-obfuscator.conf)
+  <red>[xXx]<off> Комплект не собран: архив не создан (<SB>/etc/vps-eli-stack/wgobfs/awg1-ipad-wgobfs.tar.gz)
+  <cyan>*<off> Проверь место на диске и права каталога <SB>/etc/vps-eli-stack/wgobfs
+rc=1
+архив: нет
+== s2: архив собирается ==
+
+<cyan><bold>>> Клиентский комплект<off>
+<cyan>------------------------------------------------------<off>
+  <green>1)<off> awg0
+  <green>2)<off> awg1
+
+  <green>1)<off> ipad
+  <cyan>*<off> Интерфейс за обфускатором: Endpoint переписан на 127.0.0.1:3333
+  <cyan>*<off> Комплект клиента: <SB>/etc/awg-setup/clients_awg1/ipad (client.conf + wg-obfuscator.conf)
+  <green>[-OK-]<off> Комплект собран: <SB>/etc/vps-eli-stack/wgobfs/awg1-ipad-wgobfs.tar.gz
+
+
+rc=0
+архив: есть
+--- содержимое ---
+awg1-ipad-wgobfs/
+awg1-ipad-wgobfs/README.txt
+awg1-ipad-wgobfs/client.conf
+awg1-ipad-wgobfs/wg-obfuscator.conf
+--- client.conf в комплекте ---
+[Interface]
+FwMark = 0xdead
+PrivateKey = y
+Address = 10.9.0.3/32
+
+[Peer]
+PublicKey = z
+Endpoint = 127.0.0.1:3333
+AllowedIPs = 0.0.0.0/0
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

@@ -1,0 +1,8 @@
+# golden: awg_collisions
+--- вывод ---
+s4=15
+response 80
+s4=16
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

@@ -1,0 +1,12 @@
+# golden: xui_db_migrate
+--- вывод ---
+  <green>[-OK-]<off> База 3X-UI перенесена: <SB>/usr/local/x-ui/db/x-ui.db -> <SB>/etc/x-ui/x-ui.db
+db=<SB>/etc/x-ui/x-ui.db
+LEGACY-DB
+legacy=LEGACY-DB
+--- вызовы платформы ---
+CMD flock -n 200
+CMD systemctl is-active --quiet x-ui
+CMD systemctl stop x-ui
+CMD systemctl is-active --quiet x-ui
+rc=0

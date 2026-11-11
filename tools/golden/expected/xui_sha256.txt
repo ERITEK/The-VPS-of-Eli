@@ -1,0 +1,20 @@
+# golden: xui_sha256
+--- вывод ---
+== ok ==
+  <green>[-OK-]<off> Сумма sha256 архива совпала с опубликованной
+rc=0
+== mismatch ==
+  <red>[xXx]<off> Сумма sha256 архива не совпала с опубликованной (https://example.invalid/x.tar.gz.sha256)
+rc=1
+== network ==
+  <red>[xXx]<off> Не удалось получить https://example.invalid/x.tar.gz.sha256 (HTTP 000): установка остановлена
+rc=1
+== 404 pin ==
+  <yellow>[!!!]<off>  Для пина v3.7.0 .sha256 не опубликован, установка без сверки суммы
+rc=0
+== 404 latest ==
+  <red>[xXx]<off> Не удалось получить https://example.invalid/x.tar.gz.sha256 (HTTP 404): установка остановлена
+rc=1
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

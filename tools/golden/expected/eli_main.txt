@@ -1,0 +1,51 @@
+# golden: eli_main
+--- вывод ---
+
+  <green>1)<off> Старт (первичная настройка VPS)
+  <green>2)<off> VPN и прокси (AmneziaWG, 3X-UI, Outline, MTProto, Signal)
+  <green>3)<off> Связь (TeamSpeak, Mumble)
+  <green>4)<off> Обслуживание и диагностика
+
+  <green>0)<off> Выход
+
+MARK boot_run
+
+  <green>1)<off> Старт (первичная настройка VPS)
+  <green>2)<off> VPN и прокси (AmneziaWG, 3X-UI, Outline, MTProto, Signal)
+  <green>3)<off> Связь (TeamSpeak, Mumble)
+  <green>4)<off> Обслуживание и диагностика
+
+  <green>0)<off> Выход
+
+MARK menu_vpn
+
+  <green>1)<off> Старт (первичная настройка VPS)
+  <green>2)<off> VPN и прокси (AmneziaWG, 3X-UI, Outline, MTProto, Signal)
+  <green>3)<off> Связь (TeamSpeak, Mumble)
+  <green>4)<off> Обслуживание и диагностика
+
+  <green>0)<off> Выход
+
+MARK menu_comms
+
+  <green>1)<off> Старт (первичная настройка VPS)
+  <green>2)<off> VPN и прокси (AmneziaWG, 3X-UI, Outline, MTProto, Signal)
+  <green>3)<off> Связь (TeamSpeak, Mumble)
+  <green>4)<off> Обслуживание и диагностика
+
+  <green>0)<off> Выход
+
+MARK menu_maint
+
+  <green>1)<off> Старт (первичная настройка VPS)
+  <green>2)<off> VPN и прокси (AmneziaWG, 3X-UI, Outline, MTProto, Signal)
+  <green>3)<off> Связь (TeamSpeak, Mumble)
+  <green>4)<off> Обслуживание и диагностика
+
+  <green>0)<off> Выход
+
+
+  Выход.
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0
