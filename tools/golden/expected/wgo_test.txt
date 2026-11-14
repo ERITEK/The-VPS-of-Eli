@@ -1,0 +1,38 @@
+# golden: wgo_test
+--- вывод ---
+
+<cyan><bold>>> Тест wg-obfuscator<off>
+<cyan>------------------------------------------------------<off>
+
+  <bold>awg0<off>
+  <green>[-OK-]<off>   инстанс активен
+  <red>[xXx]<off>   порт 3333/udp не слушается
+  <green>[-OK-]<off>   туннель awg0 поднят
+  <red>[xXx]<off>   интерфейс НЕ vanilla: обфускатор ломает такие пакеты
+  <green>[-OK-]<off>   порт 1618/udp закрыт (UFW deny incoming)
+  <green>[-OK-]<off>   живых хендшейков: 1
+
+  <bold>awg1<off>
+  <red>[xXx]<off>   инстанс не активен: journalctl -u wgobfs-eli@awg1.service -n 20 --no-pager
+  <red>[xXx]<off>   порт 3334/udp не слушается
+  <red>[xXx]<off>   туннель awg1 не поднят
+  <green>[-OK-]<off>   интерфейс vanilla-WG
+  <green>[-OK-]<off>   порт 1619/udp закрыт (UFW deny incoming)
+  <cyan>*<off>   хендшейков нет: клиент ещё не подключался или обфускатор у него не запущен
+--- вызовы платформы ---
+CMD flock -n 200
+CMD systemctl is-active --quiet wgobfs-eli@awg0.service
+CMD ss -H -uln
+CMD systemctl is-active --quiet awg-quick@awg0
+CMD ufw show added
+CMD ufw status
+CMD ufw status verbose
+CMD awg show awg0 latest-handshakes
+CMD systemctl is-active --quiet wgobfs-eli@awg1.service
+CMD ss -H -uln
+CMD systemctl is-active --quiet awg-quick@awg1
+CMD ufw show added
+CMD ufw status
+CMD ufw status verbose
+CMD awg show awg1 latest-handshakes
+rc=0

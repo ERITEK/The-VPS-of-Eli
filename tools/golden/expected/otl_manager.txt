@@ -1,0 +1,11 @@
+# golden: otl_manager
+--- вывод ---
+
+<cyan><bold>>> Ключ для Outline Manager<off>
+<cyan>------------------------------------------------------<off>
+
+  <bold>Вставь в Outline Manager:<off>
+    <cyan>{"apiUrl":"https://203.0.113.9:8443/abc123","certSha256":"A1B2C3D4E5F60718293A4B5C6D7E8F90"}<off>
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

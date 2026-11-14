@@ -1,0 +1,122 @@
+# golden: wgo_bind
+--- вывод ---
+== s1: правило DROP не применилось - привязка отменена, запись снята ==
+
+<cyan><bold>>> Параметры инстанса<off>
+<cyan>------------------------------------------------------<off>
+  <cyan>Публичный UDP-порт обфускатора. Клиенты будут стучаться сюда.<off>
+
+  <cyan>Ключ обфускации. Не крипта (крипта внутри WG), но у всех разный.<off>
+
+  <bold>Маскировка на сервере:<off>
+  <green>1)<off> AUTO - сервер не маскирует сам, но подхватывает маскировку клиента (рекомендуется)
+  <green>2)<off> STUN - только STUN-маскированный вход, клиент без STUN отвалится молча
+  <green>3)<off> NONE - маскировки нет вообще, только XOR-обфускация
+  <yellow>[!!!]<off>  UFW неактивен или дефолт incoming не deny -> ставлю собственное правило DROP
+  <red>[xXx]<off> Правило DROP не применилось, порт 1619/udp остался бы открыт
+  <red>[xXx]<off> Не удалось закрыть порт 1619/udp -> привязка отменена
+rc=1
+есть-конфиг: нет
+DROP-записей: 0
+dropflag: нет
+book bound: null
+--- ufw ---
+ufw show added
+== s2: инстанс не удержался - откат возвращает allow порта туннеля ==
+
+<cyan><bold>>> Параметры инстанса<off>
+<cyan>------------------------------------------------------<off>
+  <cyan>Публичный UDP-порт обфускатора. Клиенты будут стучаться сюда.<off>
+
+  <cyan>Ключ обфускации. Не крипта (крипта внутри WG), но у всех разный.<off>
+
+  <bold>Маскировка на сервере:<off>
+  <green>1)<off> AUTO - сервер не маскирует сам, но подхватывает маскировку клиента (рекомендуется)
+  <green>2)<off> STUN - только STUN-маскированный вход, клиент без STUN отвалится молча
+  <green>3)<off> NONE - маскировки нет вообще, только XOR-обфускация
+  <yellow>[!!!]<off>  UFW неактивен или дефолт incoming не deny -> ставлю собственное правило DROP
+  <green>[-OK-]<off> Правило DROP на 1619/udp (eth0) применено и записано в конфиг интерфейса
+  <cyan>*<off> Снято UFW-правило allow 1619/udp
+  <red>[xXx]<off> Привязка отменена -> инстанс не стартовал
+rc=1
+есть-конфиг: нет
+DROP-записей: 0
+dropflag: нет
+book bound: null
+--- ufw ---
+ufw show added
+ufw show added
+ufw delete allow 1619/udp
+ufw allow 23456/udp comment wgobfs awg1
+ufw delete allow 23456/udp
+ufw allow 1619/udp comment AWG awg1
+== s3: успех - счётчик переписанных клиентов ==
+
+<cyan><bold>>> Параметры инстанса<off>
+<cyan>------------------------------------------------------<off>
+  <cyan>Публичный UDP-порт обфускатора. Клиенты будут стучаться сюда.<off>
+
+  <cyan>Ключ обфускации. Не крипта (крипта внутри WG), но у всех разный.<off>
+
+  <bold>Маскировка на сервере:<off>
+  <green>1)<off> AUTO - сервер не маскирует сам, но подхватывает маскировку клиента (рекомендуется)
+  <green>2)<off> STUN - только STUN-маскированный вход, клиент без STUN отвалится молча
+  <green>3)<off> NONE - маскировки нет вообще, только XOR-обфускация
+  <yellow>[!!!]<off>  UFW неактивен или дефолт incoming не deny -> ставлю собственное правило DROP
+  <green>[-OK-]<off> Правило DROP на 1619/udp (eth0) применено и записано в конфиг интерфейса
+  <cyan>*<off> Снято UFW-правило allow 1619/udp
+  <green>[-OK-]<off> Обфускатор для awg1 запущен: 23456/udp -> 127.0.0.1:1619
+  <cyan>*<off> Интерфейс за обфускатором: Endpoint переписан на 127.0.0.1:3333
+  <cyan>*<off> Комплект клиента: <SB>/etc/awg-setup/clients_awg1/ipad (client.conf + wg-obfuscator.conf)
+  <red>[xXx]<off> Endpoint клиента: в <SB>/etc/awg-setup/clients_awg1/tablet/client.conf нет строки по шаблону ^Endpoint = 127[.]0[.]0[.]1:3333$
+  <cyan>*<off> Его конфиг обфускатора собран, но client.conf не переписан
+  <green>[-OK-]<off> Переписаны конфиги существующих клиентов: 1 из 2
+  <yellow>[!!!]<off>  Клиенты с прямым Endpoint: 1 (порт туннеля после привязки закрыт)
+  <cyan>*<off> Пересобери их конфиги: управление -> Клиентский комплект
+
+  <cyan>*<off> Комплект клиента забирается через управление -> Клиентский комплект.
+  <yellow>[!!!]<off>  Клиенту обязателен свой wg-obfuscator, без него туннель не поднимется.
+rc=0
+есть-конфиг: да
+DROP-записей: 1
+dropflag: да
+book bound: true
+--- ufw ---
+ufw show added
+ufw show added
+ufw delete allow 1619/udp
+ufw allow 23456/udp comment wgobfs awg1
+--- конфиг инстанса ---
+[awg1]
+source-lport = 23456
+target = 127.0.0.1:1619
+key = obfkey123
+masking = AUTO
+verbose = INFO
+--- client.conf ipad ---
+[Interface]
+FwMark = 0xdead
+PrivateKey = y
+Address = 10.9.0.3/32
+
+[Peer]
+PublicKey = z
+Endpoint = 127.0.0.1:3333
+AllowedIPs = 0.0.0.0/0
+--- вызовы платформы ---
+CMD flock -n 200
+CMD ss -H -uln
+CMD ss -H -tln
+CMD ss -H -uln
+CMD ss -H -uln
+CMD ss -H -tln
+CMD ss -H -uln
+CMD systemctl enable wgobfs-eli@awg1.service
+CMD systemctl restart wgobfs-eli@awg1.service
+CMD systemctl disable --now wgobfs-eli@awg1.service
+CMD ss -H -uln
+CMD ss -H -tln
+CMD ss -H -uln
+CMD systemctl enable wgobfs-eli@awg1.service
+CMD systemctl restart wgobfs-eli@awg1.service
+rc=0

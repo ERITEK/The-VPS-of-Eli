@@ -1,0 +1,6 @@
+# golden: awg_s3s4_guard
+--- вывод ---
+rc=1 S3= S4=
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

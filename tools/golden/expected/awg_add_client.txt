@@ -1,0 +1,43 @@
+# golden: awg_add_client
+--- вывод ---
+
+<cyan><bold>>> Добавить клиента<off>
+<cyan>------------------------------------------------------<off>
+  <cyan>Имя устройства - латиница, цифры, дефис, подчёркивание (например: iphone-vasya, laptop-work).<off>
+  <green>[-OK-]<off> IP: 10.99.0.2
+  <green>[-OK-]<off> Клиент kit-test добавлен: IP 10.99.0.2
+  <cyan>*<off> Конфиг: <SB>/etc/awg-setup/clients_write0/kit-test/client.conf
+  <green>[-OK-]<off> Пир применён на живом интерфейсе write0 (перезапуск не требуется)
+
+--- client.conf ---
+# AWG 1.5 (Jc/Jmin/Jmax/S1/S2/H1-H4 + I1-I5 signature chain)
+# Совместимость: AmneziaVPN 4.x+, AmneziaWG 1.5+, Keenetic NDMS 5.1 Alpha 3+
+# Как подключить: импортируй этот .conf в клиент (файл или QR-код)
+[Interface]
+PrivateKey = cGxhY2Vob2xkZXItcHJpdmF0ZS1rZXktMDAwMDAwMDA=
+Address = 10.99.0.2/24
+DNS = 1.1.1.1
+MTU = 1320
+Jc = 4
+Jmin = 120
+Jmax = 900
+S1 = 146
+S2 = 147
+H1 = 603995042
+H2 = 511223344
+H3 = 778899001
+H4 = 123456789
+I1 = <b 0x000100002112a442><r 12>
+
+[Peer]
+PublicKey = c2VydmVyLXB1YmxpYy1rZXktcGxhY2Vob2xkZXIwMDAwMDA=
+Endpoint = 203.0.113.9:1618
+AllowedIPs = 10.99.0.0/24
+PersistentKeepalive = 25
+--- вызовы платформы ---
+CMD flock -n 200
+CMD wg genkey
+CMD wg pubkey
+CMD systemctl is-active --quiet awg-quick@write0
+CMD awg set write0 peer cGxhY2Vob2xkZXItcHVibGljLWtleS0wMDAwMDAwMDA= allowed-ips 10.99.0.2/32
+rc=0

@@ -1,0 +1,29 @@
+# golden: xui_db_dir
+--- вывод ---
+== s1: каталога нет - создаётся с 700 ==
+rc=0
+каталог: есть
+== s2: каталог есть - существующий не переписывается ==
+rc=0
+каталог: есть
+== s3: install не отработал - отказ, каталога нет ==
+install: отказ
+  <red>[xXx]<off> Каталог /etc/x-ui не создан
+rc=1
+каталог: нет
+== s4: подготовка CLI/unit: каталог раньше unit и enable ==
+rc=0
+каталог: есть
+cli: есть
+unit строк: 2
+--- вызовы платформы ---
+CMD flock -n 200
+CMD install -d -m 700 <SB>/etc/x-ui -> создан 700
+CMD install -d -m 700 <SB>/etc/x-ui -> существующий не тронут
+CMD install -d -m 700 <SB>/etc/x-ui -> отказ
+CMD chown root:root <SB>/etc/systemd/system/x-ui.service
+CMD install -d -m 700 <SB>/etc/x-ui -> создан 700
+CMD systemctl daemon-reload
+CMD systemctl enable x-ui
+CMD systemctl is-enabled --quiet x-ui
+rc=0

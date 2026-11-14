@@ -1,0 +1,13 @@
+# golden: backup_list
+--- вывод ---
+
+<cyan><bold>>> Список бэкапов<off>
+<cyan>------------------------------------------------------<off>
+
+  <green>1)<off> 2026-01-05_031500  (4.0K)  <SB>/root/eli-backups/eli-backup-2026-01-05_031500.tar.gz
+  <green>2)<off> 2026-02-11_031500  (4.0K)  <SB>/root/eli-backups/eli-backup-2026-02-11_031500.tar.gz
+--- вызовы платформы ---
+CMD flock -n 200
+CMD du -h <SB>/root/eli-backups/eli-backup-2026-01-05_031500.tar.gz
+CMD du -h <SB>/root/eli-backups/eli-backup-2026-02-11_031500.tar.gz
+rc=0

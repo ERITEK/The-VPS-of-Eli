@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# - заглушка бинаря wg-obfuscator: версия для снапшота -
+echo "wg-obfuscator v1.0.2"

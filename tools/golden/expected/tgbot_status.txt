@@ -1,0 +1,16 @@
+# golden: tgbot_status
+--- вывод ---
+
+<cyan><bold>>> Статус Telegram бота<off>
+<cyan>------------------------------------------------------<off>
+  <green>(*)<off> <bold>Telegram Monitor<off>
+  Интервал: каждые 10 мин
+  Имя сервера: eli-stand
+  Chat ID: 123456789
+  Скрипт: <SB>/usr/local/bin/eli-tgbot-monitor.sh
+  <green>[-OK-]<off> Cron задача активна
+--- вызовы платформы ---
+CMD flock -n 200
+CMD hostname
+CMD crontab -l
+rc=0

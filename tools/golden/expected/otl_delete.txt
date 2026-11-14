@@ -1,0 +1,43 @@
+# golden: otl_delete
+--- вывод ---
+== s1: удаление проходит ==
+логов до: 2
+
+<cyan><bold>>> Удаление Outline<off>
+<cyan>------------------------------------------------------<off>
+  <yellow>[!!!]<off>  Всё будет удалено!
+  <green>[-OK-]<off> Outline удалён
+rc=0
+dc: [keep-other ]
+book installed: false
+etc/outline: нет
+opt/outline: нет
+логов после: 0
+--- ufw ---
+ufw delete allow 8443/tcp
+ufw delete allow 8444/tcp
+ufw delete allow 8444/udp
+== s2: контейнер не снесён - книга не переводится ==
+логов до: 2
+
+<cyan><bold>>> Удаление Outline<off>
+<cyan>------------------------------------------------------<off>
+  <yellow>[!!!]<off>  Всё будет удалено!
+  <red>[xXx]<off> Удаление не завершено: проверь docker ps -a и <SB>/etc/outline
+rc=1
+dc: [shadowbox watchtower keep-other ]
+book installed: true
+etc/outline: нет
+opt/outline: нет
+логов после: 0
+--- ufw ---
+ufw delete allow 8443/tcp
+ufw delete allow 8444/tcp
+ufw delete allow 8444/udp
+--- вызовы платформы ---
+CMD flock -n 200
+CMD docker rmi quay.io/outline/shadowbox:latest
+CMD docker rmi containrrr/watchtower:latest
+CMD docker rmi quay.io/outline/shadowbox:latest
+CMD docker rmi containrrr/watchtower:latest
+rc=0
