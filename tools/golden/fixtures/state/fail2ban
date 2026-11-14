@@ -1,0 +1,7 @@
+Status for the jail: sshd
+|- Filter
+|  |- Currently failed:	0
+|  `- Total failed:	12
+`- Actions
+   |- Currently banned:	3
+   `- Total banned:	5

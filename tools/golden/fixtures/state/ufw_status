@@ -1,0 +1,6 @@
+Status: active
+
+To                         Action      From
+--                         ------      ----
+22/tcp                     ALLOW       Anywhere
+443/tcp                    ALLOW       Anywhere

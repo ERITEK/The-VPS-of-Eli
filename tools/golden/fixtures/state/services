@@ -1,0 +1,16 @@
+awg-quick@awg0=active
+awg-quick@awg1=inactive
+x-ui=active
+teamspeak=inactive
+unbound=active
+mumble-server=active
+ssh=active
+fail2ban=active
+wgobfs-eli@awg0.service=active
+wgobfs-eli@awg1.service=inactive
+zapret2-eli@awg0.service=active
+zapret2-eli@awg1.service=inactive
+mimic@eth0.service=active
+hysteria-1=active
+hysteria-2=inactive
+awg-quick@write0=active

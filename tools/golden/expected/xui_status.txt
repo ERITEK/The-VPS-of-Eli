@@ -1,0 +1,16 @@
+# golden: xui_status
+--- вывод ---
+
+<cyan><bold>>> Статус 3X-UI<off>
+<cyan>------------------------------------------------------<off>
+  <green>[-OK-]<off> Сервис x-ui: активен (с Thu 2026-01-01 00:00:00 UTC)
+  <cyan>*<off> Версия: x-ui v1.7.5
+  <cyan>*<off> Порт: 2053, путь: /panel/
+  <cyan>*<off> URL: http://203.0.113.9:2053/panel/
+  <cyan>*<off> БД: <SB>/etc/x-ui/x-ui.db (4.0K)
+--- вызовы платформы ---
+CMD flock -n 200
+CMD systemctl is-active --quiet x-ui
+CMD systemctl show x-ui --property=ActiveEnterTimestamp
+CMD du -h <SB>/etc/x-ui/x-ui.db
+rc=0

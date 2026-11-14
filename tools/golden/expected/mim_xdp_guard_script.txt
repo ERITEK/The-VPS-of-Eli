@@ -1,0 +1,11 @@
+# golden: mim_xdp_guard_script
+--- вывод ---
+#!/bin/sh
+sed -i 's/^xdp_mode = native$/xdp_mode = skb/' "$1"
+tmp="<SB>/run/mimic-xdp-guard.book"
+jq '.mimic.xdp_mode="skb"' "$2" > "$tmp" && mv "$tmp" "$2"
+systemctl restart "$3"
+rm -f "$0"
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

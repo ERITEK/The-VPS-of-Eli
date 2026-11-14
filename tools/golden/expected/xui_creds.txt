@@ -1,0 +1,14 @@
+# golden: xui_creds
+--- вывод ---
+
+<cyan><bold>>> Данные для входа<off>
+<cyan>------------------------------------------------------<off>
+
+  <bold>URL:<off>      http://203.0.113.9:2053/panel/
+  <bold>Логин:<off>    admin
+  <bold>Пароль:<off>   panel-placeholder
+  <bold>Версия:<off>   1.7.5
+  <bold>Файл:<off>     <SB>/etc/3xui/3xui.env
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

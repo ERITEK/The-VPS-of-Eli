@@ -1,0 +1,49 @@
+# golden: awg_gen_auto
+--- вывод ---
+== 3.1 auto ==
+
+  <cyan>I1 - первый пакет маскировки. Выбери под что маскировать handshake.<off>
+
+  <green>s)<off> <bold>STUN<off> (WebRTC Binding Request) <yellow>[дефолт]<off>
+  <green>p)<off> <bold>SIP<off> (VoIP INVITE)
+  <green>d)<off> <bold>DNS<off> (DNS query, fallback - уязвим к современному DPI)
+  <green>r)<off> <bold>RTP<off> (медиа-поток WebRTC/VoIP, выглядит как продолжение звонка)
+
+
+  <cyan>Вариант STUN-пакета:<off>
+  <green>1)<off> <bold>bare<off> - голые 20 байт, без атрибутов, так шлют современные браузеры <yellow>[дефолт, самый правдоподобный]<off>
+  <green>2)<off> <bold>nofp<off> - с SOFTWARE реального софта (coturn, Asterisk, pion...), 32 байта
+  <green>3)<off> <bold>fp<off>   - SOFTWARE + FINGERPRINT, 40 байт; CRC рандомный, DPI с проверкой CRC отбракует
+  <cyan>*<off> I1 пресет: stun (bare)
+  <cyan>*<off> Накладные: 60 обвязки + S4 18 + добивка 94 = 172; внешний пакет 1492 при потолке 1492 (бюджет добивки 1492 - 60 - 1320 = 112)
+
+  <cyan>PersistentKeepalive - секунды между keepalive-пакетами, число 0-65535 или диапазон min-max.<off>
+  <cyan>Число: фиксированный интервал. 25 - стандарт для клиентов за NAT (держит проброс порта).<off>
+  <cyan>Диапазон (например 20-40): для каждого клиента интервал выбирается случайно<off>
+  <cyan>внутри min-max при каждом срабатывании таймера, keepalive клиентов не синхронен.<off>
+  <cyan>0 = отключить keepalive (только для клиентов с белым IP).<off>
+S=82/81/33/18 H=1/2/3/4 CPA=32-94 RT=off HPK=задан J=8/104/672
+S разные=да S1/S2 15-150=да S3 12-55=да S4 12-27=да
+== 2.0 auto ==
+
+  <cyan>I1 - первый пакет маскировки. Выбери под что маскировать handshake.<off>
+
+  <green>s)<off> <bold>STUN<off> (WebRTC Binding Request) <yellow>[дефолт]<off>
+  <green>p)<off> <bold>SIP<off> (VoIP INVITE)
+  <green>d)<off> <bold>DNS<off> (DNS query, fallback - уязвим к современному DPI)
+  <green>r)<off> <bold>RTP<off> (медиа-поток WebRTC/VoIP, выглядит как продолжение звонка)
+
+
+  <cyan>Вариант STUN-пакета:<off>
+  <green>1)<off> <bold>bare<off> - голые 20 байт, без атрибутов, так шлют современные браузеры <yellow>[дефолт, самый правдоподобный]<off>
+  <green>2)<off> <bold>nofp<off> - с SOFTWARE реального софта (coturn, Asterisk, pion...), 32 байта
+  <green>3)<off> <bold>fp<off>   - SOFTWARE + FINGERPRINT, 40 байт; CRC рандомный, DPI с проверкой CRC отбракует
+  <cyan>*<off> I1 пресет: stun (bare)
+S=82/149/31/18 H=100-1100/2000-3000/4000-5000/6000-7000
+S разные=да S1/S2 15-150=да S3 8-55=да S4 4-27=да H диапазоны=да
+== 1.0 auto ==
+S1=82 S2 в границах=да H одиночные=да
+--- вызовы платформы ---
+CMD flock -n 200
+CMD wg genkey
+rc=0

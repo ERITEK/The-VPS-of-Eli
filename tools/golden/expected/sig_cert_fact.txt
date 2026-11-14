@@ -1,0 +1,13 @@
+# golden: sig_cert_fact
+--- вывод ---
+== s1: сертификат и nginx Up ==
+rc=0
+== s2: nginx Restarting ==
+rc=1
+== s3: файла сертификата нет ==
+rc=1
+== s4: домен пуст ==
+rc=1
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

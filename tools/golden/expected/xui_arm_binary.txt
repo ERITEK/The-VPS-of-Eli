@@ -1,0 +1,19 @@
+# golden: xui_arm_binary
+--- вывод ---
+== armv7: бинарь переименовывается в xray-linux-arm32 ==
+  <cyan>*<off> Скачиваем v3.11.0 для armv7...
+rc=0
+--- bin ---
+mtg-linux-arm
+xray-linux-arm32
+== amd64: имя не трогается ==
+  <cyan>*<off> Скачиваем v3.11.0 для amd64...
+rc=0
+--- bin ---
+mtg-linux-amd64
+xray-linux-amd64
+--- вызовы платформы ---
+CMD flock -n 200
+CMD systemctl stop x-ui
+CMD systemctl stop x-ui
+rc=0

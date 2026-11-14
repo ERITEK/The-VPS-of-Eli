@@ -1,0 +1,39 @@
+# golden: diag_json
+--- вывод ---
+{
+  "cores": 2,
+  "cpu": "Test CPU",
+  "generated_at": "2026-01-01T00:00:00Z",
+  "host": "test-host",
+  "kernel": "6.12",
+  "os": "Debian 13",
+  "problems": {
+    "green": 1,
+    "red": 2,
+    "yellow": 1
+  },
+  "ram_free_mb": 300,
+  "ram_mb": 900,
+  "red": [
+    "диск 90%",
+    "служба x не активна"
+  ],
+  "services": [
+    {
+      "name": "awg0",
+      "status": "работает"
+    },
+    {
+      "name": "x-ui",
+      "status": "работает"
+    }
+  ],
+  "swap_mb": 0,
+  "version": "1.1.0",
+  "yellow": [
+    "swap выключен"
+  ]
+}
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0
