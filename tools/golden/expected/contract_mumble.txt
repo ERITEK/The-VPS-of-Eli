@@ -1,0 +1,26 @@
+# golden: contract_mumble
+--- вывод ---
+== конфиг есть ==
+-- artifact --
+<SB>/var/lib/mumble-server/mumble-server.sqlite
+-- config --
+<SB>/etc/mumble-server.ini
+-- backup --
+<SB>/etc/mumble-server.ini
+<SB>/var/lib/mumble-server/mumble-server.sqlite
+<SB>/var/lib/mumble-server/mumble-server.sqlite-wal
+<SB>/var/lib/mumble-server/mumble-server.sqlite-shm
+-- probe --
+unit:mumble-server
+port:udp:64738
+port:tcp:64738
+== конфига нет: порт из книги ==
+unit:mumble-server
+port:udp:64739
+port:tcp:64739
+== наличие ==
+нет пакета: нет
+есть пакет: да
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

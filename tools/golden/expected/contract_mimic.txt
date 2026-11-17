@@ -1,0 +1,19 @@
+# golden: contract_mimic
+--- вывод ---
+-- artifact --
+<SB>/usr/sbin/mimic
+/usr/lib/systemd/system/mimic@.service
+<SB>/etc/mimic/eth0.conf
+-- unit --
+mimic@eth0.service
+-- config --
+<SB>/etc/mimic/eth0.conf
+-- backup --
+<SB>/etc/mimic
+-- probe --
+unit:mimic@eth0.service
+cmd:test -d <SB>/sys/module/mimic
+present: да
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

@@ -1,0 +1,13 @@
+# golden: proxy_restore
+--- вывод ---
+== контейнер не поднялся ==
+  <yellow>[!!!]<off>  MTProto mtproto-1: не запустился, снят (требует пересоздания)
+  <yellow>[!!!]<off>  SOCKS5 socks5-1: не запустился, снят (требует пересоздания)
+rc=2
+== контейнер поднялся ==
+  <green>[-OK-]<off> MTProto mtproto-1: пересоздан из env
+  <green>[-OK-]<off> SOCKS5 socks5-1: пересоздан из env
+rc=0
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

@@ -61,6 +61,15 @@ bound=true strategy=baseline
 --filter-tcp=80 --filter-l7=http --hostlist=<SB>/opt/zapret2/eli/awg1.hosts --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5 --new
 --filter-tcp=443 --filter-l7=tls --hostlist=<SB>/opt/zapret2/eli/awg1.hosts --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5 --lua-desync=multisplit:pos=1 --new
 --filter-udp=443 --filter-l7=quic --hostlist=<SB>/opt/zapret2/eli/awg1.hosts --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=6
+--- loader ---
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/usr/sbin/nft delete table inet zeli_awg1
+ExecStart=/usr/sbin/nft -f <SB>/etc/vps-eli-stack/zapret2/awg1.nft
+ExecStop=/usr/sbin/nft delete table inet zeli_awg1
+
+[Install]
 == s5: страховочный таймер сработал до подтверждения ==
 
 <cyan><bold>>> Привязка zapret2 к интерфейсу<off>
@@ -82,26 +91,18 @@ bound=false
 CMD flock -n 200
 CMD systemctl daemon-reload
 CMD systemctl enable zeli-nft-awg1.service
-CMD systemctl enable zapret2-eli@awg1.service
-CMD systemctl restart zapret2-eli@awg1.service
 CMD systemctl disable --now zapret2-eli@awg1.service
 CMD systemctl disable --now zeli-nft-awg1.service
 CMD systemctl daemon-reload
 CMD systemctl daemon-reload
 CMD systemctl enable zeli-nft-awg1.service
-CMD systemctl enable zapret2-eli@awg1.service
-CMD systemctl restart zapret2-eli@awg1.service
 CMD systemctl disable --now zapret2-eli@awg1.service
 CMD systemctl disable --now zeli-nft-awg1.service
 CMD systemctl daemon-reload
 CMD systemctl daemon-reload
 CMD systemctl enable zeli-nft-awg1.service
-CMD systemctl enable zapret2-eli@awg1.service
-CMD systemctl restart zapret2-eli@awg1.service
 CMD systemctl daemon-reload
 CMD systemctl enable zeli-nft-awg1.service
-CMD systemctl enable zapret2-eli@awg1.service
-CMD systemctl restart zapret2-eli@awg1.service
 CMD systemctl disable --now zapret2-eli@awg1.service
 CMD systemctl disable --now zeli-nft-awg1.service
 CMD systemctl daemon-reload

@@ -21,6 +21,7 @@ FILES=(
     "00b_validate.sh"
     "00c_book.sh"
     "00d_sys.sh"
+    "00e_txn.sh"
     "01_boot.sh"
     "02a_awg.sh"
     "02b_3xui.sh"
@@ -40,6 +41,7 @@ FILES=(
     "04g_routine.sh"
     "04h_telegrambot.sh"
     "04i_backup.sh"
+    "04j_restic.sh"
     "main.sh"
     "99_entry.sh"
 )
@@ -207,7 +209,7 @@ echo "  [OK] синтаксис склейки"
 # - подкаталога. Репозиторий без коммитов - первая сборка, базовая линия -
 # - инвентаря без сравнения. Осознанное удаление или переименование функции -
 # - вносится в список ниже -
-FUNC_GONE_ALLOW=( "_wgo_lock_awg_port" "_wgo_unlock_awg_port" "_bkp_add" )
+FUNC_GONE_ALLOW=( "_wgo_lock_awg_port" "_wgo_unlock_awg_port" "_bkp_add" "eli_read_choice" "_wgo_asset_url" "_zap_asset_url" "_wgo_verify_active" "_mim_verify_active" "_zap_verify_active" )
 missing_funcs=""
 inventory_skip=""
 repo_root="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"

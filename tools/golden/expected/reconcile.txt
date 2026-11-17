@@ -1,0 +1,21 @@
+# golden: reconcile
+--- вывод ---
+== check ==
+  <cyan>*<off> Сверка контракта: fake
+  <green>[-OK-]<off> есть: <SB>/txn/есть.txt
+  <red>[xXx]<off> нет: <SB>/txn/нет.txt
+  <green>[-OK-]<off> проба: cmd:true
+  <yellow>[!!!]<off>  проба не прошла: cmd:false
+  <cyan>*<off> Итог fake: проверок 4, проблем 2, исправлено 0
+rc=2
+== fix: неактивный юнит поднимается ==
+  <cyan>*<off> Сверка контракта: fake
+  <green>[-OK-]<off> юнит поднят: demo
+  <cyan>*<off> Итог fake: проверок 1, проблем 0, исправлено 1
+rc=0 changed=1
+== неизвестный модуль ==
+  <red>[xXx]<off> Неизвестный модуль: nope
+rc=1
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

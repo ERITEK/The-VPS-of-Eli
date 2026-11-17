@@ -1,0 +1,16 @@
+# golden: svc_start
+--- вывод ---
+== успех ==
+rc=0
+== не удержался ==
+  <red>[xXx]<off> Инстанс bad не удержался (SubState=failed). Причина:
+    journal: конфиг не разобран
+rc=1
+--- вызовы ---
+enable web
+restart web
+enable bad
+restart bad
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

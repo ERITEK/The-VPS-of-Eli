@@ -1,0 +1,44 @@
+# golden: awg_delete_client
+--- вывод ---
+== s1: успех ==
+
+<cyan><bold>>> Удалить клиента<off>
+<cyan>------------------------------------------------------<off>
+
+  <cyan>*<off> client1
+
+
+  <yellow>[!!!]<off>  Клиент 'client1' будет удалён!
+  <green>[-OK-]<off> Пир удалён из конфига
+  <green>[-OK-]<off> Транзакция awg_delete_client awg0/client1: зафиксирована
+  <green>[-OK-]<off> Файлы клиента 'client1' удалены
+rc=0
+conf_peer: 0
+dir: нет
+live:
+--- apply ---
+apply 1avHyhCX2p2ibjckf3TO+iQKpFCVpp3qs2COfBUsDmU=
+== s2: пир остался живым - конфиг, каталог и пир возвращаются ==
+
+<cyan><bold>>> Удалить клиента<off>
+<cyan>------------------------------------------------------<off>
+
+  <cyan>*<off> client1
+
+
+  <yellow>[!!!]<off>  Клиент 'client1' будет удалён!
+  <green>[-OK-]<off> Пир удалён из конфига
+  <red>[xXx]<off> Проверка не прошла: пир 1avHyhCX2p2ibjckf3TO+iQKpFCVpp3qs2COfBUsDmU= снят с интерфейса
+  <red>[xXx]<off> Транзакция awg_delete_client awg0/client1: провалов 1, откат
+  <cyan>*<off> Возвращено: <SB>/etc/amnezia/amneziawg/awg0.conf
+  <yellow>[!!!]<off>  Транзакция awg_delete_client awg0/client1: откат выполнен
+rc=1
+conf_peer: 1
+dir: есть
+live:
+--- apply ---
+apply 1avHyhCX2p2ibjckf3TO+iQKpFCVpp3qs2COfBUsDmU=
+reload awg0
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

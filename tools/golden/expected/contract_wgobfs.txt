@@ -1,0 +1,25 @@
+# golden: contract_wgobfs
+--- вывод ---
+-- artifact --
+<SB>/opt/wg-obfuscator/wg-obfuscator
+<SB>/etc/systemd/system/wgobfs-eli@.service
+<SB>/etc/vps-eli-stack/wgobfs/awg0.conf
+<SB>/etc/vps-eli-stack/wgobfs/awg1.conf
+-- unit --
+wgobfs-eli@awg0.service
+wgobfs-eli@awg1.service
+-- config --
+<SB>/etc/vps-eli-stack/wgobfs/awg0.conf
+<SB>/etc/vps-eli-stack/wgobfs/awg1.conf
+-- backup --
+<SB>/etc/vps-eli-stack/wgobfs
+-- probe --
+unit:wgobfs-eli@awg0.service
+port:udp:3333
+unit:wgobfs-eli@awg1.service
+port:udp:3334
+present: да
+== порт из конфига ==
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

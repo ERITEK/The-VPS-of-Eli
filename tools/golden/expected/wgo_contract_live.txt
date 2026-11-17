@@ -1,0 +1,7 @@
+# golden: wgo_contract_live
+--- вывод ---
+unit:wgobfs-eli@awg8.service
+probe:unit:wgobfs-eli@awg8.service
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

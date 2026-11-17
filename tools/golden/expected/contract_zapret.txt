@@ -1,0 +1,37 @@
+# golden: contract_zapret
+--- вывод ---
+-- artifact --
+<SB>/opt/zapret2/nfq2/nfqws2
+<SB>/opt/zapret2/lua/zapret-lib.lua
+<SB>/opt/zapret2/lua/zapret-antidpi.lua
+<SB>/etc/systemd/system/zapret2-eli@.service
+<SB>/etc/vps-eli-stack/zapret2/awg0.conf
+<SB>/opt/zapret2/eli/awg0.hosts
+<SB>/etc/vps-eli-stack/zapret2/awg0.nft
+<SB>/etc/systemd/system/zeli-nft-awg0.service
+<SB>/etc/vps-eli-stack/zapret2/awg1.conf
+<SB>/opt/zapret2/eli/awg1.hosts
+<SB>/etc/vps-eli-stack/zapret2/awg1.nft
+<SB>/etc/systemd/system/zeli-nft-awg1.service
+-- unit --
+zapret2-eli@awg0.service
+zeli-nft-awg0.service
+zapret2-eli@awg1.service
+zeli-nft-awg1.service
+-- config --
+<SB>/etc/vps-eli-stack/zapret2/awg0.conf
+<SB>/etc/vps-eli-stack/zapret2/awg1.conf
+-- backup --
+<SB>/etc/vps-eli-stack/zapret2
+<SB>/opt/zapret2/eli
+-- probe --
+unit:zapret2-eli@awg0.service
+unit:zeli-nft-awg0.service
+cmd:nft list table inet zeli_awg0
+unit:zapret2-eli@awg1.service
+unit:zeli-nft-awg1.service
+cmd:nft list table inet zeli_awg1
+present: да
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

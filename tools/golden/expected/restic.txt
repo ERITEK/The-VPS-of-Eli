@@ -1,0 +1,20 @@
+# golden: restic
+--- вывод ---
+/mnt/disk/restic -> local
+sftp:backup@host:/srv/eli -> sftp
+s3:s3.amazonaws.com/bkt -> s3
+b2:bkt:eli -> b2
+rest:http://host:8000 -> rest
+rclone:remote:path -> rclone
+C:/x -> unknown
+пусто -> unknown
+write rc=0
+RESTIC_REPOSITORY="sftp:backup@host:/srv/eli"
+RESTIC_PASSWORD="pass word \$x"
+read repo: sftp:backup@host:/srv/eli
+read pass: pass word $x
+  <red>[xXx]<off> Нужны адрес репозитория и пароль
+empty rc=1
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

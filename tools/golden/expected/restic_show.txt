@@ -1,0 +1,13 @@
+# golden: restic_show
+--- вывод ---
+write rc=0
+
+<cyan><bold>>> Restic: пароль репозитория<off>
+<cyan>------------------------------------------------------<off>
+  <bold>Репозиторий:<off> sftp:backup@host:/repo
+  <bold>Пароль:<off>      my-secret-pass
+  <cyan>*<off> Файл: <SB>/etc/restic/env (права 600, доступен только root)
+  <yellow>[!!!]<off>  Без этого пароля данные в репозитории не открыть даже при наличии файлов
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# The VPS of Eli v1.1.0
+# The VPS of Eli v1.1.1
 # Мега-менеджер VPS стека: VPN, связь, обслуживание
 # scrp by ERITEK & Loo1, GLM-5.3 (Zhipu AI)
-# Собран: 2026-11-14T18:21:27Z
+# Собран: 2026-11-17T18:17:53Z
 
 
 # === 00a_io.sh ===
@@ -53,7 +53,7 @@ if ! flock -n 200; then
 fi
 printf '%s\n' "$$" > "$LOCKFILE"
 
-ELI_VERSION="1.1.0"
+ELI_VERSION="1.1.1"
 
 # --> ФУНКЦИИ ВЫВОДА <--
 # - единый набор для всего скрипта -
@@ -203,16 +203,43 @@ eli_read_line() {
     printf -v "$__eli_varname" '%s' "$__eli_input"
 }
 
-eli_read_choice() {
+# --> ВЫХОД И МЕНЮ <--
+# - клавиша X в меню завершает скрипт без обхода по 0; в полях ввода X -
+# - остаётся обычной буквой, перехват живёт только в чтении меню -
+_eli_is_exit_key() {
+    case "${1:-}" in
+        x|X) return 0 ;;
+    esac
+    return 1
+}
+
+# - выход: вернуть терминал, снять ловушки, закрыть lock, выйти -
+eli_exit() {
+    eli_tty_restore 2>/dev/null || true
+    trap - EXIT INT TERM
+    exec 200>&- 2>/dev/null || true
+    exit 0
+}
+
+eli_menu_read() {
+    if [[ "${2:-}" != "nofooter" ]]; then
+        echo -e "  ${GREEN}X)${NC} Выход"
+        echo ""
+    fi
     eli_read_line "  ${BOLD}Выбор:${NC} " "$1"
+    if _eli_is_exit_key "${!1:-}"; then
+        echo ""
+        print_info "Выход."
+        eli_exit
+    fi
 }
 
 ask() {
     local prompt="$1" default="$2" varname="$3" p
     if [[ -n "$default" ]]; then
-        p=$(printf '  %b%s%b [%s]: ' "$BOLD" "$prompt" "$NC" "$default")
+        p=$(printf '  %bВведи%b %b%s%b [%s] %b(Enter - оставить, или своё)%b: ' "$CYAN" "$NC" "$BOLD" "$prompt" "$NC" "$default" "$CYAN" "$NC")
     else
-        p=$(printf '  %b%s%b: ' "$BOLD" "$prompt" "$NC")
+        p=$(printf '  %bВведи%b %b%s%b: ' "$CYAN" "$NC" "$BOLD" "$prompt" "$NC")
     fi
     eli_read_line "$p" "$varname" "$default"
 }
@@ -221,9 +248,9 @@ ask_yn() {
     local prompt="$1" default="$2" varname="$3" value="" p
     while true; do
         if [[ "$default" == "y" ]]; then
-            p=$(printf '  %b%s%b [Y/n]: ' "$BOLD" "$prompt" "$NC")
+            p=$(printf '  %bПодтверди%b %b%s%b [Y/n, Enter=да]: ' "$CYAN" "$NC" "$BOLD" "$prompt" "$NC")
         else
-            p=$(printf '  %b%s%b [y/N]: ' "$BOLD" "$prompt" "$NC")
+            p=$(printf '  %bПодтверди%b %b%s%b [y/N, Enter=нет]: ' "$CYAN" "$NC" "$BOLD" "$prompt" "$NC")
         fi
 
         eli_read_line "$p" value "$default"
@@ -716,6 +743,17 @@ eli_fact_unit() {
     return 1
 }
 
+# - исполняемый файл из ExecStart существует; юнит без бинаря - остаток -
+# - restore у удалённого компонента, старт такого юнита = вечный рестарт-цикл -
+eli_unit_exec_exists() {
+    local unit="$1" line bin
+    line=$(systemctl cat "$unit" 2>/dev/null | sed -n 's/^ExecStart=//p' | head -1) || return 1
+    [[ -n "$line" ]] || return 1
+    bin=${line%% *}
+    bin=${bin#[-+]}
+    [[ -e "$bin" ]]
+}
+
 # - факт: запись на месте. Строка ищется тем же шаблоном, которым писалась: -
 # - проверка ловит и несовпадение с шаблоном правки, и потерю строки -
 # - arg1: файл, arg2: шаблон egrep, arg3: что проверяем словами -
@@ -761,6 +799,18 @@ eli_port_busy() {
         *)   return 1 ;;
     esac
     [[ "$out" == *":${port} "* || "$out" == *".${port} "* ]]
+}
+
+# - ожидание занятости порта: слушатель открывается позже старта юнита; 0 = занят -
+eli_port_wait() {
+    local port="${1:-}" proto="${2:-tcp}" secs="${3:-10}" try tries
+    [[ -z "$port" ]] && return 1
+    tries=$(( secs * 4 ))
+    for (( try=0; try<tries; try++ )); do
+        eli_port_busy "$port" "$proto" && return 0
+        sleep 0.25
+    done
+    return 1
 }
 
 # --> DOCKER: ПРИНАДЛЕЖНОСТЬ КОНТЕЙНЕРА СТЕКУ <--
@@ -971,7 +1021,692 @@ eli_env_read_into() {
         printf -v "$name" '%s' "$val"
     done
 }
+# --> ЗАГРУЗКА ВНЕШНЕГО АРТЕФАКТА <--
+# - sha256 ассета релиза GitHub: digest из ответа API рядом с адресом -
+eli_github_asset_sha() {
+    local api="$1" name="$2"
+    jq -r --arg n "$name" '.assets[]? | select(.name == $n) | (.digest // empty)' <<< "$api" 2>/dev/null \
+        | sed -n 's/^sha256://p' | head -1
+}
 
+# - один путь для всех загрузок: повторы, проверка размера и суммы, -
+# - временный файл в TMPDIR; вызывающий забирает путь и убирает каталог -
+# - третий аргумент: ожидаемая sha256 или "-" (сверку делает вызывающий) -
+eli_fetch_asset() {
+    local url="$1" name="$2" want_sha="${3:-}"
+    local dir tmp rc code i got
+    if [[ -z "$url" || -z "$name" ]]; then
+        print_err "Нужны URL и имя ассета"
+        return 1
+    fi
+    if [[ -z "$want_sha" ]]; then
+        print_warn "${name}: sha256 не передана, сверка суммы не выполняется"
+    fi
+    dir=$(mktemp -d "${TMPDIR:-/tmp}/eli-asset.XXXXXX") || { print_err "Не создать временный каталог"; return 1; }
+    tmp="${dir}/${name}"
+    ELI_ASSET_PATH=""
+    for (( i = 1; i <= 3; i++ )); do
+        rc=0
+        code=$(curl -sS -L -o "$tmp" -w '%{http_code}' --connect-timeout 15 --max-time 300 "$url" 2>/dev/null) || rc=$?
+        if (( rc == 0 )) && [[ "$code" == "200" ]] && [[ -s "$tmp" ]]; then
+            if [[ "$want_sha" != "-" && -n "$want_sha" ]]; then
+                got=$(sha256sum "$tmp" | awk '{print $1}')
+                if [[ "$got" != "$want_sha" ]]; then
+                    print_warn "${name}: sha256 не совпала (${got:0:12}..., ждали ${want_sha:0:12}...), попытка ${i}/3"
+                    rm -f "$tmp"
+                    sleep 2
+                    continue
+                fi
+            fi
+            ELI_ASSET_PATH="$tmp"
+            return 0
+        fi
+        print_warn "${name}: HTTP ${code:-000}, curl rc=${rc}, попытка ${i}/3"
+        rm -f "$tmp"
+        sleep 2
+    done
+    rm -rf "$dir"
+    print_err "Не удалось скачать ${name}: ${url}"
+    return 1
+}
+# --> ЮНИТ СЛУЖБЫ <--
+# - откат юнита: вернуть прежний файл и поднять службу, которая работала -
+# - до правки; новый юнит (файла не было) просто удаляется -
+_svc_unit_rollback() {
+    local unit="$1" path="$2" backup="$3" was_active="$4"
+    if [[ -n "$backup" ]]; then
+        cp -a "$backup" "$path"
+        rm -f "$backup"
+    else
+        rm -f "$path"
+    fi
+    systemctl daemon-reload
+    if [[ -n "$backup" && "$was_active" == "1" ]]; then
+        systemctl start "$unit" >/dev/null 2>&1 || true
+    fi
+}
+
+# - рендер юнита, проверка, reload, enable, запуск и факт active; при -
+# - провале возвращается прежний файл или удаляется новый -
+eli_service_apply() {
+    local unit="$1" content="$2" enable="${3:-yes}"
+    local path="/etc/systemd/system/${unit}.service" backup="" was_active=0
+    if [[ -z "$unit" || -z "$content" ]]; then
+        print_err "Нужны имя юнита и содержимое"
+        return 1
+    fi
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+        was_active=1
+    fi
+    if [[ -f "$path" ]]; then
+        backup=$(mktemp /tmp/eli-unit.XXXXXX) || return 1
+        cp -a "$path" "$backup" || { rm -f "$backup"; print_err "Не сохранить ${path}"; return 1; }
+    fi
+    if ! printf '%s\n' "$content" > "$path"; then
+        rm -f "$backup"
+        print_err "Не записать ${path}"
+        return 1
+    fi
+    chmod 644 "$path"
+    if command -v systemd-analyze >/dev/null 2>&1; then
+        if ! systemd-analyze verify "$path" >/dev/null 2>&1; then
+            print_err "Юнит ${unit}: systemd-analyze verify не прошёл"
+            _svc_unit_rollback "$unit" "$path" "$backup" "$was_active"
+            return 1
+        fi
+    fi
+    systemctl daemon-reload
+    [[ "$enable" == "yes" ]] && systemctl enable "$unit" >/dev/null 2>&1 || true
+    if ! systemctl restart "$unit" 2>/dev/null; then
+        print_err "Юнит ${unit}: не запустился"
+        _svc_unit_rollback "$unit" "$path" "$backup" "$was_active"
+        return 1
+    fi
+    if ! eli_fact_unit "$unit" 5; then
+        print_err "Юнит ${unit}: не активен после запуска"
+        _svc_unit_rollback "$unit" "$path" "$backup" "$was_active"
+        return 1
+    fi
+    rm -f "$backup"
+    return 0
+}
+# --> ЗАПУСК ГОТОВОГО ЮНИТА <--
+# - enable, restart и ожидание SubState=running: Type=simple рапортует -
+# - active сразу на exec, поэтому одной активности мало; провал печатает -
+# - хвост журнала и возвращает ошибку -
+eli_service_start() {
+    local unit="$1" wait_secs="${2:-10}" i=0 sub=""
+    if [[ -z "$unit" ]]; then
+        print_err "Нужно имя юнита"
+        return 1
+    fi
+    systemctl enable "$unit" >/dev/null 2>&1 || true
+    if ! systemctl restart "$unit" 2>/dev/null; then
+        print_err "Юнит ${unit}: не запустился"
+        return 1
+    fi
+    while (( i < wait_secs )); do
+        sub=$(systemctl show -p SubState --value "$unit" 2>/dev/null)
+        [[ "$sub" == "running" ]] && break
+        sleep 1
+        i=$(( i + 1 ))
+    done
+    if [[ "$sub" == "running" ]] && systemctl is-active --quiet "$unit"; then
+        return 0
+    fi
+    print_err "Инстанс ${unit} не удержался (SubState=${sub:-?}). Причина:"
+    journalctl -u "$unit" -n 15 --no-pager 2>/dev/null | sed 's/^/    /'
+    return 1
+}
+
+# --> ПОРТ ЗА DROP <--
+# - правило DROP в INPUT перекрывает разрешение UFW: порт снаружи не виден -
+eli_port_dropped() {
+    local port="$1"
+    [[ -n "$port" ]] || return 1
+    iptables -S INPUT 2>/dev/null | grep -E -- "--dport ${port}([^0-9]|$)" | grep -q -- "-j DROP"
+}
+
+# === 00e_txn.sh ===
+# --> КОНТРАКТЫ МОДУЛЕЙ <--
+# - статическое описание того, чем владеет модуль: артефакты, юниты, -
+# - порты, конфиги, бэкап и проверки; книга хранит текущее состояние, -
+# - контракт отвечает на вопрос, что вообще должно существовать -
+eli_contract_load() {
+    local mod="${1:-}"
+    ELI_CONTRACT_MOD="$mod"
+    ELI_CONTRACT=()
+    case "$mod" in
+        xui)
+            local port db="/etc/x-ui/x-ui.db"
+            port=$(book_read ".3xui.panel_port" 2>/dev/null || true)
+            ELI_CONTRACT=(
+                "artifact:/usr/local/x-ui"
+                "artifact:${db}"
+                "unit:${XUI_SERVICE}"
+                "config:/etc/3xui/3xui.env"
+                "backup:/etc/x-ui"
+                "backup:/etc/3xui"
+                "probe:unit:${XUI_SERVICE}"
+                "probe:port:tcp:${port}"
+            )
+            ;;
+        awg)
+            local ifc
+            ELI_CONTRACT=("probe:cmd:awg show interfaces")
+            for ifc in $(awg show interfaces 2>/dev/null); do
+                ELI_CONTRACT+=(
+                    "artifact:/etc/amnezia/amneziawg/${ifc}.conf"
+                    "unit:awg-quick@${ifc}"
+                    "probe:unit:awg-quick@${ifc}"
+                )
+            done
+            ELI_CONTRACT+=(
+                "backup:/etc/awg-setup"
+                "backup:/etc/amnezia/amneziawg"
+            )
+            ;;
+        ufw)
+            ELI_CONTRACT=(
+                "unit:ufw"
+                "config:/etc/ufw/user.rules"
+                "backup:/etc/ufw"
+                "probe:cmd:ufw status"
+            )
+            ;;
+        teamspeak)
+            local vp fp db
+            vp=$(book_read ".teamspeak.voice_port" 2>/dev/null || true)
+            fp=$(book_read ".teamspeak.ft_port" 2>/dev/null || true)
+            db=$(book_read ".teamspeak.db_path" 2>/dev/null || true)
+            # - книга может быть потеряна: порты остаются в env установки, -
+            # - путь базы - в значении модуля по умолчанию -
+            [[ -n "$vp" ]] || vp=$(eli_source_env "$TS_ENV" TS_VOICE_PORT 2>/dev/null || true)
+            [[ -n "$fp" ]] || fp=$(eli_source_env "$TS_ENV" TS_FT_PORT 2>/dev/null || true)
+            db="${db:-$TS_DB}"
+            ELI_CONTRACT=(
+                "artifact:${TS_BIN}"
+                "artifact:${db}"
+                "unit:teamspeak"
+                "config:${TS_ENV}"
+                "backup:${TS_ENV_DIR}"
+                "backup:${db}"
+                "backup:${db}-wal"
+                "backup:${db}-shm"
+                "probe:unit:teamspeak"
+                "probe:port:udp:${vp:-9987}"
+                "probe:port:tcp:${fp:-30033}"
+            )
+            ;;
+        mumble)
+            local conf port db="$MBL_DB"
+            conf=$(mbl_conf)
+            port=$(book_read ".mumble.port" 2>/dev/null || true)
+            # - служба слушает порт из конфига; книга - запасной источник, -
+            # - когда конфига нет -
+            if [[ -f "$conf" ]]; then
+                local cport
+                cport=$(sed -n 's/^port=\([0-9][0-9]*\).*/\1/p' "$conf" 2>/dev/null | head -1)
+                [[ -n "$cport" ]] && port="$cport"
+            fi
+            ELI_CONTRACT=(
+                "artifact:${db}"
+                "unit:${MBL_SERVICE}"
+                "config:${conf}"
+                "backup:${conf}"
+                "backup:${db}"
+                "backup:${db}-wal"
+                "backup:${db}-shm"
+                "probe:unit:${MBL_SERVICE}"
+                "probe:port:udp:${port:-64738}"
+                "probe:port:tcp:${port:-64738}"
+            )
+            ;;
+        outline)
+            local mgmt keys
+            mgmt=$(book_read ".outline.mgmt_port" 2>/dev/null || true)
+            keys=$(book_read ".outline.keys_port" 2>/dev/null || true)
+            ELI_CONTRACT=(
+                "artifact:${OTL_KEY}"
+                "artifact:/opt/outline/persisted-state"
+                "config:${OTL_ENV}"
+                "backup:${OTL_DIR}"
+                "backup:/opt/outline"
+                "probe:cmd:docker ps --format '{{.Names}}' | grep -qx shadowbox"
+            )
+            # - порт 0 значит "не известен при установке": проба по нулю дала бы -
+            # - вечную ложную проблему -
+            [[ "$mgmt" =~ ^[1-9][0-9]*$ ]] && ELI_CONTRACT+=("probe:port:tcp:${mgmt}")
+            if [[ "$keys" =~ ^[1-9][0-9]*$ ]]; then
+                ELI_CONTRACT+=("probe:port:tcp:${keys}" "probe:port:udp:${keys}")
+            fi
+            ;;
+        mtproto)
+            local f n port cont
+            ELI_CONTRACT=("backup:${MTP_DIR}")
+            # - каждый инстанс описывается своими файлами и контейнером: -
+            # - состав виден по env, а не по книге, которую Prayer чинит по ним -
+            for f in "${MTP_DIR}"/instance_*.env; do
+                [[ -f "$f" ]] || continue
+                n=${f##*/instance_}; n=${n%.env}
+                port=$(eli_source_env "$f" PORT || true)
+                cont=$(eli_source_env "$f" CONTAINER || true)
+                ELI_CONTRACT+=(
+                    "artifact:${f}"
+                    "artifact:${MTP_DIR}/config_${n}.toml"
+                )
+                # - имя контейнера идёт в команду пробы: только допустимые символы -
+                if [[ "$cont" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+                    ELI_CONTRACT+=("probe:cmd:docker ps --format '{{.Names}}' | grep -qx ${cont}")
+                fi
+                [[ "$port" =~ ^[1-9][0-9]*$ ]] && ELI_CONTRACT+=("probe:port:tcp:${port}")
+            done
+            ;;
+        socks5)
+            local f port cont
+            ELI_CONTRACT=("backup:${S5_DIR}")
+            for f in "${S5_DIR}"/instance_*.env; do
+                [[ -f "$f" ]] || continue
+                port=$(eli_source_env "$f" PORT || true)
+                cont=$(eli_source_env "$f" CONTAINER || true)
+                ELI_CONTRACT+=("artifact:${f}")
+                if [[ "$cont" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+                    ELI_CONTRACT+=("probe:cmd:docker ps --format '{{.Names}}' | grep -qx ${cont}")
+                fi
+                [[ "$port" =~ ^[1-9][0-9]*$ ]] && ELI_CONTRACT+=("probe:port:tcp:${port}")
+            done
+            ;;
+        hysteria2)
+            local d n port
+            ELI_CONTRACT=("artifact:${HY2_BIN}" "backup:${HY2_DIR}")
+            # - инстанс это каталог с env, конфигом, ключами и юнитом: -
+            # - состав берётся с диска, номер - из имени каталога -
+            for d in "${HY2_DIR}"/instance_*/; do
+                [[ -d "$d" ]] || continue
+                d="${d%/}"
+                n=${d##*instance_}
+                port=$(eli_source_env "${d}/hysteria.env" PORT 2>/dev/null || true)
+                ELI_CONTRACT+=(
+                    "artifact:${d}/hysteria.env"
+                    "artifact:${d}/config.yaml"
+                    "artifact:${d}/users.list"
+                    "artifact:${d}/server.crt"
+                    "artifact:${d}/server.key"
+                    "unit:hysteria-${n}"
+                    "config:${d}/config.yaml"
+                    "probe:unit:hysteria-${n}"
+                )
+                [[ "$port" =~ ^[1-9][0-9]*$ ]] && ELI_CONTRACT+=("probe:port:udp:${port}")
+            done
+            ;;
+        zapret2)
+            local iface unit loader ldir="/etc/systemd/system"
+            ELI_CONTRACT=(
+                "artifact:${ZAP2_BIN}"
+                "artifact:${ZAP2_LUA_INIT}"
+                "artifact:${ZAP2_LUA_ANTIDPI}"
+                "artifact:${ZAP2_UNIT_TPL}"
+                "backup:${ZAP2_ELI_DIR}"
+                "backup:${ZAP2_HOSTS_DIR}"
+            )
+            # - привязанный интерфейс владеет конфигом стратегии, hostlist, -
+            # - файлом правил, юнитом инстанса и юнитом загрузки правил -
+            for iface in $(_zap_bound_list); do
+                unit=$(_zap_unit "$iface")
+                loader="zeli-nft-${iface}.service"
+                ELI_CONTRACT+=(
+                    "artifact:$(_zap_conf "$iface")"
+                    "artifact:$(_zap_hosts "$iface")"
+                    "artifact:$(_zap_nftf "$iface")"
+                    "artifact:${ldir}/${loader}"
+                    "unit:${unit}"
+                    "unit:${loader}"
+                    "config:$(_zap_conf "$iface")"
+                    "probe:unit:${unit}"
+                    "probe:unit:${loader}"
+                    "probe:cmd:nft list table inet $(_zap_table "$iface")"
+                )
+            done
+            ;;
+        wgobfs)
+            local iface conf lport
+            ELI_CONTRACT=(
+                "artifact:${WGO_BIN}"
+                "artifact:${WGO_UNIT_TPL}"
+                "backup:${WGO_ELI_DIR}"
+            )
+            # - привязанный интерфейс владеет конфигом инстанса и юнитом; порт -
+            # - читается из конфига, который разбирает процесс, книга - запасной -
+            # - источник на случай потерянного или старого конфига; конфиг идёт -
+            # - в контракт всегда (бэкап не решает живость), юнит и пробы - только -
+            # - при живом интерфейсе: конфиг без интерфейса это остаток restore -
+            # - у удалённой привязки, подъём дал бы обфускатор впустую -
+            local live_ifaces
+            live_ifaces=$(awg show interfaces 2>/dev/null || true)
+            for iface in $(_wgo_bound_list); do
+                conf=$(_wgo_conf "$iface")
+                lport=$(sed -n 's/^source-lport = \([0-9][0-9]*\).*/\1/p' "$conf" 2>/dev/null | head -1)
+                [[ -n "$lport" ]] || lport=$(book_read ".wgobfs.instances.\"${iface}\".lport" 2>/dev/null || true)
+                ELI_CONTRACT+=(
+                    "artifact:${conf}"
+                    "config:${conf}"
+                )
+                if grep -qw "$iface" <<<"$live_ifaces"; then
+                    ELI_CONTRACT+=(
+                        "unit:$(_wgo_unit "$iface")"
+                        "probe:unit:$(_wgo_unit "$iface")"
+                    )
+                    [[ "$lport" =~ ^[1-9][0-9]*$ ]] && ELI_CONTRACT+=("probe:port:udp:${lport}")
+                fi
+            done
+            ;;
+        mimic)
+            local wan conf
+            wan=$(_mim_wan_iface)
+            ELI_CONTRACT=(
+                "artifact:${MIM_BIN}"
+                "artifact:${MIM_UNIT_TPL}"
+                "backup:${MIM_CONF_DIR}"
+            )
+            # - инстанс один на WAN: файл фильтров и юнит общие, привязки -
+            # - awg-интерфейсов живут строками фильтров внутри конфига -
+            if [[ -n "$wan" ]]; then
+                conf=$(_mim_conf "$wan")
+                ELI_CONTRACT+=(
+                    "artifact:${conf}"
+                    "unit:$(_mim_unit "$wan")"
+                    "config:${conf}"
+                    "probe:unit:$(_mim_unit "$wan")"
+                    "probe:cmd:test -d /sys/module/mimic"
+                )
+            fi
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+# - выборка строк контракта по виду: artifact, unit, config, backup, probe -
+eli_contract_kind() {
+    local kind="$1" line
+    for line in "${ELI_CONTRACT[@]}"; do
+        [[ "${line%%:*}" == "$kind" ]] && printf '%s\n' "${line#*:}"
+    done
+    return 0
+}
+
+# - модуль контракта есть на машине: книга, живые интерфейсы или бинарь -
+eli_contract_present() {
+    case "${1:-}" in
+        xui) [[ "$(book_read '.3xui.installed')" == "true" ]] ;;
+        awg) [[ -n "$(awg show interfaces 2>/dev/null)" ]] ;;
+        ufw) command -v ufw >/dev/null 2>&1 ;;
+        teamspeak) [[ "$(book_read '.teamspeak.installed')" == "true" ]] ;;
+        mumble) mbl_installed ;;
+        outline) [[ "$(book_read '.outline.installed')" == "true" ]] ;;
+        mtproto) [[ "$(book_read '.mtproto.installed')" == "true" ]] ;;
+        socks5) [[ "$(book_read '.socks5.installed')" == "true" ]] ;;
+        hysteria2) [[ "$(book_read '.hysteria2.installed')" == "true" ]] ;;
+        zapret2)   _zap_installed ;;
+        wgobfs)    _wgo_installed ;;
+        mimic)     _mim_installed ;;
+        *)   return 1 ;;
+    esac
+}
+
+# --> ПРОВЕРКИ КОНТРАКТА <--
+# - каждая проба отвечает на один вопрос: живой ли юнит, слушается ли -
+# - порт, отвечает ли команда; провал копится, а не обрывает обход -
+eli_probe_port() {
+    local proto="$1" port="$2"
+    [[ -n "$port" ]] || return 1
+    case "$proto" in
+        udp) ss -lun 2>/dev/null | grep -q ":${port}[[:space:]]" ;;
+        *)   ss -ltn 2>/dev/null | grep -q ":${port}[[:space:]]" ;;
+    esac
+}
+
+eli_probe_run() {
+    local kind="$1" a="$2" b="$3"
+    case "$kind" in
+        unit) eli_fact_unit "$a" 3 ;;
+        port) eli_probe_port "$a" "$b" ;;
+        cmd)  bash -c "$a" >/dev/null 2>&1 ;;
+        *)    return 1 ;;
+    esac
+}
+
+# - проба с ожиданием: после подъёма юнита служба начинает слушать не сразу, -
+# - поэтому факт проверяется до срока, а не снимком сразу за стартом -
+# - arg1: вид пробы, arg2 и arg3: параметры, arg4: срок ожидания в секундах -
+eli_probe_wait() {
+    local kind="$1" a="$2" b="$3" secs="${4:-10}" try tries
+    tries=$(( secs * 4 ))
+    for (( try=0; try<tries; try++ )); do
+        eli_probe_run "$kind" "$a" "$b" && return 0
+        sleep 0.25
+    done
+    return 1
+}
+
+# - обход проб контракта: печатает провалы, возвращает их число; -
+# - модуль можно передать аргументом, иначе берётся загруженный -
+eli_contract_check() {
+    local mod="${1:-$ELI_CONTRACT_MOD}" line kind a b fails=0
+    if [[ -n "$mod" ]]; then
+        eli_contract_load "$mod" || return 1
+    fi
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        kind="${line%%:*}"
+        line="${line#*:}"
+        a="${line%%:*}"
+        b=""
+        [[ "$line" == *:* ]] && b="${line#*:}"
+        if ! eli_probe_run "$kind" "$a" "$b"; then
+            print_warn "Контракт ${ELI_CONTRACT_MOD}: проба ${kind}:${a}${b:+:${b}} не прошла"
+            fails=$((fails + 1))
+        fi
+    done < <(eli_contract_kind probe)
+    return "$fails"
+}
+
+# --> ТРАНЗАКЦИИ <--
+# - журнал операции: что выполнено, что обязано быть верным и что вернуть -
+# - при провале; успех это пройденные проверки, а не код возврата шага -
+TXN_ACTIVE=0
+TXN_NAME=""
+TXN_DIR=""
+TXN_FAILS=0
+# - сколько юнитов сверка подняла в последнем вызове: читает вызывающий -
+ELI_RECONCILE_CHANGED=0
+
+eli_txn_begin() {
+    local name="$1"
+    if (( TXN_ACTIVE )); then
+        print_warn "Транзакция уже открыта: ${TXN_NAME}"
+        return 1
+    fi
+    TXN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/eli-txn.XXXXXX") || return 1
+    TXN_NAME="$name"
+    TXN_FAILS=0
+    TXN_ACTIVE=1
+    : > "${TXN_DIR}/files.list"
+    : > "${TXN_DIR}/journal.log"
+    printf 'BEGIN %s\n' "$name" >> "${TXN_DIR}/journal.log"
+    return 0
+}
+
+# - файл в откат: существующий копируется, отсутствующий помечается к удалению -
+eli_txn_backup_file() {
+    local path="$1" safe hash
+    (( TXN_ACTIVE )) || { print_err "Нет открытой транзакции"; return 1; }
+    hash=$(printf '%s' "$path" | cksum | awk '{print $1}')
+    safe=$(printf '%s' "$path" | tr '/' '_')
+    if [[ -e "$path" ]]; then
+        cp -a "$path" "${TXN_DIR}/${hash}${safe}" || { print_err "Не сохранить ${path}"; return 1; }
+        printf '%s\t%s\n' "$path" "${hash}${safe}" >> "${TXN_DIR}/files.list"
+    else
+        printf '%s\t!\n' "$path" >> "${TXN_DIR}/files.list"
+    fi
+    printf 'BACKUP %s\n' "$path" >> "${TXN_DIR}/journal.log"
+    return 0
+}
+
+# - шаг транзакции: команда и её результат в журнал -
+eli_txn_run() {
+    (( TXN_ACTIVE )) || return 1
+    local rc=0
+    "$@" || rc=$?
+    printf 'RUN rc=%s %s\n' "$rc" "$*" >> "${TXN_DIR}/journal.log"
+    return "$rc"
+}
+
+# - обязательный факт: провал копится и отменяет фиксацию -
+eli_txn_expect() {
+    local label="$1"; shift
+    (( TXN_ACTIVE )) || return 1
+    if "$@"; then
+        printf 'OK %s\n' "$label" >> "${TXN_DIR}/journal.log"
+        return 0
+    fi
+    TXN_FAILS=$((TXN_FAILS + 1))
+    printf 'FAIL %s\n' "$label" >> "${TXN_DIR}/journal.log"
+    print_err "Проверка не прошла: ${label}"
+    return 1
+}
+
+# - фиксация: только при нуле провалов; иначе откат -
+eli_txn_commit() {
+    (( TXN_ACTIVE )) || return 1
+    if (( TXN_FAILS > 0 )); then
+        print_err "Транзакция ${TXN_NAME}: провалов ${TXN_FAILS}, откат"
+        eli_txn_rollback
+        return 1
+    fi
+    TXN_ACTIVE=0
+    print_ok "Транзакция ${TXN_NAME}: зафиксирована"
+    rm -rf "$TXN_DIR"
+    TXN_DIR=""
+    return 0
+}
+
+# - откат: вернуть файлы и удалить созданные транзакцией -
+eli_txn_rollback() {
+    (( TXN_ACTIVE )) || return 0
+    local path copy
+    while IFS=$'\t' read -r path copy; do
+        [[ -n "$path" ]] || continue
+        if [[ "$copy" == "!" ]]; then
+            rm -f "$path"
+            print_info "Удалено: ${path}"
+        else
+            cp -a "${TXN_DIR}/${copy}" "$path" && print_info "Возвращено: ${path}"
+        fi
+    done < "${TXN_DIR}/files.list"
+    TXN_ACTIVE=0
+    print_warn "Транзакция ${TXN_NAME}: откат выполнен"
+    rm -rf "$TXN_DIR"
+    TXN_DIR=""
+    return 0
+}
+# --> СВЕРКА КОНТРАКТА С ФАКТОМ <--
+# - reconcile сравнивает контракт с реальностью; с флагом починки поднимает -
+# - неактивные юниты, остальное только показывает; возвращает число проблем -
+eli_reconcile() {
+    local mod="$1" fix="${2:-check}"
+    ELI_RECONCILE_CHANGED=0
+    eli_contract_load "$mod" || { print_err "Неизвестный модуль: ${mod}"; return 1; }
+    # - юнит загрузки правил zapret2 мог остаться от прошлой сборки: сверка -
+    # - приводит его к текущему шаблону до подъёма юнитов -
+    if [[ "$mod" == "zapret2" ]]; then
+        _zap_sync_loaders
+    fi
+    local art unit probe kind rest a b total=0 fails=0 changed=0 wait_probe=0 probe_ok=0
+    print_info "Сверка контракта: ${mod}"
+    while IFS= read -r art; do
+        [[ -n "$art" ]] || continue
+        total=$((total + 1))
+        if [[ -e "$art" ]]; then
+            print_ok "есть: ${art}"
+        else
+            print_err "нет: ${art}"
+            fails=$((fails + 1))
+        fi
+    done < <(eli_contract_kind artifact)
+    while IFS= read -r unit; do
+        [[ -n "$unit" ]] || continue
+        total=$((total + 1))
+        if eli_fact_unit "$unit" 3; then
+            print_ok "юнит активен: ${unit}"
+            continue
+        fi
+        # - юнит без бинаря из ExecStart не поднимается: это остаток restore -
+        # - у удалённого компонента, старт дал бы вечный рестарт-цикл -
+        if [[ "$fix" == "fix" ]] && ! eli_unit_exec_exists "$unit"; then
+            print_warn "юнит ${unit}: бинарь из ExecStart отсутствует, не поднимается"
+            fails=$((fails + 1))
+            continue
+        fi
+        if [[ "$fix" == "fix" ]] && systemctl start "$unit" 2>/dev/null && eli_fact_unit "$unit" 3; then
+            print_ok "юнит поднят: ${unit}"
+            changed=$((changed + 1))
+            ELI_RECONCILE_CHANGED=$((ELI_RECONCILE_CHANGED + 1))
+        else
+            print_err "юнит не активен: ${unit}"
+            fails=$((fails + 1))
+        fi
+    done < <(eli_contract_kind unit)
+    # - после подъёма юнита факт проверяется с ожиданием: снимок сразу за -
+    # - стартом показывает ещё не открытый порт и даёт ложную проблему -
+    (( changed > 0 )) && wait_probe=1
+    while IFS= read -r probe; do
+        [[ -n "$probe" ]] || continue
+        total=$((total + 1))
+        kind="${probe%%:*}"
+        rest="${probe#*:}"
+        a="${rest%%:*}"
+        b=""
+        [[ "$rest" == *:* ]] && b="${rest#*:}"
+        probe_ok=0
+        if (( wait_probe )); then
+            eli_probe_wait "$kind" "$a" "$b" 10 && probe_ok=1
+        else
+            eli_probe_run "$kind" "$a" "$b" && probe_ok=1
+        fi
+        if (( probe_ok )); then
+            print_ok "проба: ${kind}:${a}${b:+:${b}}"
+        else
+            print_warn "проба не прошла: ${kind}:${a}${b:+:${b}}"
+            fails=$((fails + 1))
+        fi
+    done < <(eli_contract_kind probe)
+    print_info "Итог ${mod}: проверок ${total}, проблем ${fails}, исправлено ${changed}"
+    return "$fails"
+}
+
+# --> РЕЕСТР БЭКАПА <--
+# - модули с путями бэкапа в контрактах: единый список для архива, -
+# - реестра восстановления и restic, чтобы источники не расходились -
+eli_backup_modules() {
+    printf '%s\n' xui awg ufw teamspeak mumble outline mtproto socks5 \
+        hysteria2 zapret2 wgobfs mimic
+}
+
+# - пути бэкапа берутся из контрактов модулей: реестр не дублирует -
+# - ручные списки, новый модуль описывает своё в контракте -
+eli_backup_register() {
+    local mod path
+    for mod in "$@"; do
+        eli_contract_load "$mod" >/dev/null 2>&1 || continue
+        while IFS= read -r path; do
+            [[ -n "$path" ]] && printf '%s\n' "$path"
+        done < <(eli_contract_kind backup)
+    done
+    return 0
+}
 # === 01_boot.sh ===
 # --> МОДУЛЬ: BOOT (ПЕРВИЧНАЯ НАСТРОЙКА) <--
 # - обновление системы, пакеты, Docker, swap, sysctl, SSH, fail2ban, UFW, book_init -
@@ -5159,6 +5894,43 @@ awg_change_dns() {
 # - симптом выгорания: ping в туннеле живой, throughput мёртв. Новый порт: сервер + -
 # - ufw + env + книга + клиентские conf; старый порт в burned_ports (TTL 30 дней), -
 # - опционально grace-redirect через systemd-run (до ребута сервера) -
+# - откат смены порта: файлы возвращает транзакция, живое состояние - здесь -
+# - порядок: книга на старый порт, рестарт на старом порту, возврат целей -
+# - обфускатора и mimic, возврат правила UFW -
+_awg_port_undo() {
+    local iface="$1" old_port="$2" new_port="$3" behind="$4"
+    book_write ".awg.interfaces.${iface}.port" "$old_port" number
+    systemctl restart "awg-quick@${iface}" >/dev/null 2>&1
+    sleep 1
+    if systemctl is-active --quiet "awg-quick@${iface}" \
+       && [[ "$(awg show "${iface}" listen-port 2>/dev/null)" == "$old_port" ]]; then
+        print_ok "Откат: ${iface} снова на ${old_port}"
+    else
+        print_err "Откат не поднялся: journalctl -xeu awg-quick@${iface} --no-pager | tail -20"
+    fi
+    if [[ -n "$behind" ]]; then
+        wgo_retarget "$iface" "$new_port" "$old_port" >/dev/null 2>&1 || true
+    fi
+    if declare -f mim_retarget >/dev/null 2>&1; then
+        mim_retarget "$iface" "$new_port" "$old_port" >/dev/null 2>&1 || true
+    fi
+    if [[ -z "$behind" ]] && command -v ufw &>/dev/null; then
+        ufw delete allow "${new_port}/udp" >/dev/null 2>&1 || true
+        ufw allow "${old_port}/udp" comment "AWG ${iface}" >/dev/null 2>&1 || true
+    fi
+}
+
+# - книга подтверждает новый порт: обязательный факт транзакции -
+_awg_book_port_is() {
+    [[ "$(book_read ".awg.interfaces.\"${1}\".port")" == "$2" ]]
+}
+
+# - пир снят с живого интерфейса: список пиров не содержит ключ -
+_awg_live_peer_absent() {
+    local iface="$1" pub="$2"
+    ! awg show "$iface" peers 2>/dev/null | grep -qxF "$pub"
+}
+
 awg_change_port() {
     print_section "Сменить порт интерфейса"
     awg_select_iface
@@ -5203,11 +5975,27 @@ awg_change_port() {
     ask_yn "Сменить порт ${old_port} -> ${new_port} у интерфейса ${iface}?" "y" confirm
     [[ "$confirm" == "yes" ]] || { print_info "Отменено"; return 0; }
 
+    # - транзакция: файлы интерфейса в откат, живые проверки - обязательные факты -
+    if ! eli_txn_begin "awg_change_port ${iface}"; then
+        print_err "Транзакция не открылась: смена порта отменена"
+        return 1
+    fi
+    eli_txn_backup_file "$conf_file" || { eli_txn_rollback; return 1; }
+    eli_txn_backup_file "$env_file" || { eli_txn_rollback; return 1; }
+    eli_txn_backup_file "${AWG_SETUP_DIR}/server.env" || { eli_txn_rollback; return 1; }
+    eli_txn_backup_file "${AWG_SETUP_DIR}/burned_ports" || { eli_txn_rollback; return 1; }
+    local _awg_cf
+    for _awg_cf in "$(awg_iface_clients "$iface")"/*/client.conf; do
+        [[ -f "$_awg_cf" ]] || continue
+        eli_txn_backup_file "$_awg_cf" || { eli_txn_rollback; return 1; }
+    done
+
     # - сервер: замена ListenPort с контролем (sed молчивал бы неудачу), рестарт. -
     # - рестарт упал или порт не подтвердился -> откат conf на старый и подъём, -
     # - burned/ufw/env/книга/клиенты трогаются только после подтверждённого рестарта -
     if ! _awg_conf_set_port "$conf_file" "$old_port" "$new_port"; then
         print_err "Строка 'ListenPort = ${old_port}' в ${conf_file} не найдена, ничего не изменено"
+        eli_txn_rollback
         return 1
     fi
     # - интерфейс за обфускатором: новый порт закрывается до рестарта, -
@@ -5217,7 +6005,7 @@ awg_change_port() {
         behind_obfs="1"
         if ! wgo_lock_awg_port "$iface" "$new_port"; then
             print_err "Не удалось закрыть ${new_port}/udp -> смена порта отменена"
-            _awg_conf_set_port "$conf_file" "$new_port" "$old_port"
+            eli_txn_rollback
             return 1
         fi
     fi
@@ -5226,7 +6014,7 @@ awg_change_port() {
     if ! systemctl is-active --quiet "awg-quick@${iface}" \
        || [[ "$(awg show "${iface}" listen-port 2>/dev/null)" != "$new_port" ]]; then
         print_err "Подъём на порту ${new_port} не удался, откатываю на ${old_port}"
-        _awg_conf_set_port "$conf_file" "$new_port" "$old_port"
+        eli_txn_rollback
         [[ -n "$behind_obfs" ]] && wgo_unlock_awg_port "$iface" "$new_port"
         systemctl restart "awg-quick@${iface}"
         sleep 1
@@ -5253,7 +6041,8 @@ awg_change_port() {
         fi
     fi
     echo "${old_port} ${now}" >> "${AWG_SETUP_DIR}/burned_ports"
-    eli_fact_line "${AWG_SETUP_DIR}/burned_ports" "^${old_port} " "Выгоревший порт ${old_port}"
+    eli_txn_expect "порт ${old_port} в burned" \
+        grep -q "^${old_port} " "${AWG_SETUP_DIR}/burned_ports"
 
     # - ufw: новый открыть, старый закрыть (там же, где create/delete интерфейса); -
     # - за обфускатором порт туннеля наружу не выставляется, новый закрыт заранее -
@@ -5262,24 +6051,42 @@ awg_change_port() {
         ufw delete allow "${old_port}/udp" >/dev/null 2>&1 || true
         # - факт смены: новый порт открыт, старый снят; успех печатает -
         # - конец смены, провал виден здесь -
-        if ! _ufw_has_rule "$new_port" "udp"; then
-            print_err "UFW не разрешил ${new_port}/udp: ufw allow ${new_port}/udp и проверь ufw status verbose"
-        fi
-        if _ufw_has_rule "$old_port" "udp"; then
-            print_warn "UFW не закрыт ${old_port}/udp: ufw delete allow ${old_port}/udp"
-        fi
+        eli_txn_expect "UFW разрешил ${new_port}/udp" _ufw_has_rule "$new_port" "udp"
+        eli_txn_expect "UFW закрыл ${old_port}/udp" _ufw_no_rule "$old_port" "udp"
     fi
 
-    # - env (iface + legacy server.env) и книга -
+    # - env (iface + legacy server.env) и книга: правки подтверждаются фактом -
+    # - legacy server.env принадлежит первому интерфейсу: его порт проверяется, -
+    # - только когда файл держит старый порт сменяемого интерфейса -
+    local legacy_port=""
+    if [[ -f "${AWG_SETUP_DIR}/server.env" ]]; then
+        legacy_port=$(eli_source_env "${AWG_SETUP_DIR}/server.env" SERVER_PORT || true)
+    fi
     sed -i "s/^SERVER_PORT=\"${old_port}\"/SERVER_PORT=\"${new_port}\"/" "$env_file"
     [[ -f "${AWG_SETUP_DIR}/server.env" ]] && \
         sed -i "s/^SERVER_PORT=\"${old_port}\"/SERVER_PORT=\"${new_port}\"/" "${AWG_SETUP_DIR}/server.env"
+    eli_txn_expect "env ${iface}: SERVER_PORT ${new_port}" \
+        grep -q "^SERVER_PORT=\"${new_port}\"" "$env_file"
+    if [[ -n "$legacy_port" && "$legacy_port" == "$old_port" ]]; then
+        eli_txn_expect "server.env: SERVER_PORT ${new_port}" \
+            grep -q "^SERVER_PORT=\"${new_port}\"" "${AWG_SETUP_DIR}/server.env"
+    fi
     book_write ".awg.interfaces.${iface}.port" "$new_port" number
+    eli_txn_expect "книга: порт ${iface} ${new_port}" _awg_book_port_is "$iface" "$new_port"
+
+    # - обязательные факты не прошли: файлы и живое состояние возвращаются -
+    if (( TXN_FAILS > 0 )); then
+        eli_txn_commit
+        _awg_port_undo "$iface" "$old_port" "$new_port" "$behind_obfs"
+        return 1
+    fi
 
     # - обфускатор: цель инстанса переезжает вместе с туннелем -
     if [[ -n "$behind_obfs" ]]; then
         if ! wgo_retarget "$iface" "$old_port" "$new_port"; then
             print_err "Инстанс обфускатора не перешёл на порт ${new_port}: journalctl -xeu wgobfs-eli@${iface} --no-pager | tail -20"
+            eli_txn_rollback
+            _awg_port_undo "$iface" "$old_port" "$new_port" "$behind_obfs"
             return 1
         fi
     fi
@@ -5288,6 +6095,8 @@ awg_change_port() {
     if declare -f mim_retarget >/dev/null 2>&1; then
         if ! mim_retarget "$iface" "$old_port" "$new_port"; then
             print_err "mimic не переведён на порт ${new_port}: туннель на новом порту, фильтр на старом"
+            eli_txn_rollback
+            _awg_port_undo "$iface" "$old_port" "$new_port" "$behind_obfs"
             return 1
         fi
     fi
@@ -5308,6 +6117,11 @@ awg_change_port() {
         done
     fi
 
+    # - фиксация: провал обязательного факта возвращает файлы и живое состояние -
+    if ! eli_txn_commit; then
+        _awg_port_undo "$iface" "$old_port" "$new_port" "$behind_obfs"
+        return 1
+    fi
     print_ok "Порт ${iface}: ${old_port} -> ${new_port}"
     print_info "Обновлено клиентских конфигов: ${clients_changed} (${clients_dir}/<имя>/client.conf)"
     if (( clients_miss > 0 )); then
@@ -5668,6 +6482,14 @@ awg_edit_client() {
     cfg="$(awg_iface_clients "$iface")/${name}/client.conf"
     [[ ! -f "$cfg" ]] && { print_err "Конфиг не найден: ${cfg}"; return 0; }
 
+    # - транзакция: правки клиента - одна единица; не прошёл факт - конфиг
+    # - возвращается целиком, а не остаётся с половиной применённых полей -
+    if ! eli_txn_begin "awg_edit_client ${iface}/${name}"; then
+        print_err "Транзакция не открылась: правка отменена"
+        return 1
+    fi
+    eli_txn_backup_file "$cfg" || { eli_txn_rollback; return 1; }
+
     # - правки только в клиентском .conf: endpoint/DNS/AllowedIPs/MTU задают -
     # - поведение устройства. серверный peer (PublicKey + IP/32) не меняется, -
     # - reload интерфейса не требуется -
@@ -5705,6 +6527,9 @@ awg_edit_client() {
                 sed -i "s|^Endpoint = .*|Endpoint = ${new_ep}|" "$cfg"
                 if eli_fact_line "$cfg" "^Endpoint = ${new_ep}\$" "Endpoint"; then
                     print_ok "Endpoint: ${new_ep}"; changed=1
+                else
+                    eli_txn_rollback
+                    return 1
                 fi
                 ;;
             2)
@@ -5723,6 +6548,9 @@ awg_edit_client() {
                 sed -i "s|^DNS = .*|DNS = ${new_dns}|" "$cfg"
                 if eli_fact_line "$cfg" "^DNS = ${new_dns}\$" "DNS"; then
                     print_ok "DNS: ${new_dns}"; changed=1
+                else
+                    eli_txn_rollback
+                    return 1
                 fi
                 ;;
             3)
@@ -5740,6 +6568,9 @@ awg_edit_client() {
                 sed -i "s|^AllowedIPs = .*|AllowedIPs = ${new_allowed}|" "$cfg"
                 if eli_fact_line "$cfg" "^AllowedIPs = ${new_allowed}\$" "AllowedIPs"; then
                     print_ok "AllowedIPs: ${new_allowed}"; changed=1
+                else
+                    eli_txn_rollback
+                    return 1
                 fi
                 ;;
             4)
@@ -5753,12 +6584,20 @@ awg_edit_client() {
                     print_ok "MTU: ${new_mtu}"
                     print_info "Для YouTube/QUIC при обрывах видео пробуй MTU 1280 или ниже"
                     changed=1
+                else
+                    eli_txn_rollback
+                    return 1
                 fi
                 ;;
             0) break ;;
             *) print_warn "0-4" ;;
         esac
     done
+
+    # - фиксация правок клиента: все факты уже подтверждены по ходу -
+    if ! eli_txn_commit; then
+        return 1
+    fi
 
     if [[ $changed -eq 1 ]]; then
         echo ""
@@ -5803,40 +6642,67 @@ awg_delete_client() {
     ask_yn "Подтвердить?" "n" confirm
     [[ "$confirm" != "yes" ]] && { print_info "Отмена"; return 0; }
 
-    local cdir conf rm_rc=0
+    local cdir conf rm_rc=0 stage="" had_pub=""
     cdir="$(awg_iface_clients "$iface")/${name}"
     conf=$(awg_iface_conf "$iface")
+
+    # - транзакция: конфиг интерфейса в откат, каталог клиента - в карантин -
+    # - до фиксации: провал возвращает пир в конфиге и файлы клиента -
+    if ! eli_txn_begin "awg_delete_client ${iface}/${name}"; then
+        print_err "Транзакция не открылась: удаление отменено"
+        return 1
+    fi
+    eli_txn_backup_file "$conf" || { eli_txn_rollback; return 1; }
+
     if [[ -f "${cdir}/public.key" ]]; then
-        local pub
-        pub=$(cat "${cdir}/public.key")
-        awg_remove_peer_by_pubkey "$conf" "$pub" || rm_rc=$?
-        if (( rm_rc == 0 )); then
-            print_ok "Пир удалён из конфига"
-            awg_apply_peer "$iface" "$pub" ""
-        elif (( rm_rc == 2 )); then
-            print_warn "Пир клиента в конфиге не найден (уже снят)"
-            # - в конфиге пира нет, но живой интерфейс мог его удерживать: -
-            # - пир снимается и с живого интерфейса -
-            awg_apply_peer "$iface" "$pub" ""
+        had_pub=$(cat "${cdir}/public.key")
+        awg_remove_peer_by_pubkey "$conf" "$had_pub" || rm_rc=$?
+        if (( rm_rc == 0 || rm_rc == 2 )); then
+            if (( rm_rc == 0 )); then
+                print_ok "Пир удалён из конфига"
+            else
+                print_warn "Пир клиента в конфиге не найден (уже снят)"
+            fi
+            awg_apply_peer "$iface" "$had_pub" ""
         else
             print_err "Пир не снят: конфиг интерфейса не менялся, файлы клиента сохранены"
+            eli_txn_rollback
             return 1
         fi
     else
         awg_remove_peer_by_name "$conf" "$name" || rm_rc=$?
-        if (( rm_rc == 0 )); then
-            # - без файла ключа пир снимается только перечитыванием конфига интерфейса -
-            awg_reload_iface "$iface"
-        elif (( rm_rc == 2 )); then
-            print_warn "Пир клиента в конфиге не найден (уже снят)"
-            # - конфиг пира не содержал, конфиг интерфейса перечитывается -
+        if (( rm_rc == 0 || rm_rc == 2 )); then
+            (( rm_rc == 0 )) || print_warn "Пир клиента в конфиге не найден (уже снят)"
             awg_reload_iface "$iface"
         else
             print_err "Пир не снят: конфиг интерфейса не менялся, файлы клиента сохранены"
+            eli_txn_rollback
             return 1
         fi
     fi
-    rm -rf "${cdir:?}"
+
+    # - файлы клиента уводятся в карантин и удаляются только после фиксации -
+    stage=$(mktemp -d) || { eli_txn_rollback; return 1; }
+    if ! mv "$cdir" "$stage/"; then
+        print_err "Каталог клиента не убран: ${cdir}"
+        eli_txn_rollback
+        rm -rf "$stage"
+        awg_reload_iface "$iface"
+        return 1
+    fi
+    if [[ -n "$had_pub" ]]; then
+        eli_txn_expect "пир ${had_pub} снят с интерфейса" _awg_live_peer_absent "$iface" "$had_pub"
+    else
+        eli_txn_expect "каталог клиента ${name} убран" test ! -e "$cdir"
+    fi
+
+    if ! eli_txn_commit; then
+        mv "$stage/${name}" "$cdir" 2>/dev/null || true
+        rm -rf "$stage"
+        awg_reload_iface "$iface"
+        return 1
+    fi
+    rm -rf "$stage"
     print_ok "Файлы клиента '${name}' удалены"
     return 0
 }
@@ -6923,7 +7789,7 @@ awg_manage() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) awg_create_iface   || print_warn "Ошибка при создании интерфейса" ;;
@@ -7077,29 +7943,30 @@ _xui_verify_sha256() {
 # --> 3X-UI: СКАЧАТЬ И РАСПАКОВАТЬ tar.gz <--
 # - установка распаковкой релиза: штатный установщик интерактивен -
 _xui_fetch_and_extract() {
-    local arch tmpdir tarball exdir
+    local arch tmpdir tarball tarball_dir exdir
     arch=$(_xui_arch)
     tmpdir=$(mktemp -d)
     tarball="${tmpdir}/x-ui-linux-${arch}.tar.gz"
     exdir="${tmpdir}/extract"
 
     print_info "Скачиваем ${XUI_TAG} для ${arch}..."
-    if ! curl -4fLRo "$tarball" --connect-timeout 15 "$XUI_TARBALL_URL"; then
-        print_err "Не удалось скачать ${XUI_TARBALL_URL}"
+    if ! eli_fetch_asset "$XUI_TARBALL_URL" "x-ui-linux-${arch}.tar.gz" -; then
         rm -rf "$tmpdir"
         return 1
     fi
+    tarball="$ELI_ASSET_PATH"
+    tarball_dir=$(dirname "$tarball")
 
     # - сумма архива: несходство или недоступный .sha256 останавливает установку -
     if ! _xui_verify_sha256 "$tarball" "$XUI_TARBALL_URL"; then
-        rm -rf "$tmpdir"
+        rm -rf "$tmpdir" "$tarball_dir"
         return 1
     fi
 
     # - целостность архива до того как трогать рабочую установку -
     if ! gzip -t "$tarball" 2>/dev/null; then
         print_err "Скачанный архив битый (gzip -t не прошёл)"
-        rm -rf "$tmpdir"
+        rm -rf "$tmpdir" "$tarball_dir"
         return 1
     fi
 
@@ -7107,14 +7974,14 @@ _xui_fetch_and_extract() {
     mkdir -p "$exdir"
     if ! tar -xzf "$tarball" -C "$exdir"; then
         print_err "Не удалось распаковать tar.gz"
-        rm -rf "$tmpdir"
+        rm -rf "$tmpdir" "$tarball_dir"
         return 1
     fi
 
     # - новая сборка валидна (есть бинарь) до сноса старой установки -
     if [[ ! -f "${exdir}/x-ui/x-ui" ]]; then
         print_err "В архиве нет x-ui/x-ui, старую установку не трогаю"
-        rm -rf "$tmpdir"
+        rm -rf "$tmpdir" "$tarball_dir"
         return 1
     fi
 
@@ -7123,10 +7990,10 @@ _xui_fetch_and_extract() {
     rm -rf "$XUI_DIR"
     if ! mv "${exdir}/x-ui" "$XUI_DIR"; then
         print_err "Не удалось переместить новую сборку в ${XUI_DIR}"
-        rm -rf "$tmpdir"
+        rm -rf "$tmpdir" "$tarball_dir"
         return 1
     fi
-    rm -rf "$tmpdir"
+    rm -rf "$tmpdir" "$tarball_dir"
 
     [[ ! -d "$XUI_DIR" ]] && { print_err "После установки ${XUI_DIR} не найден"; return 1; }
 
@@ -7455,16 +8322,22 @@ xui_install() {
         print_info "Проверь: journalctl -u ${XUI_SERVICE} --no-pager -n 50"
         return 1
     fi
+    # - транзакция настроек: база и env возвращаются, если проверки не прошли -
+    eli_txn_begin "xui.settings" || { print_err "Не открыть транзакцию настроек"; return 1; }
+    eli_txn_backup_file "$XUI_DB" || { eli_txn_rollback; return 1; }
+    eli_txn_backup_file "$XUI_ENV" || true
+
     systemctl stop "$XUI_SERVICE" 2>/dev/null || true
     if ! eli_fact_unit "$XUI_SERVICE" 5 inactive; then
         print_err "3X-UI не остановился перед записью настроек: установка отменена"
+        eli_txn_rollback
         return 1
     fi
 
-    "$XUI_BIN" setting -port "$panel_port" >/dev/null 2>&1 || true
-    "$XUI_BIN" setting -webBasePath "$panel_path" >/dev/null 2>&1 || true
+    eli_txn_run "$XUI_BIN" setting -port "$panel_port" >/dev/null 2>&1 || true
+    eli_txn_run "$XUI_BIN" setting -webBasePath "$panel_path" >/dev/null 2>&1 || true
     # - CLI принимает пароль только флагом: значение видно в argv процесса -
-    "$XUI_BIN" setting -username "$panel_user" -password "$panel_pass" >/dev/null 2>&1 || true
+    eli_txn_run "$XUI_BIN" setting -username "$panel_user" -password "$panel_pass" >/dev/null 2>&1 || true
 
     local shown
     shown=$("$XUI_BIN" setting -show 2>&1 || true)
@@ -7472,6 +8345,7 @@ xui_install() {
         print_err "Настройки 3X-UI не подтвердились после записи (port/webBasePath)"
         print_info "Ожидалось: порт ${panel_port}, путь ${panel_path}"
         print_info "Фактический вывод: ${shown//$'\n'/; }"
+        eli_txn_rollback
         systemctl start "$XUI_SERVICE" 2>/dev/null || true
         return 1
     fi
@@ -7479,17 +8353,27 @@ xui_install() {
     systemctl start "$XUI_SERVICE" 2>/dev/null || true
     # - живость панели после правок сверяется опросом: иначе установка -
     # - объявляет успех, а панель лежит -
-    if ! eli_fact_unit "$XUI_SERVICE" 5; then
+    if ! eli_txn_expect "unit ${XUI_SERVICE} активен" eli_fact_unit "$XUI_SERVICE" 5; then
+        print_err "3X-UI не поднялся после записи настроек"
+        eli_txn_rollback
+        systemctl start "$XUI_SERVICE" 2>/dev/null || true
         return 1
     fi
     # - логин подтверждает и порт/путь, и пару логин/пароль: CLI мог -
     # - напечатать ошибку и всё равно вернуть 0 -
-    if ! _xui_verify_login "$panel_port" "$panel_path" "$panel_user" "$panel_pass"; then
+    if ! eli_txn_expect "логин в панели 3X-UI" _xui_verify_login "$panel_port" "$panel_path" "$panel_user" "$panel_pass"; then
         print_err "Панель 3X-UI не принимает сохранённые логин/пароль или путь"
         print_info "Проверь: journalctl -u ${XUI_SERVICE} --no-pager -n 50"
+        eli_txn_rollback
+        systemctl start "$XUI_SERVICE" 2>/dev/null || true
         return 1
     fi
     print_ok "Настройки 3X-UI подтверждены входом в панель"
+    if ! eli_txn_commit; then
+        print_err "Настройки 3X-UI откатаны"
+        systemctl start "$XUI_SERVICE" 2>/dev/null || true
+        return 1
+    fi
 
     # - лимит файлов: побочная правка, её провал панель не отменяет -
     if ! _xui_fix_nofile; then
@@ -8242,6 +9126,26 @@ SIG_DIR="/opt/signal-proxy"
 # - ожидаемое число контейнеров: nginx-terminate, nginx-relay, certbot -
 SIG_EXPECT=3
 
+# --> КОНТЕЙНЕРЫ СТЕКА: ОБЩИЙ ЗАПУСК <--
+# - имя и автоперезапуск одинаковы у MTProto и SOCKS5, дальше параметры -
+# - образа и команды; секреты в argv не попадают -
+_proxy_docker_run() {
+    local name="$1"; shift
+    docker run -d --name "$name" --restart always "$@"
+}
+
+# - контейнер поднялся: имя в списке после паузы; упавший снимается сразу, -
+# - иначе restart always крутит его бесконечно, а меню его не видит -
+_proxy_container_up() {
+    local name="$1"
+    sleep 2
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${name}$"; then
+        return 0
+    fi
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    return 1
+}
+
 # --> MTPROTO PROXY (TELEGRAM) - МУЛЬТИИНСТАНС <--
 # - образ nineseconds/mtg:2; один инстанс = один секрет (mtg без мультисекрета), -
 # - секрет несёт домен (mtg generate-secret --hex DOMAIN) -
@@ -8293,27 +9197,97 @@ _mtp_start_container() {
     docker rm "$container" 2>/dev/null || true
 
     # - mtg слушает внутри 3128 по дефолту, пробрасываем внешний PORT -> 3128 -
-    if ! docker run -d \
-        --name "${container}" \
-        --restart always \
+    if ! _proxy_docker_run "$container" \
         -p "${port}:3128" \
         -v "${cfg}:/config.toml:ro" \
         "$MTG_IMAGE" \
         run /config.toml; then
         print_err "Не удалось запустить контейнер ${container}"; return 1
     fi
-    sleep 2
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${container}$"; then
+    if _proxy_container_up "$container"; then
         print_ok "Контейнер ${container} запущен"
         return 0
     fi
     print_err "Контейнер не запустился: docker logs ${container}"
-    # - упавший контейнер снимается сразу: с restart always docker перезапускает его -
-    # - бесконечно, а меню его не видит (env вызывающий удаляет) -
-    docker rm -f "$container" >/dev/null 2>&1 || true
     return 1
 }
 
+
+# --> ПРОКСИ: RUNTIME ПОСЛЕ ВОССТАНОВЛЕНИЯ <--
+# - контейнеры файлами не создаются: восстановление поднимает их из env -
+_proxy_restore_runtime() {
+    local envf container port id cfg tmp_env bad=0
+    for envf in "${MTP_DIR}"/instance_*.env; do
+        [[ -f "$envf" ]] || continue
+        container=$(eli_source_env "$envf" CONTAINER || true)
+        port=$(eli_source_env "$envf" PORT || true)
+        [[ -n "$container" && -n "$port" ]] || continue
+        if docker inspect "$container" >/dev/null 2>&1; then
+            docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${container}$" || docker start "$container" >/dev/null 2>&1 || true
+            continue
+        fi
+        id=$(basename "$envf" | sed 's/^instance_//; s/\.env$//')
+        cfg=$(_mtp_config_path "$id")
+        if [[ -f "$cfg" ]] && _proxy_docker_run "$container" \
+            -p "${port}:3128" -v "${cfg}:/config.toml:ro" "$MTG_IMAGE" run /config.toml >/dev/null 2>&1; then
+            if _proxy_container_up "$container"; then
+                print_ok "MTProto ${container}: пересоздан из env"
+            else
+                print_warn "MTProto ${container}: не запустился, снят (требует пересоздания)"
+                bad=$(( bad + 1 ))
+            fi
+        else
+            print_warn "MTProto ${container}: пересоздать не удалось"
+            bad=$(( bad + 1 ))
+        fi
+    done
+    for envf in "${S5_DIR}"/instance_*.env; do
+        [[ -f "$envf" ]] || continue
+        container=$(eli_source_env "$envf" CONTAINER || true)
+        port=$(eli_source_env "$envf" PORT || true)
+        [[ -n "$container" && -n "$port" ]] || continue
+        if docker inspect "$container" >/dev/null 2>&1; then
+            docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${container}$" || docker start "$container" >/dev/null 2>&1 || true
+            continue
+        fi
+        tmp_env=$(mktemp) || continue
+        chmod 600 "$tmp_env"
+        printf 'PROXY_USER=%s\nPROXY_PASSWORD=%s\n' \
+            "$(eli_source_env "$envf" USER || true)" \
+            "$(eli_source_env "$envf" PASS || true)" > "$tmp_env"
+        if _proxy_docker_run "$container" \
+            -p "${port}:1080" --env-file "$tmp_env" serjs/go-socks5-proxy:v0.0.4 >/dev/null 2>&1; then
+            if _proxy_container_up "$container"; then
+                print_ok "SOCKS5 ${container}: пересоздан из env"
+            else
+                print_warn "SOCKS5 ${container}: не запустился, снят (требует пересоздания)"
+                bad=$(( bad + 1 ))
+            fi
+        else
+            print_warn "SOCKS5 ${container}: пересоздать не удалось"
+            bad=$(( bad + 1 ))
+        fi
+        rm -f "$tmp_env"
+    done
+    for id in /etc/systemd/system/hysteria-*.service; do
+        [[ -f "$id" ]] || continue
+        container=$(basename "$id" .service)
+        systemctl is-active --quiet "$container" 2>/dev/null && continue
+        local exe
+        exe=$(sed -n 's/^ExecStart=\([^ ]*\).*/\1/p' "$id" | head -1)
+        if [[ -n "$exe" && -x "$exe" ]]; then
+            systemctl start "$container" >/dev/null 2>&1 || true
+            systemctl is-active --quiet "$container" 2>/dev/null \
+                && print_ok "Hysteria ${container}: запущен из восстановленного юнита" \
+                || { print_warn "Hysteria ${container}: не запустился"; bad=$(( bad + 1 )); }
+        else
+            systemctl disable --now "$container" >/dev/null 2>&1 || true
+            print_warn "Hysteria ${container}: нет файла из ExecStart, служба отключена"
+            bad=$(( bad + 1 ))
+        fi
+    done
+    return "$bad"
+}
 # --> MTPROTO: ДОБАВИТЬ ИНСТАНС <--
 mtp_add() {
     print_section "Добавить MTProto Proxy"
@@ -8545,9 +9519,7 @@ s5_add() {
     denv=$(mktemp) || { print_err "Не удалось создать env-файл"; return 1; }
     chmod 600 "$denv"
     printf 'PROXY_USER=%s\nPROXY_PASSWORD=%s\n' "$user" "$pass" > "$denv"
-    if ! docker run -d \
-        --name "${container}" \
-        --restart always \
+    if ! _proxy_docker_run "$container" \
         -p "${port}:1080" \
         --env-file "$denv" \
         serjs/go-socks5-proxy:v0.0.4; then
@@ -8556,15 +9528,11 @@ s5_add() {
         return 1
     fi
     rm -f "$denv"
-    sleep 2
 
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${container}$"; then
+    if _proxy_container_up "$container"; then
         print_ok "Контейнер ${container} запущен"
     else
         print_err "Контейнер не запустился: docker logs ${container}"
-        # - упавший контейнер снимается сразу: с restart always docker перезапускает его -
-        # - бесконечно, а env у него ещё не написан - в списке его не видно -
-        docker rm -f "$container" >/dev/null 2>&1 || true
         return 1
     fi
 
@@ -8845,24 +9813,26 @@ hy2_add() {
     if [[ ! -x "$HY2_BIN" ]]; then
         print_info "Скачиваю Hysteria 2..."
         local arch="amd64"; [[ "$(uname -m)" == "aarch64" ]] && arch="arm64"
-        local dl_url
-        dl_url=$(eli_github_fetch "https://api.github.com/repos/HyNetworks/hysteria/releases/latest" \
-            | jq -r ".assets[] | select(.name | test(\"hysteria-linux-${arch}$\")) | .browser_download_url" 2>/dev/null)
+        local api dl_url dl_name dl_sha
+        api=$(eli_github_fetch "https://api.github.com/repos/HyNetworks/hysteria/releases/latest" 2>/dev/null) || api=""
+        dl_name="hysteria-linux-${arch}"
+        dl_url=$(jq -r ".assets[] | select(.name | test(\"hysteria-linux-${arch}$\")) | .browser_download_url" <<< "$api" 2>/dev/null)
         [[ -z "$dl_url" ]] && { print_err "Ссылка на релиз Hysteria 2: $(eli_github_reason)"; return 1; }
-        # - загрузка рядом с целью: бинарь подменяется только после проверки -
-        local dl_tmp="${HY2_BIN}.part.$$"
-        if ! curl -fsSL -o "$dl_tmp" "$dl_url" || [[ ! -s "$dl_tmp" ]]; then
-            rm -f "$dl_tmp"
-            print_err "Не скачал"
+        dl_sha=$(eli_github_asset_sha "$api" "$dl_name")
+        # - загрузка в общий загрузчик: повторы, сверка суммы и уборка при провале -
+        if ! eli_fetch_asset "$dl_url" "$dl_name" "$dl_sha"; then
             return 1
         fi
+        local dl_tmp="$ELI_ASSET_PATH" dl_dir
+        dl_dir=$(dirname "$dl_tmp")
         chmod 755 "$dl_tmp"
         if ! "$dl_tmp" version >/dev/null 2>&1; then
-            rm -f "$dl_tmp"
+            rm -rf "$dl_dir"
             print_err "Скачанный бинарь не запускается: образец не для этой системы?"
             return 1
         fi
-        mv "$dl_tmp" "$HY2_BIN" || { rm -f "$dl_tmp"; print_err "Не удалось заменить ${HY2_BIN}"; return 1; }
+        mv "$dl_tmp" "$HY2_BIN" || { rm -rf "$dl_dir"; print_err "Не удалось заменить ${HY2_BIN}"; return 1; }
+        rm -rf "$dl_dir"
     fi
     # - версия лежит в баннере, который бинарь печатает о stderr, первой строкой пусто -
     local hy2_ver
@@ -8950,7 +9920,8 @@ HY2ENV
         return 1
     fi
 
-    cat > "/etc/systemd/system/${svc}.service" << HY2UNIT
+    local hy2_unit
+    hy2_unit=$(cat << HY2UNIT
 [Unit]
 Description=Hysteria 2 Server #${inst_id}
 After=network.target
@@ -8963,9 +9934,8 @@ LimitNOFILE=65536
 [Install]
 WantedBy=multi-user.target
 HY2UNIT
-    systemctl daemon-reload
-    systemctl enable "$svc" 2>/dev/null; systemctl start "$svc"; sleep 2
-    if ! systemctl is-active --quiet "$svc"; then
+)
+    if ! eli_service_apply "$svc" "$hy2_unit"; then
         print_err "Не запустился: journalctl -u ${svc} | tail -20"
         # - провал старта: инстанс убирается целиком, иначе он числится -
         # - в списке, печатает URI и занимает номер -
@@ -8976,6 +9946,7 @@ HY2UNIT
         print_warn "Инстанс #${inst_id} убран: каталог и юнит сняты"
         return 1
     fi
+    sleep 1
     print_ok "Hysteria 2 #${inst_id} на UDP:${port}"
 
     command -v ufw &>/dev/null && { ufw allow "${port}/udp" comment "Hy2 #${inst_id}" 2>/dev/null || true; }
@@ -9717,14 +10688,17 @@ _wgo_resolve_tag() {
     eli_github_latest_tag "$WGO_REPO"
 }
 
-# --> WGO: ССЫЛКА НА АССЕТ ПОД АРХИТЕКТУРУ <--
+# --> WGO: АССЕТ ПОД АРХИТЕКТУРУ <--
 # - имя ассета: wg-obfuscator-<tag>-linux-x64.tar.gz, суффикс однозначен -
-_wgo_asset_url() {
-    local tag="$1" arch="$2"
-    eli_github_fetch "https://api.github.com/repos/${WGO_REPO}/releases/tags/${tag}" \
-        | jq -r --arg a "$arch" '.assets[]?.browser_download_url
-                 | select(endswith("-" + $a + ".tar.gz"))' 2>/dev/null \
-        | head -1
+# - на stdout "url|sha256": хеш из digest ответа API для сверки загрузки -
+_wgo_asset() {
+    local tag="$1" arch="$2" api url sha
+    api=$(eli_github_fetch "https://api.github.com/repos/${WGO_REPO}/releases/tags/${tag}" 2>/dev/null) || return 1
+    url=$(jq -r --arg a "$arch" '.assets[]?.browser_download_url
+             | select(endswith("-" + $a + ".tar.gz"))' <<< "$api" 2>/dev/null | head -1)
+    [[ -n "$url" ]] || return 1
+    sha=$(eli_github_asset_sha "$api" "$(basename "$url")")
+    printf '%s|%s\n' "$url" "$sha"
 }
 
 # --> WGO: ВЕРСИЯ БИНАРЯ <--
@@ -9738,48 +10712,54 @@ _wgo_version() {
 # --> WGO: ПОЛУЧЕНИЕ БИНАРЯ <--
 # - готовый ассет статический, зависимостей нет; при его отсутствии сборка из исходников -
 _wgo_fetch_binary() {
-    local tag="$1" arch tmp url tarball extracted src
+    local tag="$1" arch tmp url tarball tarball_dir extracted src sha=""
     arch=$(_wgo_arch)
     tmp=$(mktemp -d) || { print_err "mktemp failed"; return 1; }
     mkdir -p "$WGO_DIR"
 
-    [[ -n "$arch" ]] && url=$(_wgo_asset_url "$tag" "$arch")
+    if [[ -n "$arch" ]]; then
+        local ures=""
+        ures=$(_wgo_asset "$tag" "$arch") || ures=""
+        url="${ures%%|*}"
+        [[ "$ures" == *"|"* ]] && sha="${ures#*|}"
+    fi
 
     if [[ -n "$url" ]]; then
         print_info "Скачиваем ${tag} (${arch})..."
-        tarball="${tmp}/wgo.tar.gz"
-        if ! curl -fsSL --connect-timeout 15 -o "$tarball" "$url"; then
-            print_err "Не удалось скачать ассет релиза"
+        if ! eli_fetch_asset "$url" "wgo.tar.gz" "$sha"; then
             rm -rf "$tmp"; return 1
         fi
+        tarball="$ELI_ASSET_PATH"
+        tarball_dir=$(dirname "$tarball")
         mkdir -p "${tmp}/x"
         if ! tar -xzf "$tarball" -C "${tmp}/x" 2>/dev/null; then
             print_err "Архив повреждён (tar failed)"
-            rm -rf "$tmp"; return 1
+            rm -rf "$tmp" "$tarball_dir"; return 1
         fi
         # - внутри каталог wg-obfuscator/ с бинарём, конфигом-примером и лицензией -
         src=$(find "${tmp}/x" -type f -name 'wg-obfuscator' -perm -u+x 2>/dev/null | head -1)
+        rm -rf "$tarball_dir"
     else
         print_warn "Готовый ассет ${tag} (${arch}) недоступен: $(eli_github_reason)"
         _wgo_install_buildtools || { print_err "Не удалось поставить тулчейн"; rm -rf "$tmp"; return 1; }
         print_info "Скачиваем исходники ${tag}..."
-        tarball="${tmp}/wgo-src.tar.gz"
-        if ! curl -fsSL --connect-timeout 15 -o "$tarball" \
-            "https://api.github.com/repos/${WGO_REPO}/tarball/${tag}"; then
-            print_err "Не удалось скачать исходники"
+        if ! eli_fetch_asset "https://api.github.com/repos/${WGO_REPO}/tarball/${tag}" "wgo-src.tar.gz" -; then
             rm -rf "$tmp"; return 1
         fi
+        tarball="$ELI_ASSET_PATH"
+        tarball_dir=$(dirname "$tarball")
         mkdir -p "${tmp}/x"
         if ! tar -xzf "$tarball" -C "${tmp}/x" 2>/dev/null; then
             print_err "Архив повреждён (tar failed)"
-            rm -rf "$tmp"; return 1
+            rm -rf "$tmp" "$tarball_dir"; return 1
         fi
         extracted=$(find "${tmp}/x" -maxdepth 1 -mindepth 1 -type d | head -1)
-        [[ -z "$extracted" ]] && { print_err "Каталог исходников не найден"; rm -rf "$tmp"; return 1; }
+        [[ -z "$extracted" ]] && { print_err "Каталог исходников не найден"; rm -rf "$tmp" "$tarball_dir"; return 1; }
         print_info "Сборка из исходников..."
         make -C "$extracted" 2>/dev/null
         src="${extracted}/wg-obfuscator"
         [[ -f "$src" ]] || src=""
+        rm -rf "$tarball_dir"
     fi
 
     if [[ -z "$src" || ! -f "$src" ]]; then
@@ -9857,21 +10837,6 @@ masking = ${masking}
 verbose = INFO
 EOF
     chmod 600 "$conf"
-}
-
-# --> WGO: ПРОВЕРКА ЗАПУСКА ИНСТАНСА <--
-# - Type=simple рапортует active в момент exec, а конфиг разбирается уже после -
-_wgo_verify_active() {
-    local iface="$1" unit sub
-    unit=$(_wgo_unit "$iface")
-    sleep 2
-    sub=$(systemctl show -p SubState --value "$unit" 2>/dev/null)
-    if [[ "$sub" == "running" ]] && systemctl is-active --quiet "$unit"; then
-        return 0
-    fi
-    print_err "Инстанс ${unit} не удержался (SubState=${sub:-?}). Причина:"
-    journalctl -u "$unit" -n 15 --no-pager 2>/dev/null | sed 's/^/    /'
-    return 1
 }
 
 # --> WGO: ЗАКРЫТИЕ ПОРТА VANILLA-AWG СНАРУЖИ <--
@@ -9957,7 +10922,7 @@ wgo_iface_bound() {
 # - цель переписывается на новый порт и перечитывается рестартом; запасное -
 # - правило старого порта снимается после подтверждённого переезда -
 wgo_retarget() {
-    local iface="$1" old_port="$2" new_port="$3" conf unit tmp
+    local iface="$1" old_port="$2" new_port="$3" conf tmp
     conf=$(_wgo_conf "$iface")
     [[ -f "$conf" ]] || { print_err "Конфиг инстанса ${iface} не найден"; return 1; }
     tmp=$(mktemp) || return 1
@@ -9970,9 +10935,7 @@ wgo_retarget() {
     chmod 600 "$conf"
     eli_fact_line "$conf" "^target = 127[.]0[.]0[.]1:${new_port}$" "Цель инстанса ${iface}" || return 1
     book_write ".wgobfs.instances.\"${iface}\".target" "127.0.0.1:${new_port}"
-    unit=$(_wgo_unit "$iface")
-    systemctl restart "$unit" 2>/dev/null
-    _wgo_verify_active "$iface" || return 1
+    eli_service_start "$(_wgo_unit "$iface")" || return 1
     wgo_unlock_awg_port "$iface" "$old_port"
     return 0
 }
@@ -10296,9 +11259,7 @@ wgo_bind_iface() {
 
     local unit
     unit=$(_wgo_unit "$iface")
-    systemctl enable "$unit" 2>/dev/null
-    systemctl restart "$unit" 2>/dev/null
-    if ! _wgo_verify_active "$iface"; then
+    if ! eli_service_start "$unit"; then
         systemctl disable --now "$unit" 2>/dev/null
         rm -f "$(_wgo_conf "$iface")"
         command -v ufw &>/dev/null && ufw delete allow "${lport}/udp" >/dev/null 2>&1
@@ -10462,11 +11423,10 @@ wgo_set_masking() {
     [[ -z "$lport" || -z "$target" || -z "$key" ]] && { print_err "Нет данных инстанса в книге"; return 1; }
 
     _wgo_write_conf "$iface" "$lport" "$target" "$key" "$masking"
-    systemctl restart "$(_wgo_unit "$iface")" 2>/dev/null
-    if ! _wgo_verify_active "$iface"; then
+    if ! eli_service_start "$(_wgo_unit "$iface")"; then
         print_err "Не завелось -> откат на ${old}"
         _wgo_write_conf "$iface" "$lport" "$target" "$key" "$old"
-        systemctl restart "$(_wgo_unit "$iface")" 2>/dev/null
+        eli_service_start "$(_wgo_unit "$iface")" || true
         return 1
     fi
     _wgo_book_iface "$iface" "$lport" "$target" "$key" "$masking" "true"
@@ -10600,8 +11560,7 @@ wgo_update() {
     book_write ".wgobfs.version" "$(_wgo_version)" string
     local fail=0
     for iface in $bound; do
-        systemctl start "$(_wgo_unit "$iface")" 2>/dev/null
-        _wgo_verify_active "$iface" || fail=1
+        eli_service_start "$(_wgo_unit "$iface")" || fail=1
     done
     [[ $fail -eq 1 ]] && { print_err "Часть инстансов не поднялась после обновления"; return 1; }
     print_ok "Обновлено до $(_wgo_version)"
@@ -10668,7 +11627,14 @@ wgo_unbind() {
 
 # --> WGO: ПОЛНОЕ УДАЛЕНИЕ <--
 wgo_remove() {
-    _wgo_installed || { print_warn "wg-obfuscator не установлен"; return 0; }
+    # - restore возвращает книгу целиком: метка installed может остаться без движка -
+    # - движка нет, запись есть: удаляются остатки, чтобы книга не расходилась с машиной -
+    if [[ ! -x "$WGO_BIN" ]] && [[ "$(book_read ".wgobfs.installed")" == "true" ]]; then
+        print_warn "Движок wg-obfuscator отсутствует (снят вне меню или потерян), в книге осталась метка установки"
+        print_warn "Снимаются остатки: конфиги, привязки, запись книги."
+    else
+        _wgo_installed || { print_warn "wg-obfuscator не установлен"; return 0; }
+    fi
     print_section "Полное удаление wg-obfuscator"
     print_warn "Все привязки снимаются, клиенты возвращаются на прямой Endpoint."
     local confirm=""
@@ -10908,43 +11874,54 @@ _zap_resolve_tag() {
 }
 
 # --> ZAP2: ССЫЛКА НА АРХИВ РЕЛИЗА <--
-# - берём не embedded и не openwrt tar.gz из ассетов тега -
-_zap_asset_url() {
-    local tag="$1"
-    eli_github_fetch "https://api.github.com/repos/${ZAP2_REPO}/releases/tags/${tag}" \
-        | jq -r '.assets[]?.browser_download_url
-                 | select(test("tar\\.gz$"))
-                 | select(test("embedded|openwrt")|not)' 2>/dev/null \
-        | head -1
+# - берём не embedded и не openwrt tar.gz из ассетов тега; на stdout "url|sha256" -
+_zap_asset() {
+    local tag="$1" api url sha
+    api=$(eli_github_fetch "https://api.github.com/repos/${ZAP2_REPO}/releases/tags/${tag}" 2>/dev/null) || return 1
+    url=$(jq -r '.assets[]?.browser_download_url
+             | select(test("tar\\.gz$"))
+             | select(test("embedded|openwrt")|not)' <<< "$api" 2>/dev/null | head -1)
+    [[ -n "$url" ]] || return 1
+    sha=$(eli_github_asset_sha "$api" "$(basename "$url")")
+    printf '%s|%s\n' "$url" "$sha"
 }
 
 # --> ZAP2: ПОЛУЧЕНИЕ БИНАРЯ <--
 # - скачиваем архив релиза, кладём nfqws2 под нашу arch, при отсутствии -> собираем -
 _zap_fetch_binary() {
     local comp d
-    local tag="$1" arch tmp url tarball extracted src
+    local tag="$1" arch tmp url tarball tarball_dir extracted src sha=""
     arch=$(_zap_arch)
     tmp=$(mktemp -d) || { print_err "mktemp failed"; return 1; }
 
-    url=$(_zap_asset_url "$tag")
+    local ures="" is_src=0
+    ures=$(_zap_asset "$tag") || ures=""
+    url="${ures%%|*}"
+    [[ "$ures" == *"|"* ]] && sha="${ures#*|}"
     if [[ -z "$url" ]]; then
         print_warn "Готовый архив релиза не найден ($(eli_github_reason)), берём исходники для сборки"
         url="https://api.github.com/repos/${ZAP2_REPO}/tarball/${tag}"
+        is_src=1
     fi
 
     print_info "Скачиваем ${tag}..."
-    tarball="${tmp}/zapret2.tar.gz"
-    if ! curl -fsSL --connect-timeout 15 -o "$tarball" "$url"; then
-        print_err "Не удалось скачать релиз"
+    if (( is_src )); then
+        if ! eli_fetch_asset "$url" "zapret2.tar.gz" -; then
+            rm -rf "$tmp"; return 1
+        fi
+    elif ! eli_fetch_asset "$url" "zapret2.tar.gz" "$sha"; then
         rm -rf "$tmp"; return 1
     fi
+    tarball="$ELI_ASSET_PATH"
+    tarball_dir=$(dirname "$tarball")
 
     mkdir -p "${tmp}/x"
     if ! tar -xzf "$tarball" -C "${tmp}/x" 2>/dev/null; then
         print_err "Архив повреждён (tar failed)"
-        rm -rf "$tmp"; return 1
+        rm -rf "$tmp" "$tarball_dir"; return 1
     fi
     # - у tarball от API один верхнеуровневый каталог -
+    rm -rf "$tarball_dir"
     extracted=$(find "${tmp}/x" -maxdepth 1 -mindepth 1 -type d | head -1)
     [[ -z "$extracted" ]] && extracted="${tmp}/x"
 
@@ -11114,22 +12091,6 @@ _zap_connectivity_ok() {
     return 0
 }
 
-# --> ZAP2: ПРОВЕРКА ЗАПУСКА ИНСТАНСА <--
-# - Type=simple рапортует active сразу при exec, а nfqws2 может упасть секундой позже -
-# - даём осесть и проверяем реальное состояние, при падении показываем причину из journalctl -
-_zap_verify_active() {
-    local iface="$1" unit sub
-    unit=$(_zap_unit "$iface")
-    sleep 2
-    sub=$(systemctl show -p SubState --value "$unit" 2>/dev/null)
-    if [[ "$sub" == "running" ]] && systemctl is-active --quiet "$unit"; then
-        return 0
-    fi
-    print_err "Инстанс ${unit} не удержался (SubState=${sub:-?}). Причина:"
-    journalctl -u "$unit" -n 15 --no-pager 2>/dev/null | sed 's/^/    /'
-    return 1
-}
-
 # --> ZAP2: ГИБРИДНЫЙ ОТКАТ <--
 # - применяем правила атомарно, ставим страховочный таймер, проверяем, меняем или откатываем -
 _zap_apply_with_rollback() {
@@ -11197,6 +12158,8 @@ _zap_write_nft_loader() {
     nftf=$(_zap_nftf "$iface")
     table=$(_zap_table "$iface")
     local loader="/etc/systemd/system/zeli-nft-${iface}.service"
+    # - старт идемпотентен: таблица снимается перед загрузкой, иначе повторный -
+    # - старт добавляет вторую копию строк к уже загруженной таблице -
     cat > "$loader" << EOF
 [Unit]
 Description=zapret2 (Eli) nft rules for ${iface}
@@ -11206,6 +12169,7 @@ Before=$(_zap_unit "$iface")
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+ExecStartPre=-/usr/sbin/nft delete table inet ${table}
 ExecStart=/usr/sbin/nft -f ${nftf}
 ExecStop=/usr/sbin/nft delete table inet ${table}
 
@@ -11215,6 +12179,20 @@ EOF
     chmod 644 "$loader"
     systemctl daemon-reload 2>/dev/null
     systemctl enable "zeli-nft-${iface}.service" 2>/dev/null
+}
+
+# --> ZAP2: ЮНИТЫ ЗАГРУЗКИ ПРАВИЛ ПРОШЛЫХ СБОРОК <--
+# - юнит без предварительного снятия таблицы переписывается по шаблону: -
+# - старт поверх загруженных правил в таком юните добавляет вторую копию строк -
+_zap_sync_loaders() {
+    local iface f
+    for iface in $(_zap_bound_list); do
+        f="/etc/systemd/system/zeli-nft-${iface}.service"
+        [[ -f "$f" ]] || continue
+        grep -q '^ExecStartPre=-/usr/sbin/nft delete table inet ' "$f" && continue
+        _zap_write_nft_loader "$iface"
+    done
+    return 0
 }
 
 # --> ZAP2: ЗАПИСЬ В КНИГУ ПО ИНТЕРФЕЙСУ <--
@@ -11311,9 +12289,7 @@ zapret_bind_iface() {
     # - !ВАЖНО! -> сначала поднимаем nfqws2 (слушатель очереди), потом заводим правила -
     # - иначе трафик идёт в queue без слушателя (bypass пропускает), десинка нет и тест пустой -
     _zap_write_nft_loader "$iface"
-    systemctl enable "$unit" 2>/dev/null
-    systemctl restart "$unit" 2>/dev/null
-    if ! _zap_verify_active "$iface"; then
+    if ! eli_service_start "$unit"; then
         _zap_rollback_bind "$iface" "$keep_conf" "$keep_hosts" "$keep_loader"
         print_err "Привязка отменена -> инстанс nfqws2 не стартовал"
         return 1
@@ -11389,8 +12365,12 @@ _zap_run_blockcheck() {
 # - код HTTP без обхода: 000 - запрос не прошёл, иначе домен доступен и -
 # - десинк для него не требуется -
 _zap_domain_direct_code() {
-    local d="$1"
-    curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "https://$d" 2>/dev/null || echo "000"
+    local d="$1" code
+    code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "https://$d" 2>/dev/null)
+    # - провал соединения даёт 000 из write-out; пустой ответ (обрыв) тоже считается 000 -
+    # - вывод без перевода строки, как у write-out: код одиночный -
+    [[ -z "$code" ]] && code="000"
+    printf '%s' "${code}"
 }
 
 # --> ZAP2: АВТОПОДБОР И АВТОПРИМЕНЕНИЕ СТРАТЕГИИ <--
@@ -11498,8 +12478,7 @@ zapret_autostrategy() {
 
     # - применяем и проверяем, что инстанс удержался -
     _zap_write_conf "$iface" "$strat" >/dev/null
-    systemctl restart "$(_zap_unit "$iface")" 2>/dev/null
-    if _zap_verify_active "$iface"; then
+    if eli_service_start "$(_zap_unit "$iface")"; then
         print_ok "Стратегия подобрана и применена для ${iface}"
         local q; q=$(_zap_qnum_for "$iface")
         _zap_book_iface "$iface" "$q" "auto" "true" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -11508,7 +12487,7 @@ zapret_autostrategy() {
     print_err "Новая стратегия не завелась -> откатываю на baseline"
     local bstrat; bstrat=$(_zap_baseline_strategy "$hostf")
     _zap_write_conf "$iface" "$bstrat" >/dev/null
-    systemctl restart "$(_zap_unit "$iface")" 2>/dev/null
+    eli_service_start "$(_zap_unit "$iface")" || true
     return 1
 }
 
@@ -11530,10 +12509,11 @@ zapret_set_strategy() {
 
     print_info "Вставь строку(и) стратегии nfqws2 (профили через --new). Пустая строка = конец:"
     local strat="" line
-    while IFS= read -r line; do
+    while :; do
+        eli_read_line "" line
         [[ -z "$line" ]] && break
         strat="${strat}${line}"$'\n'
-    done < /dev/tty
+    done
     [[ -z "$strat" ]] && { print_warn "Пусто, отмена"; return 0; }
 
     local hostf
@@ -11544,9 +12524,8 @@ zapret_set_strategy() {
     conf=$(_zap_conf "$iface"); bak="${conf}.bak"
     cp -a "$conf" "$bak" || { print_err "Прежний конфиг не сохранён: ${conf}"; return 1; }
     _zap_write_conf "$iface" "$strat" >/dev/null
-    systemctl restart "$(_zap_unit "$iface")" 2>/dev/null
     # - проверка удержания инстанса: is-active сразу после restart врёт про Type=simple -
-    if _zap_verify_active "$iface"; then
+    if eli_service_start "$(_zap_unit "$iface")"; then
         rm -f "$bak"
         print_ok "Стратегия применена для ${iface}"
         local q; q=$(_zap_qnum_for "$iface")
@@ -11556,8 +12535,7 @@ zapret_set_strategy() {
     print_err "Стратегия не применена: инстанс не удержался -> возвращаю прежний конфиг"
     # - факт возврата: файл совпадает с копией, инстанс снова удержался -
     if cp -a "$bak" "$conf" && cmp -s "$bak" "$conf"; then
-        systemctl restart "$(_zap_unit "$iface")" 2>/dev/null
-        if _zap_verify_active "$iface"; then
+        if eli_service_start "$(_zap_unit "$iface")"; then
             print_ok "Прежняя стратегия возвращена для ${iface}, запись в книгу не сделана"
             rm -f "$bak"
         else
@@ -11665,7 +12643,27 @@ zapret_disable_iface() {
 # --> ZAP2: ПОЛНОЕ УДАЛЕНИЕ <--
 zapret_remove() {
     local iface
-    _zap_installed || { print_warn "zapret2 не установлен"; return 0; }
+    # - restore возвращает книгу целиком: метка installed может остаться без движка -
+    # - движка нет, запись есть: удаляются остатки, чтобы книга не расходилась с машиной -
+    if [[ ! -x "$ZAP2_BIN" ]] && [[ "$(book_read ".zapret.installed")" == "true" ]]; then
+        print_warn "Движок zapret2 отсутствует (снят вне меню или потерян), в книге осталась метка установки"
+        print_warn "Снимаются остатки: конфиги, привязки, запись книги."
+    else
+        if ! _zap_installed; then
+            # - движка нет: флаг автопроверки от удалённого компонента снимается, -
+            # - иначе Prayer вечно предупреждает о задаче, которой на машине нет -
+            if [[ "$(book_read ".zapret.autoupdate_enabled")" == "true" ]]; then
+                if _zap_autoupdate_cron "off"; then
+                    book_write ".zapret.autoupdate_enabled" "false" bool
+                    print_ok "Остаток автопроверки снят: флаг и cron"
+                else
+                    print_warn "Флаг автопроверки остался: crontab не изменён"
+                fi
+            fi
+            print_warn "zapret2 не установлен"
+            return 0
+        fi
+    fi
     print_section "Полное удаление zapret2"
     local confirm=""
     ask_yn "Удалить zapret2 полностью со всеми интерфейсами?" "n" confirm
@@ -12189,21 +13187,6 @@ _mim_build_conf() {
     return 0
 }
 
-# --> MIM: ПРОВЕРКА ЗАПУСКА <--
-# - юнит Type=notify, но SubState надёжнее: is-active бывает activating -
-_mim_verify_active() {
-    local wan="$1" unit sub
-    unit=$(_mim_unit "$wan")
-    sleep 2
-    sub=$(systemctl show -p SubState --value "$unit" 2>/dev/null)
-    if [[ "$sub" == "running" ]] && systemctl is-active --quiet "$unit"; then
-        return 0
-    fi
-    print_err "Инстанс ${unit} не удержался (SubState=${sub:-?}). Причина:"
-    journalctl -u "$unit" -n 15 --no-pager 2>/dev/null | sed 's/^/    /'
-    return 1
-}
-
 # --> MIM: ПРОБНОЕ РАЗВОРАЧИВАНИЕ <--
 # - mimic run --check грузит BPF на интерфейс и выходит: ловим отказ верификатора до боя -
 # - при живом инстансе не гоняем: --check упрётся в тот же lock-файл в /run/mimic -
@@ -12240,23 +13223,32 @@ _mim_apply() {
         print_info "Привязок не осталось = инстанс ${unit} остановлен"
         return 0
     fi
-    systemctl enable "$unit" 2>/dev/null
-    systemctl restart "$unit" 2>/dev/null
-    _mim_verify_active "$wan"
+    eli_service_start "$unit"
 }
 
 # --> MIM: UFW ДЛЯ ПОРТА <--
 # - порт нужен и как TCP, и как UDP: данные XDP возвращает в UDP до netfilter, а SYN -
 # - и keepalive mimic шлёт настоящим TCP через raw-сокет (доходят до INPUT) -
 # - rc: номер строки своего правила в нумерованном списке, пусто - правила нет -
+# - порт сужает поиск: правила одного интерфейса на разных портах не путаются -
 _mim_ufw_rule_num() {
-    local iface="$1"
-    ufw status numbered 2>/dev/null | sed -n "s/^ *\[ *\([0-9][0-9]*\)\].*mimic ${iface}.*/\1/p" | head -1
+    local iface="$1" port="${2:-}"
+    if [[ -n "$port" ]]; then
+        ufw status numbered 2>/dev/null | sed -n "s/^ *\[ *\([0-9][0-9]*\)\].*${port}\/tcp.*mimic ${iface}.*/\1/p" | head -1
+    else
+        ufw status numbered 2>/dev/null | sed -n "s/^ *\[ *\([0-9][0-9]*\)\].*mimic ${iface}.*/\1/p" | head -1
+    fi
 }
 
 # - правило mimic в отложенных: ufw show added видит его и при неактивном файрволе -
+# - с портом сверяется точная спецификация правила, а не одна метка интерфейса -
 _mim_ufw_added() {
-    ufw show added 2>/dev/null | grep -qF "mimic $1"
+    local iface="$1" port="${2:-}"
+    if [[ -n "$port" ]]; then
+        ufw show added 2>/dev/null | grep -qF "allow ${port}/tcp comment 'mimic ${iface}'"
+    else
+        ufw show added 2>/dev/null | grep -qF "mimic ${iface}"
+    fi
 }
 
 _mim_ufw_open() {
@@ -12282,11 +13274,11 @@ _mim_ufw_close() {
     # - метка; удаление по спецификации унесло бы правило пользователя на том же порту -
     if ufw_active; then
         for i in 1 2 3; do
-            num=$(_mim_ufw_rule_num "$iface")
+            num=$(_mim_ufw_rule_num "$iface" "$port")
             [[ -z "$num" ]] && break
             echo "y" | ufw delete "$num" >/dev/null 2>&1
         done
-        if [[ -n "$(_mim_ufw_rule_num "$iface")" ]]; then
+        if [[ -n "$(_mim_ufw_rule_num "$iface" "$port")" ]]; then
             print_err "Правило mimic на ${port}/tcp осталось в UFW: проверь ufw status verbose"
             return 1
         fi
@@ -12294,9 +13286,9 @@ _mim_ufw_close() {
     fi
     # - неактивный UFW номеров не отдаёт: своё правило ищется в отложенных -
     # - (ufw show added) и снимается по спецификации, факт - повторной проверкой -
-    _mim_ufw_added "$iface" || return 0
+    _mim_ufw_added "$iface" "$port" || return 0
     ufw delete allow "${port}/tcp" >/dev/null 2>&1
-    if _mim_ufw_added "$iface"; then
+    if _mim_ufw_added "$iface" "$port"; then
         print_err "Правило mimic на ${port}/tcp осталось в UFW: ufw show added"
         return 1
     fi
@@ -13176,7 +14168,14 @@ mim_unbind() {
 
 # --> MIM: ПОЛНОЕ УДАЛЕНИЕ <--
 mim_remove() {
-    _mim_installed || { print_warn "mimic не установлен"; return 0; }
+    # - restore возвращает книгу целиком: метка installed может остаться без движка -
+    # - движка нет, запись есть: удаляются остатки, чтобы книга не расходилась с машиной -
+    if [[ ! -x "$MIM_BIN" ]] && [[ "$(book_read ".mimic.installed")" == "true" ]]; then
+        print_warn "Движок mimic отсутствует (снят вне меню или потерян), в книге осталась метка установки"
+        print_warn "Снимаются остатки: конфиги, привязки, запись книги."
+    else
+        _mim_installed || { print_warn "mimic не установлен"; return 0; }
+    fi
     print_section "Полное удаление mimic"
     print_warn "Все привязки снимаются, клиентам придётся выключить свой mimic."
     local confirm=""
@@ -13302,11 +14301,11 @@ _ts_arch_pattern() {
     esac
 }
 
-# - возвращает на stdout строку "url|fmt" (fmt: xz|bz2|gz|zst) - вместе, чтобы пережить $(...) -
+# - возвращает на stdout строку "url|fmt|sha256" (fmt: xz|bz2|gz|zst) - вместе, чтобы пережить $(...) -
 # - архитектура матчится regex'ом (переживает смену amd64 <-> x86_64); перебор форматов -
 # - от современного к старому: xz (текущий TS6) > bz2 > gz > zst -
 ts_get_latest_url() {
-    local json arch_pat fmt url
+    local json arch_pat fmt url sha
     json=$(eli_github_fetch "$TS_GITHUB_API" 2>/dev/null || true)
     [[ -z "$json" ]] && return 1
     arch_pat=$(_ts_arch_pattern)
@@ -13319,7 +14318,10 @@ ts_get_latest_url() {
                    .browser_download_url // empty' \
             2>/dev/null)
         if [[ -n "$url" && "$url" != "null" ]]; then
-            echo "${url}|${fmt}"
+            sha=$(echo "$json" | jq -r --arg u "$url" \
+                '.assets[]? | select(.browser_download_url == $u) | (.digest // empty)' 2>/dev/null \
+                | sed -n 's/^sha256://p' | head -1)
+            echo "${url}|${fmt}|${sha}"
             return 0
         fi
     done
@@ -13328,6 +14330,29 @@ ts_get_latest_url() {
 
 ts_get_latest_version() {
     eli_github_fetch "$TS_GITHUB_API" | jq -r '.tag_name // "?"' 2>/dev/null || echo "?"
+}
+
+# - содержимое юнита: пути установки и порты; применяется через eli_service_apply -
+_ts_unit_content() {
+    local voice_port="$1" ft_port="$2"
+    cat << EOF
+[Unit]
+Description=TeamSpeak 6 Server
+After=network.target
+
+[Service]
+Type=simple
+User=${TS_USER}
+Group=${TS_USER}
+WorkingDirectory=${TS_DIR}
+ExecStart=${TS_BIN} --accept-license=accept --default-voice-port=${voice_port} --filetransfer-port=${ft_port} --log-path=${TS_LOG_DIR}
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
 }
 
 ts_install() {
@@ -13361,10 +14386,12 @@ ts_install() {
 
     # - скачивание -
     print_section "Скачивание"
-    local url_fmt download_url archive_fmt latest_ver
+    local url_fmt download_url archive_fmt latest_ver ts_sha _rest
     url_fmt=$(ts_get_latest_url)
     download_url="${url_fmt%%|*}"
-    archive_fmt="${url_fmt##*|}"
+    _rest="${url_fmt#*|}"
+    archive_fmt="${_rest%%|*}"
+    ts_sha="${_rest#*|}"
     latest_ver=$(ts_get_latest_version)
     [[ -z "$download_url" ]] && { print_err "URL не получен с GitHub"; return 1; }
     print_ok "Версия: ${latest_ver} (формат: ${archive_fmt})"
@@ -13380,7 +14407,9 @@ ts_install() {
         [[ -d "$_td" ]] || { print_err "Каталог не создан: ${_td}"; return 1; }
     done
 
-    local tmpdir; tmpdir=$(mktemp -d)
+    local tmpdir
+    local archive
+    tmpdir=$(mktemp -d)
     # - выбор флага tar по формату; xz/zst поддерживаются современным GNU tar (--auto-compress тоже работает) -
     local tar_flag archive_ext
     case "${archive_fmt:-xz}" in
@@ -13398,21 +14427,22 @@ ts_install() {
         bz2) command -v bzip2 &>/dev/null || apt-get install -y -qq bzip2    2>/dev/null || true ;;
     esac
 
-    if ! curl -fsSL --connect-timeout 30 --max-time 120 "$download_url" -o "${tmpdir}/ts6.${archive_ext}"; then
-        print_err "Не удалось скачать TeamSpeak: ${download_url}"
+    if ! eli_fetch_asset "$download_url" "ts6.${archive_ext}" "$ts_sha"; then
         rm -rf "$tmpdir"
         return 1
     fi
+    archive="${ELI_ASSET_PATH}"
     # - распаковка в TS_DIR. strip-components не используем: текущие архивы TS6 без верхней папки -
     # - на случай возврата вложенной структуры в будущем - проверяем оба варианта ниже -
     local tar_rc
     if [[ "$tar_flag" == "" ]]; then
-        tar --zstd -xf "${tmpdir}/ts6.${archive_ext}" -C "$TS_DIR"
+        tar --zstd -xf "$archive" -C "$TS_DIR"
         tar_rc=$?
     else
-        tar -x${tar_flag}f "${tmpdir}/ts6.${archive_ext}" -C "$TS_DIR"
+        tar -x${tar_flag}f "$archive" -C "$TS_DIR"
         tar_rc=$?
     fi
+    rm -rf "$(dirname "$archive")"
     if [[ $tar_rc -ne 0 ]]; then
         print_err "Не удалось распаковать архив (формат: ${archive_ext})"
         rm -rf "$tmpdir"
@@ -13440,37 +14470,24 @@ ts_install() {
     chown -R "${TS_USER}:${TS_USER}" "$TS_DIR" "$TS_DATA_DIR" "$TS_LOG_DIR" \
         || { print_err "chown ${TS_DIR} не удался"; return 1; }
 
-    # - systemd unit -
-    cat > "$TS_UNIT" << EOF
-[Unit]
-Description=TeamSpeak 6 Server
-After=network.target
-
-[Service]
-Type=simple
-User=${TS_USER}
-Group=${TS_USER}
-WorkingDirectory=${TS_DIR}
-ExecStart=${TS_BIN} --accept-license=accept --default-voice-port=${voice_port} --filetransfer-port=${ft_port} --log-path=${TS_LOG_DIR}
-Restart=always
-RestartSec=5
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
-    systemctl enable teamspeak 2>/dev/null || true
+    # - systemd unit: канон пишет файл, проверяет синтаксис, включает -
+    # - автозапуск, запускает службу и подтверждает active; провал -
+    # - возвращает прежний юнит -
+    if ! eli_service_apply teamspeak "$(_ts_unit_content "$voice_port" "$ft_port")"; then
+        print_err "Юнит teamspeak не применён"
+        return 1
+    fi
     if ! systemctl is-enabled --quiet teamspeak 2>/dev/null; then
         print_err "Автозапуск teamspeak не включён: systemctl enable teamspeak"
         return 1
     fi
 
-    # - первый запуск и перехват ключа -
+    # - первый запуск и перехват ключа: служба поднята каноном, пауза -
+    # - даёт tsserver записать token в журнал и лог-файлы -
     # - TS6 печатает token= в stdout/stderr (попадает в journal) И в лог-файлы в --log-path -
     # - имя файла: tsserver_YYYY-MM-DD__HH_MM_SS.NNNNNN_INDEX.log -
     print_section "Первый запуск"
-    systemctl start teamspeak; sleep 5
+    sleep 5
     local start_time
     start_time=$(systemctl show teamspeak --property=ActiveEnterTimestamp 2>/dev/null | cut -d= -f2 || date "+%Y-%m-%d %H:%M:%S")
     local priv_key="" attempts=0
@@ -13497,9 +14514,9 @@ EOF
     fi
 
     # - пост-проверка порта: в бете TS6 --default-voice-port иногда игнорируется -
-    # - сверяем что сервис реально слушает заданный voice_port через ss -
+    # - слушатель открывается позже старта юнита, поэтому порт ждётся, а не щупается раз -
     if eli_fact_unit teamspeak 10; then
-        if eli_port_busy "$voice_port" udp; then
+        if eli_port_wait "$voice_port" udp 15; then
             print_ok "Voice ${voice_port}/udp: слушает"
         else
             print_warn "Сервис активен, но НЕ слушает ${voice_port}/udp"
@@ -13638,11 +14655,13 @@ ts_update() {
     [[ ! -f "$TS_BIN" ]] && { print_err "Не установлен"; return 0; }
     local cur; cur=$(ts_get_version)
     local lat; lat=$(ts_get_latest_version)
-    # - получаем url и формат одной строкой "url|fmt" -
-    local url_fmt url archive_fmt
+    # - получаем url, формат и сумму одной строкой "url|fmt|sha256" -
+    local url_fmt url archive_fmt ts_sha _rest
     url_fmt=$(ts_get_latest_url)
     url="${url_fmt%%|*}"
-    archive_fmt="${url_fmt##*|}"
+    _rest="${url_fmt#*|}"
+    archive_fmt="${_rest%%|*}"
+    ts_sha="${_rest#*|}"
     # - убираем префикс v для корректного сравнения -
     [[ "${cur#v}" == "${lat#v}" ]] && { print_ok "Актуальная версия: ${cur}"; return 0; }
     [[ -z "$url" ]] && { print_err "URL релиза TeamSpeak: $(eli_github_reason)"; return 0; }
@@ -13656,7 +14675,9 @@ ts_update() {
         print_err "TeamSpeak не остановился: обновление отменено"
         return 1
     fi
-    local tmpdir; tmpdir=$(mktemp -d)
+    local tmpdir
+    local archive
+    tmpdir=$(mktemp -d)
     # - выбор флага tar по формату -
     local tar_flag archive_ext
     case "${archive_fmt:-xz}" in
@@ -13672,21 +14693,22 @@ ts_update() {
         bz2) command -v bzip2 &>/dev/null || apt-get install -y -qq bzip2    2>/dev/null || true ;;
     esac
     # - скачивание: при провале старый бинарник на месте, поднимаем его обратно -
-    if ! curl -fsSL --connect-timeout 30 --max-time 120 "$url" -o "${tmpdir}/ts6.${archive_ext}"; then
-        print_err "Не удалось скачать ${url}"
+    if ! eli_fetch_asset "$url" "ts6.${archive_ext}" "$ts_sha"; then
         rm -rf "$tmpdir"
         systemctl start teamspeak 2>/dev/null || true
         return 1
     fi
+    archive="${ELI_ASSET_PATH}"
     # - распаковка: при провале часть файлов могла затереться, всё равно пытаемся поднять -
     local tar_rc
     if [[ "$tar_flag" == "" ]]; then
-        tar --zstd -xf "${tmpdir}/ts6.${archive_ext}" -C "$TS_DIR"
+        tar --zstd -xf "$archive" -C "$TS_DIR"
         tar_rc=$?
     else
-        tar -x${tar_flag}f "${tmpdir}/ts6.${archive_ext}" -C "$TS_DIR"
+        tar -x${tar_flag}f "$archive" -C "$TS_DIR"
         tar_rc=$?
     fi
+    rm -rf "$(dirname "$archive")"
     if [[ $tar_rc -ne 0 ]]; then
         print_err "Не удалось распаковать архив (формат: ${archive_ext})"
         rm -rf "$tmpdir"
@@ -13848,7 +14870,8 @@ mbl_install() {
         print_warn "Mumble уже установлен"; return 0
     fi
 
-    if ! apt-get install -y -qq mumble-server; then
+    # - confnew: dpkg-диалог conffile съедает stdin установки, конфиг перенастраивается ниже -
+    if ! apt-get install -y -qq -o Dpkg::Options::="--force-confnew" mumble-server; then
         print_err "Не удалось установить mumble-server"; return 1
     fi
     print_ok "mumble-server установлен"
@@ -14100,7 +15123,8 @@ mbl_update() {
         print_err "Сервис не остановился: обновление отменено"
         return 1
     fi
-    if apt-get install -y -qq mumble-server 2>/dev/null; then
+    # - confnew по той же причине: обновление поверх изменённого конфига без диалога dpkg -
+    if apt-get install -y -qq -o Dpkg::Options::="--force-confnew" mumble-server 2>/dev/null; then
         systemctl start "$MBL_SERVICE" 2>/dev/null || true
         sleep 2
         if systemctl is-active --quiet "$MBL_SERVICE" 2>/dev/null; then
@@ -14739,7 +15763,7 @@ diag_run() {
         D_BEST_SPEED="0"; D_BEST_HOST="?"
         local bw_confirm=""
         echo ""
-        echo -e "  ${YELLOW}Тест канала качает ~10 MB с каждой ЖИВОЙ точки по регионам.${NC}"
+        echo -e "  ${YELLOW}Тест канала качает ~25 MB с каждой ЖИВОЙ точки по регионам.${NC}"
         echo -e "  ${YELLOW}Мёртвые точки пропускаются пробником, на канал не влияют.${NC}"
         echo -e "  ${YELLOW}На VPS с лимитом трафика стоит пропустить.${NC}"
         ask_yn "Запустить тест канала?" "y" bw_confirm
@@ -14770,9 +15794,9 @@ diag_run() {
                 D_SPEED_RESULTS+=("${label}|n/a"); return 0
             fi
             local speed mbit
-            # - --range 0-10485760 ограничивает скачивание 10 MB даже на быстром канале -
-            speed=$(curl -o /dev/null -s --connect-timeout 5 --max-time 20 \
-                --range 0-10485760 -w "%{speed_download}" "$url" 2>/dev/null || echo "0")
+            # - --range ограничивает скачивание 25 MB даже на быстром канале -
+            speed=$(curl -o /dev/null -s --connect-timeout 5 --max-time 30 \
+                --range 0-26214399 -w "%{speed_download}" "$url" 2>/dev/null || echo "0")
             mbit=$(awk "BEGIN {printf \"%.1f\", ${speed}/1024/1024*8}")
             echo -e "  ${CYAN}${label}:${NC} ${mbit} Мбит/с"
             D_SPEED_RESULTS+=("${label}|${mbit}")
@@ -14798,7 +15822,7 @@ diag_run() {
             "Корея (Vultr Сеул)|https://sel-kor-ping.vultr.com/vultr.com.100MB.bin"
             "Гонконг (xTom HK)|https://mirror.xtom.com.hk/ubuntu/ls-lR.gz|https://mirror.xtom.com.hk/ubuntu/dists/noble/Contents-amd64.gz"
         )
-        print_info "Тестируем канал (живые точки по регионам, ~10 MB каждая)..."
+        print_info "Тестируем канал (живые точки по регионам, ~25 MB каждая)..."
         local _row _label _urls
         for _row in "${_pts[@]}"; do
             _label="${_row%%|*}"; _urls="${_row#*|}"
@@ -15743,6 +16767,16 @@ _pr_failed()  { _PR_FAILED+=("$1");  echo -e "  ${RED}[НЕ СМОГ]${NC}  $1";
 _pr_found()   {                      echo -e "  ${GREEN}[ОК]${NC}       $1"; }
 _pr_check()   {                      echo -e "  ${CYAN}[...]${NC}      $1"; }
 
+# - модуль без движка не имеет привязок: записи привязок снимаются, -
+# - конфиг на диске привязкой не считается (restore возвращает и его, и книгу) -
+_pr_drop_bindings() {
+    local coll="$1" label="$2" k
+    for k in $(jq -r "${coll} | keys[]?" "$_BOOK" 2>/dev/null); do
+        book_del "${coll}.\"${k}\""
+        _pr_fixed "book: убрана привязка ${label} ${k} (движка нет)"
+    done
+}
+
 _pr_find_file() {
     local dir
     local pattern="$1"; shift
@@ -15761,6 +16795,21 @@ _pr_find_file() {
 _pr_env_sq() {
     local v="${1//\'/"'\''"}"
     printf '%s' "$v"
+}
+
+# - сверка контрактов установленных модулей с фактом: расхождения -
+# - применяются (юниты поднимаются), результат идёт в счётчики Prayer -
+_pr_contract_phase() {
+    local mod fails
+    for mod in xui awg ufw teamspeak mumble outline mtproto socks5 hysteria2 zapret2 wgobfs mimic; do
+        eli_contract_present "$mod" || continue
+        eli_reconcile "$mod" fix >/dev/null 2>&1
+        fails=$?
+        (( ELI_RECONCILE_CHANGED > 0 )) && \
+            _PR_FIXED+=("контракт ${mod}: поднято юнитов ${ELI_RECONCILE_CHANGED}")
+        (( fails > 0 )) && _PR_WARN+=("контракт ${mod}: проблем ${fails}")
+    done
+    return 0
 }
 
 prayer_run() {
@@ -16404,6 +17453,7 @@ EOF
         [[ $zap_disk -eq 0 ]] && _pr_check "Zapret2: движок установлен, привязок нет"
     else
         [[ "$(book_read '.zapret.installed')" == "true" ]] && { book_write ".zapret.installed" "false" bool; _pr_updated "book: .zapret.installed=false"; }
+        _pr_drop_bindings ".zapret.interfaces" "zapret"
         _pr_check "Zapret2 не установлен"
     fi
     # - cron автообновления vs книга -
@@ -16450,7 +17500,11 @@ EOF
                 # - смысл модуля: порт туннеля не должен быть виден снаружи -
                 wport=$(eli_source_env "$wenv" SERVER_PORT)
                 if [[ -n "$wport" ]] && _ufw_has_rule "$wport" "udp"; then
-                    _pr_warn "wg-obfuscator ${wiface}: порт ${wport}/udp открыт в UFW, голый WireGuard виден снаружи"
+                    if eli_port_dropped "$wport"; then
+                        _pr_found "wg-obfuscator ${wiface}: порт ${wport}/udp закрыт DROP, снаружи не виден"
+                    else
+                        _pr_warn "wg-obfuscator ${wiface}: порт ${wport}/udp открыт в UFW, голый WireGuard виден снаружи"
+                    fi
                 fi
             fi
 
@@ -16483,6 +17537,7 @@ EOF
         [[ $wgo_disk -eq 0 ]] && _pr_check "wg-obfuscator: движок установлен, привязок нет"
     else
         [[ "$(book_read '.wgobfs.installed')" == "true" ]] && { book_write ".wgobfs.installed" "false" bool; _pr_updated "book: .wgobfs.installed=false"; }
+        _pr_drop_bindings ".wgobfs.instances" "wgobfs"
         _pr_check "wg-obfuscator не установлен"
     fi
 
@@ -16586,8 +17641,14 @@ EOF
         fi
     else
         [[ "$(book_read '.mimic.installed')" == "true" ]] && { book_write ".mimic.installed" "false" bool; _pr_updated "book: .mimic.installed=false"; }
+        _pr_drop_bindings ".mimic.instances" "mimic"
         _pr_check "mimic не установлен"
     fi
+
+    # --> СВЕРКА КОНТРАКТОВ <--
+    # - проверяются только установленные модули: отсутствие компонента -
+    # - это не расхождение; расхождения применяются, провалы идут в список внимания -
+    _pr_contract_phase
 
     # --> ФИНАЛЬНОЕ ОБНОВЛЕНИЕ <--
     book_write "._meta.updated" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -17040,6 +18101,26 @@ _ufw_has_rule() {
     grep -Eq "(^|[[:space:]])${pat}([[:space:]]|$)" <<< "$out"
 }
 
+# - отсутствие правила: обратная проверка для обязательного факта -
+_ufw_no_rule() {
+    ! _ufw_has_rule "$1" "$2"
+}
+
+# - правило по спецификации ufw: порт или диапазон, протокол опционален -
+_ufw_rule_present() {
+    local spec="$1" pp proto=""
+    pp="${spec%/*}"
+    [[ "$spec" == */* ]] && proto="${spec#*/}"
+    _ufw_has_rule "$pp" "$proto"
+}
+
+# - перечитать живые правила после возврата файлов: активный UFW держит -
+# - снятое правило в iptables, пока не выполнен reload -
+_ufw_reload_if_active() {
+    ufw_active || return 0
+    ufw reload >/dev/null 2>&1 || true
+}
+
 ufw_show_status() {
     _ufw_guard || return 0
     print_section "Статус UFW"
@@ -17186,6 +18267,13 @@ ufw_add_port() {
     local comment=""
     echo -e "  ${CYAN}Комментарий - пометка для чего этот порт (например: nginx, игра). Можно пропустить.${NC}"
     ask "Комментарий (опционально)" "" comment
+    # - транзакция: файлы правил ufw в откат, наличие правила - обязательный факт -
+    if ! eli_txn_begin "ufw_add_port ${port_spec}"; then
+        print_err "Транзакция не открылась: правило не добавлено"
+        return 1
+    fi
+    eli_txn_backup_file "/etc/ufw/user.rules" || { eli_txn_rollback; return 1; }
+    eli_txn_backup_file "/etc/ufw/user6.rules" || { eli_txn_rollback; return 1; }
     local allow_rc=0
     if [[ -n "$comment" ]]; then
         ufw allow "${port_spec}" comment "${comment}" || allow_rc=$?
@@ -17194,8 +18282,15 @@ ufw_add_port() {
     fi
     if [[ $allow_rc -ne 0 ]]; then
         print_err "ufw отклонил правило: allow ${port_spec}"
+        eli_txn_rollback
         return 1
     fi
+    if ! eli_txn_expect "правило allow ${port_spec} в ufw" _ufw_rule_present "$port_spec"; then
+        ufw delete allow "${port_spec}" >/dev/null 2>&1 || true
+        eli_txn_rollback
+        return 1
+    fi
+    eli_txn_commit || return 1
     print_ok "Добавлено: allow ${port_spec}"
     return 0
 }
@@ -17244,8 +18339,18 @@ ufw_delete_rule() {
         print_err "Правило #${num} не найдено в списке"
         return 1
     fi
+    # - транзакция: файлы правил в откат; провал удаления или факта -
+    # - возвращает файлы и перечитывает живой файрвол -
+    if ! eli_txn_begin "ufw_delete_rule #${num}"; then
+        print_err "Транзакция не открылась: правило не удаляется"
+        return 1
+    fi
+    eli_txn_backup_file "/etc/ufw/user.rules" || { eli_txn_rollback; return 1; }
+    eli_txn_backup_file "/etc/ufw/user6.rules" || { eli_txn_rollback; return 1; }
     if ! echo "y" | ufw delete "$num" 2>/dev/null; then
         print_err "Не удалось удалить #${num}"
+        eli_txn_rollback
+        _ufw_reload_if_active
         return 1
     fi
 
@@ -17267,6 +18372,8 @@ ufw_delete_rule() {
         if [[ -n "$twin_num" ]]; then
             if ! echo "y" | ufw delete "$twin_num" 2>/dev/null; then
                 print_err "Пара #${twin_num} не удалена: смотри раздел Статус UFW"
+                eli_txn_rollback
+                _ufw_reload_if_active
                 return 1
             fi
         fi
@@ -17282,6 +18389,12 @@ ufw_delete_rule() {
     n_after=$(_ufw_norm_count "$norm" "$final")
     if (( n_after != n_before - expect )); then
         print_err "Правило #${num} числится в списке после удаления: смотри раздел Статус UFW"
+        eli_txn_rollback
+        _ufw_reload_if_active
+        return 1
+    fi
+    if ! eli_txn_commit; then
+        _ufw_reload_if_active
         return 1
     fi
     if [[ -n "$twin_num" ]]; then
@@ -17324,6 +18437,9 @@ ufw_check_ports() {
 
         if echo "$ufw_rules" | grep -qE "(^|[[:space:]])${port}/${proto}([[:space:]]|$)|(^|[[:space:]])${port}([[:space:]]|$)"; then
             echo -e "  ${GREEN}[OK]${NC} ${port}/${proto}  ${proc}"
+        elif [[ "$proto" == "udp" ]] && eli_port_dropped "$port"; then
+            # - порт намеренно закрыт DROP обфускатора: правило не требуется -
+            echo -e "  ${GREEN}[OK]${NC} ${port}/${proto}  ${proc}  ${GREEN}закрыт DROP${NC}"
         else
             echo -e "  ${YELLOW}[!]${NC}  ${port}/${proto}  ${proc}  ${YELLOW}нет правила${NC}"
             missing_rules+=("${port}:${proto}:${proc}")
@@ -17397,66 +18513,90 @@ _update_arch() {
 
 update_scan() {
     print_section "Проверка обновлений"
+    local updates=0
 
-    # - apt -
-    print_info "Система (apt)..."
+    # - apt: число пакетов к обновлению -
     apt-get update -qq 2>/dev/null || true
-    local apt_upgradable
-    apt_upgradable=$(apt-get upgrade --dry-run 2>/dev/null | grep -oP '^[0-9]+ upgraded' || echo "0 upgraded")
-    print_info "apt: ${apt_upgradable}"
+    local apt_upgradable=0
+    apt_upgradable=$(apt-get upgrade --dry-run 2>/dev/null | grep -oP '^[0-9]+(?= upgraded)' | head -1 || true)
+    [[ -z "$apt_upgradable" ]] && apt_upgradable=0
+    if (( apt_upgradable > 0 )); then
+        print_warn "Система (apt): ${apt_upgradable} пакетов ждут обновления"
+        updates=$(( updates + 1 ))
+    else
+        print_ok "Система (apt): обновлений нет"
+    fi
 
-    # - 3X-UI -
+    # - 3X-UI: версия панели против последнего релиза -
     if [[ -f "${XUI_DIR:-/usr/local/x-ui}/x-ui" ]]; then
-        local xui_cur xui_lat
+        local xui_cur xui_lat _xc _xl
         xui_cur=$("${XUI_DIR:-/usr/local/x-ui}/x-ui" -v 2>/dev/null | head -1 || echo "?")
         xui_lat=$(eli_github_fetch "https://api.github.com/repos/MHSanaei/3x-ui/releases/latest" \
             | grep -oP '"tag_name":\s*"\K[^"]+' || echo "?")
-        # - убираем префикс v для корректного сравнения -
-        local _xc="${xui_cur#v}" _xl="${xui_lat#v}"
-        if [[ "$_xc" == "$_xl" ]]; then
-            print_ok "3X-UI: ${xui_cur} (актуальна)"
+        _xc="${xui_cur#v}"; _xl="${xui_lat#v}"
+        if [[ -z "$_xl" || "$_xl" == "?" ]]; then
+            print_info "3X-UI: ${xui_cur}, последнюю версию проверить не удалось"
+        elif [[ "$_xc" == "$_xl" ]]; then
+            print_ok "3X-UI: ${xui_cur} - актуальна"
         else
-            print_warn "3X-UI: ${xui_cur} -> ${xui_lat}"
+            print_warn "3X-UI: ${xui_cur} -> ${xui_lat} - доступно обновление"
+            updates=$(( updates + 1 ))
         fi
     else
         print_info "3X-UI: не установлен"
     fi
 
-    # - TeamSpeak -
+    # - TeamSpeak: версия из env против релиза GitHub -
     if [[ -f "${TS_ENV:-/etc/teamspeak/teamspeak.env}" ]]; then
-        local ts_cur ts_lat
+        local ts_cur ts_lat _tc _tl
         ts_cur=$(grep -oP '^TS_VERSION="\K[^"]+' "${TS_ENV:-/etc/teamspeak/teamspeak.env}" 2>/dev/null || echo "?")
         ts_lat=$(ts_get_latest_version 2>/dev/null || echo "?")
-        local _tc="${ts_cur#v}" _tl="${ts_lat#v}"
-        if [[ "$_tc" == "$_tl" ]]; then
-            print_ok "TeamSpeak: ${ts_cur} (актуальна)"
+        _tc="${ts_cur#v}"; _tl="${ts_lat#v}"
+        if [[ -z "$_tl" || "$_tl" == "?" ]]; then
+            print_info "TeamSpeak: ${ts_cur}, последнюю версию проверить не удалось"
+        elif [[ "$_tc" == "$_tl" ]]; then
+            print_ok "TeamSpeak: ${ts_cur} - актуальна"
         else
-            print_warn "TeamSpeak: ${ts_cur} -> ${ts_lat}"
+            print_warn "TeamSpeak: ${ts_cur} -> ${ts_lat} - доступно обновление"
+            updates=$(( updates + 1 ))
         fi
     else
         print_info "TeamSpeak: не установлен"
     fi
 
-    # - Outline -
+    # - Outline: образ из реестра автоматически не сравнивается -
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^shadowbox$"; then
         local otl_img
         otl_img=$(docker inspect shadowbox 2>/dev/null | jq -r '.[0].Config.Image' 2>/dev/null || echo "?")
-        print_info "Outline: образ ${otl_img}"
-        print_info "Обновление: docker pull + restart"
+        print_info "Outline: образ ${otl_img}; сравнение с реестром не автоматизировано"
+        print_info "  Обновление образа: меню 4.6.7 (docker pull + restart)"
     else
         print_info "Outline: не установлен"
     fi
 
-    # - AWG -
+    # - AmneziaWG: обновляемый пакет в apt -
     if command -v awg &>/dev/null; then
-        local awg_ver; awg_ver=$(awg --version 2>/dev/null | head -1 || echo "?")
-        print_info "AmneziaWG: ${awg_ver}"
+        local awg_ver awg_upd
+        awg_ver=$(awg --version 2>/dev/null | head -1 || echo "?")
+        awg_upd=$(apt list --upgradable 2>/dev/null | grep -ci 'amneziawg' || true)
+        if (( awg_upd > 0 )); then
+            print_warn "AmneziaWG: ${awg_ver} - в apt есть обновление пакета"
+            updates=$(( updates + 1 ))
+        else
+            print_ok "AmneziaWG: ${awg_ver} - актуален"
+        fi
     else
         print_info "AmneziaWG: не установлен"
     fi
+
+    echo ""
+    if (( updates > 0 )); then
+        print_warn "Есть обновления: ${updates}. Обновить всё - меню 4.6.7"
+    else
+        print_ok "Обновлений нет: всё актуально"
+    fi
     return 0
 }
-
 update_apt() {
     print_section "Обновление системы (apt)"
     apt-get update -qq || true
@@ -17689,7 +18829,7 @@ update_awg() {
         book_write ".awg.version" "$new_ver"
         print_ok "AmneziaWG: ${cur_ver} -> ${new_ver}"
     else
-        print_info "AmneziaWG: ${new_ver} (не изменилось)"
+        print_ok "AmneziaWG: ${new_ver} - уже актуален"
     fi
     return 0
 }
@@ -17735,6 +18875,44 @@ _self_newer() {
 }
 
 # - обновление: последний релиз GitHub, архив с eli.sh, бэкап и сверка версии -
+# --> САМООБНОВЛЕНИЕ: ЗАПРОС РЕЛИЗА <--
+# - причина отказа печатается словами: DNS, код HTTP или код curl, а не -
+# - общее "проверь сеть"; запрос повторяется трижды -
+_self_http_hint() {
+    local rc="$1" code="$2" dns="$3"
+    if [[ "$dns" != "yes" ]]; then
+        echo "DNS не разрешает api.github.com: проверь /etc/resolv.conf и Unbound"
+        return 0
+    fi
+    case "$code" in
+        403|429) echo "GitHub ограничил частоту запросов (HTTP ${code}): подожди и повтори" ;;
+        5*) echo "GitHub ответил ошибкой ${code}: попробуй позже" ;;
+        000) echo "соединение не установлено (curl rc=${rc}): проверь сеть и файрвол" ;;
+        *) echo "GitHub ответил HTTP ${code} (curl rc=${rc})" ;;
+    esac
+}
+
+_self_fetch_release() {
+    local out="" code rc i dns="no"
+    _SELF_JSON=""
+    _SELF_FAIL_REASON=""
+    getent hosts api.github.com >/dev/null 2>&1 && dns="yes"
+    for i in 1 2 3; do
+        rc=0
+        out=$(curl -sS -w '\n%{http_code}' --connect-timeout 10 --max-time 20 \
+            "https://api.github.com/repos/ERITEK/The-VPS-of-Eli/releases/latest" 2>/dev/null) || rc=$?
+        code="${out##*$'\n'}"
+        out="${out%$'\n'*}"
+        if (( rc == 0 )) && [[ "$code" == "200" ]] && [[ -n "$out" ]] && jq -e '.tag_name' >/dev/null 2>&1 <<< "$out"; then
+            _SELF_JSON="$out"
+            return 0
+        fi
+        sleep 2
+    done
+    _SELF_FAIL_REASON=$(_self_http_hint "$rc" "${code:-000}" "$dns")
+    return 1
+}
+
 update_self() {
     print_section "Обновление скрипта Eli"
     local self cur api tag url dir tmp new_ver backup after go
@@ -17745,10 +18923,11 @@ update_self() {
     fi
     cur="$ELI_VERSION"
     print_info "Текущая версия: ${cur}"
-    api=$(curl -fsSL --connect-timeout 10 --max-time 20 "https://api.github.com/repos/ERITEK/The-VPS-of-Eli/releases/latest" 2>/dev/null) || {
-        print_err "GitHub не ответил: проверь сеть"
+    if ! _self_fetch_release; then
+        print_err "GitHub: ${_SELF_FAIL_REASON}"
         return 1
-    }
+    fi
+    api="$_SELF_JSON"
     tag=$(jq -r '.tag_name // empty' <<< "$api" 2>/dev/null)
     if [[ -z "$tag" ]]; then
         print_err "Не удалось прочитать последний релиз"
@@ -17770,9 +18949,13 @@ update_self() {
 
     dir=$(mktemp -d /tmp/eli-self.XXXXXX) || return 1
     tmp="${dir}/release.zip"
-    if ! curl -fsSL --connect-timeout 10 --max-time 120 -o "$tmp" "$url"; then
+    # - архив: код HTTP и код curl тоже нужны в сообщении об отказе -
+    # - -L обязателен: GitHub отвечает на browser_download_url редиректом 302 -
+    local dl_code dl_rc=0
+    dl_code=$(curl -sSL -o "$tmp" -w '%{http_code}' --connect-timeout 10 --max-time 120 "$url" 2>/dev/null) || dl_rc=$?
+    if (( dl_rc != 0 )) || [[ "$dl_code" != "200" ]] || [[ ! -s "$tmp" ]]; then
         rm -rf "$dir"
-        print_err "Архив не скачался"
+        print_err "Архив не скачался (HTTP ${dl_code:-000}, curl rc=${dl_rc})"
         return 1
     fi
     if ! python3 - "$tmp" "$dir" <<'PY' 2>/dev/null
@@ -18812,6 +19995,63 @@ backup_create() {
         collected=$(( collected + 1 ))
     fi
 
+    # --> СЛУЖБЫ НА ВРЕМЯ КОПИЙ <--
+    # - базы SQLite входят в реестр: на время копий службы гасятся, иначе -
+    # - снимок базы будет горячим; провал остановки отменяет бэкап -
+    local -a _bkp_stopped=()
+    _bkp_services_stop() {
+        local u
+        for u in x-ui teamspeak mumble-server murmurd; do
+            systemctl is-active --quiet "$u" 2>/dev/null || continue
+            systemctl stop "$u" 2>/dev/null || true
+            if ! eli_fact_unit "$u" 10 inactive; then
+                print_err "${u} не остановился: бэкап отменён (база была бы живой)"
+                return 1
+            fi
+            _bkp_stopped+=("$u")
+        done
+        return 0
+    }
+    _bkp_services_start() {
+        local u bad=0
+        for u in "${_bkp_stopped[@]}"; do
+            systemctl start "$u" >/dev/null 2>&1 || true
+            eli_fact_unit "$u" 10 || bad=$(( bad + 1 ))
+        done
+        _bkp_stopped=()
+        return "$bad"
+    }
+    if ! _bkp_services_stop; then
+        _bkp_services_start || true
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # - реестр контрактов: пути модулей кладутся отдельно с манифестом; -
+    # - список модулей общий с restic, службы уже погашены -
+    local reg_dir="${tmpdir}/registry" _rmod _rp _rname _rn=0
+    mkdir -p "$reg_dir"
+    : > "${reg_dir}/files.tsv"
+    for _rmod in $(eli_backup_modules); do
+        while IFS= read -r _rp; do
+            [[ -e "$_rp" ]] || continue
+            _rname="${_rmod}_$(printf '%s' "$_rp" | tr '/' '_')"
+            if cp -a "$_rp" "${reg_dir}/${_rname}" 2>/dev/null; then
+                printf '%s\t%s\n' "$_rp" "registry/${_rname}" >> "${reg_dir}/files.tsv"
+                _rn=$(( _rn + 1 ))
+            else
+                print_warn "Реестр: не удалось ${_rp}"
+                failed=$(( failed + 1 ))
+            fi
+        done < <(eli_backup_register "$_rmod")
+    done
+    if (( _rn > 0 )); then
+        print_ok "Реестр контрактов: ${_rn} путей"
+        collected=$(( collected + 1 ))
+    else
+        rm -rf "$reg_dir"
+    fi
+
     # - AWG: env, ключи, клиенты -
     if [[ -d /etc/awg-setup ]]; then
         _bkp_cp /etc/awg-setup "${tmpdir}/awg-setup" "AWG setup (env, ключи, клиенты)"
@@ -19046,6 +20286,15 @@ backup_create() {
     done
     _bkp_add /etc/fail2ban/jail.d/ssh-hardening.local "${tmpdir}/system/ssh-hardening.local" && { print_ok "fail2ban jail"; collected=$(( collected + 1 )); }
 
+    # - службы возвращаются после копий: факт проверяется ожиданием, -
+    # - провал виден в счётчике ошибок архива -
+    local _bkp_svc_rc=0
+    _bkp_services_start || _bkp_svc_rc=$?
+    if (( _bkp_svc_rc > 0 )); then
+        print_err "Службы после бэкапа не поднялись: ${_bkp_svc_rc}"
+        failed=$(( failed + _bkp_svc_rc ))
+    fi
+
     # - метаданные -
     # - debian_version и version_id для проверки совместимости при restore -
     local _deb_ver="unknown"
@@ -19097,6 +20346,211 @@ METAEOF
         return 1
     fi
     return 0
+}
+
+# --> ВОССТАНОВЛЕНИЕ: RUNTIME <--
+# - юнит с отсутствующим ExecStart не запускается: иначе рестарт-цикл -
+_rst_unit_exec_missing() {
+    local unit="$1" exe
+    [[ -f "$unit" ]] || return 1
+    exe=$(sed -n 's/^ExecStart=\([^ ]*\).*/\1/p' "$unit" | head -1)
+    [[ -n "$exe" && ! -x "$exe" ]]
+}
+
+# - проверка runtime после восстановления: контейнеры прокси и юниты -
+# - движков файлами не создаются; отсутствие помечается, юнит гасится -
+_rst_runtime_check() {
+    local name unit bad=0
+    # - сначала попытка поднять runtime из env и юнитов, потом отчёт -
+    _proxy_restore_runtime || true
+    for name in $(jq -r '.mtproto.instances // {} | .[]?.container // empty' "$_BOOK" 2>/dev/null); do
+        if ! docker inspect "$name" >/dev/null 2>&1; then
+            print_warn "MTProto ${name}: контейнер не пересоздан, добавь инстанс заново"
+            bad=$(( bad + 1 ))
+        fi
+    done
+    for name in $(jq -r '.socks5.instances // {} | .[]?.container // empty' "$_BOOK" 2>/dev/null); do
+        if ! docker inspect "$name" >/dev/null 2>&1; then
+            print_warn "SOCKS5 ${name}: контейнер не пересоздан, добавь инстанс заново"
+            bad=$(( bad + 1 ))
+        fi
+    done
+    for name in $(jq -r '.hysteria2.instances // {} | keys[]?' "$_BOOK" 2>/dev/null); do
+        unit="/etc/systemd/system/hysteria-${name}.service"
+        if _rst_unit_exec_missing "$unit"; then
+            systemctl disable --now "hysteria-${name}" 2>/dev/null || true
+            print_err "Hysteria ${name}: нет файла из ExecStart - служба отключена, установи заново"
+            bad=$(( bad + 1 ))
+        fi
+    done
+    if (( bad > 0 )); then
+        print_info "Требуют пересоздания: ${bad} (см. строки выше)"
+    fi
+    return "$bad"
+}
+# --> ВОССТАНОВЛЕНИЕ: СОХРАНЕНИЕ ДОСТУПА <--
+# - порты, на которых sshd слушал до восстановления, добавляются в -
+# - drop-in вторыми и разрешаются в UFW: вход не теряется -
+_rst_keep_ssh_access() {
+    local ports="$1" p
+    [[ -n "$ports" ]] || return 1
+    mkdir -p /etc/ssh/sshd_config.d || return 1
+    {
+        for p in $ports; do
+            printf 'Port %s\n' "$p"
+        done
+    } > /etc/ssh/sshd_config.d/99-eli-keep-port.conf
+    for p in $ports; do
+        ufw allow "${p}/tcp" comment 'SSH (restore)' >/dev/null 2>&1 || true
+    done
+    return 0
+}
+
+# - drop-in записывается и проверяется sshd: при провале файл снимается, -
+# - прежний drop-in возвращается; иначе следующий рестарт поднял бы sshd -
+# - с непроверенным конфигом -
+_rst_apply_keep_ports() {
+    local ports="$1"
+    local conf="/etc/ssh/sshd_config.d/99-eli-keep-port.conf"
+    local prev=""
+    if [[ -f "$conf" ]]; then
+        prev=$(mktemp) || return 1
+        cp -a "$conf" "$prev" || { rm -f "$prev"; return 1; }
+    fi
+    if ! _rst_keep_ssh_access "$ports"; then
+        rm -f "$prev"
+        return 1
+    fi
+    if sshd -t 2>/dev/null; then
+        rm -f "$prev"
+        systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+        return 0
+    fi
+    if [[ -n "$prev" ]]; then
+        cp -a "$prev" "$conf"
+        rm -f "$prev"
+    else
+        rm -f "$conf"
+    fi
+    return 1
+}
+# - реестр контрактов: каталог копируется содержимым в целевой путь, а не -
+# - внутрь него; счётчики возвращаются в RST_REG_OK и RST_REG_FAIL -
+_rst_registry_restore() {
+    local root="$1" reg="$2" rpath rstore
+    RST_REG_OK=0
+    RST_REG_FAIL=0
+    [[ -f "$reg" ]] || return 0
+    while IFS=$'\t' read -r rpath rstore; do
+        [[ -n "$rpath" && -e "${root}/${rstore}" ]] || continue
+        if [[ -d "${root}/${rstore}" ]]; then
+            if ! mkdir -p "$rpath"; then
+                RST_REG_FAIL=$(( RST_REG_FAIL + 1 ))
+                print_warn "Реестр: не создать ${rpath}"
+                continue
+            fi
+            if cp -a "${root}/${rstore}/." "$rpath"/ 2>/dev/null; then
+                RST_REG_OK=$(( RST_REG_OK + 1 ))
+            else
+                RST_REG_FAIL=$(( RST_REG_FAIL + 1 ))
+                print_warn "Реестр: не удалось вернуть ${rpath}"
+            fi
+        else
+            mkdir -p "$(dirname "$rpath")"
+            if cp -a "${root}/${rstore}" "$rpath" 2>/dev/null; then
+                RST_REG_OK=$(( RST_REG_OK + 1 ))
+            else
+                RST_REG_FAIL=$(( RST_REG_FAIL + 1 ))
+                print_warn "Реестр: не удалось вернуть ${rpath}"
+            fi
+        fi
+    done < "$reg"
+    return 0
+}
+
+# - есть ли в манифесте реестра путь с заданным префиксом -
+_rst_reg_has() {
+    local reg="$1" prefix="$2"
+    awk -F'\t' -v p="$prefix" 'index($1, p) == 1 { f=1 } END { exit !f }' "$reg"
+}
+
+# - реестр возвращается до старта служб: их файлы не должны копироваться -
+# - поверх живых; факт остановки обязателен, иначе восстановление отменяется -
+RST_REG_STOPPED=()
+_rst_stop_for_registry() {
+    local reg="$1" u iface svc fail=0
+    if _rst_reg_has "$reg" "/etc/x-ui" && systemctl is-active --quiet x-ui 2>/dev/null; then
+        systemctl stop x-ui 2>/dev/null || true
+        if eli_fact_unit x-ui 10 inactive; then
+            RST_REG_STOPPED+=("x-ui")
+        else
+            print_err "3X-UI не остановился: реестр не восстанавливается"
+            fail=1
+        fi
+    fi
+    if _rst_reg_has "$reg" "/etc/teamspeak" || _rst_reg_has "$reg" "/opt/teamspeak"; then
+        if systemctl is-active --quiet teamspeak 2>/dev/null; then
+            systemctl stop teamspeak 2>/dev/null || true
+            if eli_fact_unit teamspeak 10 inactive; then
+                RST_REG_STOPPED+=("teamspeak")
+            else
+                print_err "TeamSpeak не остановился: реестр не восстанавливается"
+                fail=1
+            fi
+        fi
+    fi
+    if _rst_reg_has "$reg" "/etc/mumble" || _rst_reg_has "$reg" "/var/lib/mumble" \
+       || _rst_reg_has "$reg" "/var/lib/murmur"; then
+        for u in mumble-server murmurd; do
+            systemctl is-active --quiet "$u" 2>/dev/null || continue
+            systemctl stop "$u" 2>/dev/null || true
+            if eli_fact_unit "$u" 10 inactive; then
+                RST_REG_STOPPED+=("$u")
+            else
+                print_err "${u} не остановился: реестр не восстанавливается"
+                fail=1
+            fi
+            break
+        done
+    fi
+    # - интерфейсы и юниты перед подменой их файлов гасятся так же, -
+    # - как это делают их собственные ветки восстановления -
+    if _rst_reg_has "$reg" "/etc/awg-setup" || _rst_reg_has "$reg" "/etc/amnezia/amneziawg"; then
+        for u in /etc/systemd/system/multi-user.target.wants/awg-quick@*.service; do
+            [[ -e "$u" ]] || continue
+            iface=$(basename "$u" | sed 's/^awg-quick@//;s/\.service$//')
+            systemctl stop "awg-quick@${iface}" 2>/dev/null || true
+            if ! eli_fact_unit "awg-quick@${iface}" 10 inactive; then
+                print_err "AWG ${iface} не остановился: реестр не восстанавливается"
+                fail=1
+            fi
+        done
+    fi
+    if _rst_reg_has "$reg" "/etc/hysteria"; then
+        for u in /etc/systemd/system/hysteria-*.service; do
+            [[ -f "$u" ]] || continue
+            svc=$(basename "$u" | sed 's/\.service$//')
+            systemctl stop "$svc" 2>/dev/null || true
+            if ! eli_fact_unit "$svc" 10 inactive; then
+                print_err "Hysteria ${svc} не остановилась: реестр не восстанавливается"
+                fail=1
+            fi
+        done
+    fi
+    return "$fail"
+}
+
+# - службы, погашенные перед возвратом реестра, поднимаются обратно; -
+# - свои ветки восстановления делают это раньше, здесь страховка -
+_rst_resume_registry_services() {
+    local u bad=0
+    for u in "${RST_REG_STOPPED[@]}"; do
+        systemctl is-active --quiet "$u" 2>/dev/null && continue
+        systemctl start "$u" >/dev/null 2>&1 || true
+        eli_fact_unit "$u" 10 || bad=$(( bad + 1 ))
+    done
+    RST_REG_STOPPED=()
+    return "$bad"
 }
 
 # --> БЭКАП: СПИСОК <--
@@ -19164,9 +20618,15 @@ backup_restore() {
 
     echo ""
     print_warn "Восстановление перезапишет текущие конфиги и перезапустит сервисы!"
+    print_info "Текущий SSH-порт будет добавлен вторым: вход не должен потеряться."
     local confirm=""
     ask_yn "Продолжить?" "n" confirm
     [[ "$confirm" != "yes" ]] && { print_info "Отмена"; return 0; }
+
+    # - текущие порты sshd запоминаются до распаковки: восстановление -
+    # - конфигов и правил не должно отрезать доступ -
+    local keep_ports=""
+    keep_ports=$(ss -ltnp 2>/dev/null | awk '/sshd/ {print $4}' | sed 's/.*://' | sort -u | tr '\n' ' ')
 
     # - распаковка -
     local tmpdir
@@ -19238,6 +20698,23 @@ backup_restore() {
     if [[ -f "${root}/book/book_of_Eli.json" ]]; then
         book_replace "${root}/book/book_of_Eli.json"
         _rst_result $? "Book of Eli"
+    fi
+
+    # - реестр контрактов: пути возвращаются до старта служб, иначе копия -
+    # - базы легла бы поверх живой; службы гасятся по манифесту -
+    local reg="${root}/registry/files.tsv"
+    if [[ -f "$reg" ]]; then
+        if ! _rst_stop_for_registry "$reg"; then
+            _rst_resume_registry_services || true
+            rm -rf "$tmpdir"
+            return 1
+        fi
+        _rst_registry_restore "$root" "$reg"
+        if (( RST_REG_OK > 0 )); then
+            print_ok "Реестр контрактов: возвращено ${RST_REG_OK} путей"
+            restored=$(( restored + 1 ))
+        fi
+        (( RST_REG_FAIL > 0 )) && failed=$(( failed + RST_REG_FAIL ))
     fi
 
     # - AWG setup -
@@ -19624,6 +21101,21 @@ backup_restore() {
         ufw reload 2>/dev/null || true
     fi
 
+    # - сохранение текущего доступа: архив мог содержать старый порт и правила -
+    if [[ -n "$keep_ports" ]]; then
+        if _rst_apply_keep_ports "$keep_ports"; then
+            print_ok "Доступ SSH сохранён: порты ${keep_ports}"
+            print_info "Порты записаны в /etc/ssh/sshd_config.d/99-eli-keep-port.conf; после проверки входа лишние можно убрать"
+            restored=$(( restored + 1 ))
+        else
+            print_err "sshd -t не прошёл: drop-in снят, проверь конфиг до перезапуска службы"
+            failed=$(( failed + 1 ))
+        fi
+    fi
+
+    # - runtime: контейнеры и движки файлами не создаются, расхождения видны -
+    _rst_runtime_check || true
+
     # - Crontab: merge eli-задач из бэкапа со сторонними из текущего, чтобы не терять чужое -
     if [[ -s "${root}/system/crontab.txt" ]]; then
         echo ""
@@ -19664,6 +21156,11 @@ backup_restore() {
         fi
     fi
 
+    # - службы, погашенные перед возвратом реестра, поднимаются обратно -
+    local _reg_svc_rc=0
+    _rst_resume_registry_services || _reg_svc_rc=$?
+    (( _reg_svc_rc > 0 )) && failed=$(( failed + _reg_svc_rc ))
+
     rm -rf "$tmpdir"
 
     echo ""
@@ -19671,6 +21168,555 @@ backup_restore() {
     [[ $failed -gt 0 ]] && print_err "Не восстановлено: ${failed} (см. строки выше)"
     print_info "Проверь сервисы: Обслуживание -> Диагностика или Prayer of Eli"
     return 0
+}
+
+# === 04j_restic.sh ===
+# --> RESTIC: ОФСАЙТ-БЭКАП <--
+# - второй контур бэкапа: шифрованный репозиторий вне сервера; локальный -
+# - tar остаётся как есть, restic добавляет копию на случай смерти VPS -
+
+RESTIC_BIN="/usr/local/bin/restic"
+RESTIC_ENV="/etc/restic/env"
+RESTIC_DIR="/etc/restic"
+
+restic_installed() {
+    [[ -x "$RESTIC_BIN" ]]
+}
+
+# - вид репозитория по схеме адреса: от него зависят подсказки и проверки -
+_restic_repo_kind() {
+    local repo="${1:-}"
+    case "$repo" in
+        /*|./*|../*) echo "local" ;;
+        sftp:*)      echo "sftp" ;;
+        s3:*)        echo "s3" ;;
+        b2:*)        echo "b2" ;;
+        rest:*)      echo "rest" ;;
+        rclone:*)    echo "rclone" ;;
+        *)           echo "unknown" ;;
+    esac
+}
+
+# - env репозитория: адрес и пароль, права 600; значения экранируются -
+_restic_write_env() {
+    local repo="$1" pass="$2" out="${3:-$RESTIC_ENV}"
+    if [[ -z "$repo" || -z "$pass" ]]; then
+        print_err "Нужны адрес репозитория и пароль"
+        return 1
+    fi
+    mkdir -p "$RESTIC_DIR" || return 1
+    {
+        printf 'RESTIC_REPOSITORY="%s"\n' "$(eli_env_escape "$repo")"
+        printf 'RESTIC_PASSWORD="%s"\n' "$(eli_env_escape "$pass")"
+    } > "$out" || { print_err "Не записать ${out}"; return 1; }
+    chmod 600 "$out"
+    return 0
+}
+
+_restic_env_value() {
+    local key="$1"
+    [[ -f "$RESTIC_ENV" ]] || return 1
+    eli_source_env "$RESTIC_ENV" "$key"
+}
+
+restic_install() {
+    print_section "Restic: установка движка"
+    if restic_installed; then
+        print_info "Уже установлен: $("$RESTIC_BIN" version 2>/dev/null | head -1)"
+        local re=""
+        ask_yn "Переустановить?" "n" re
+        [[ "$re" == "yes" ]] || return 0
+    fi
+    if ! command -v bunzip2 >/dev/null 2>&1; then
+        apt-get install -y -qq bzip2 >/dev/null 2>&1 || true
+    fi
+    local arch="amd64" api ver url
+    [[ "$(uname -m)" == "aarch64" ]] && arch="arm64"
+    api=$(eli_github_fetch "https://api.github.com/repos/restic/restic/releases/latest" 2>/dev/null) || {
+        print_err "GitHub: $(eli_github_reason)"
+        return 1
+    }
+    ver=$(jq -r '.tag_name // empty' <<< "$api" 2>/dev/null | sed 's/^v//')
+    if [[ -z "$ver" ]]; then
+        print_err "Не прочитать версию Restic"
+        return 1
+    fi
+    local asset="restic_${ver}_linux_${arch}.bz2" sha
+    url="https://github.com/restic/restic/releases/download/v${ver}/${asset}"
+    sha=$(eli_github_asset_sha "$api" "$asset")
+    eli_fetch_asset "$url" "restic.bz2" "$sha" || return 1
+    local src="$ELI_ASSET_PATH" adir
+    adir=$(dirname "$src")
+    if ! bunzip2 -c "$src" > "${RESTIC_BIN}.new" 2>/dev/null; then
+        rm -rf "$adir"
+        print_err "Архив Restic не распаковался"
+        return 1
+    fi
+    chmod 755 "${RESTIC_BIN}.new"
+    if ! "${RESTIC_BIN}.new" version >/dev/null 2>&1; then
+        rm -f "${RESTIC_BIN}.new"
+        rm -rf "$adir"
+        print_err "Скачанный Restic не запускается на этой системе"
+        return 1
+    fi
+    mv -f "${RESTIC_BIN}.new" "$RESTIC_BIN"
+    rm -rf "$adir"
+    print_ok "Restic установлен: $("$RESTIC_BIN" version 2>/dev/null | head -1)"
+    return 0
+}
+
+# - локальный каталог: создаётся и проверяется на запись до init -
+_restic_prepare_local() {
+    local dir="$1"
+    [[ -n "$dir" ]] || return 1
+    mkdir -p "$dir" 2>/dev/null || return 1
+    local probe="${dir}/.eli-write-test"
+    if printf 'ok\n' > "$probe" 2>/dev/null; then
+        rm -f "$probe"
+        return 0
+    fi
+    return 1
+}
+
+restic_setup() {
+    print_section "Restic: репозиторий"
+    if ! restic_installed; then
+        print_err "Сначала установи движок (пункт 1)"
+        return 1
+    fi
+
+    echo -e "  ${CYAN}Где хранить шифрованную копию?${NC}"
+    echo -e "  ${GREEN}1)${NC} Локальный каталог на этом сервере"
+    echo -e "     ${CYAN}Переживёт сбой сервиса, но не смерть VPS. Годится второй диск или примонтированный том.${NC}"
+    echo -e "  ${GREEN}2)${NC} Другой сервер по SFTP"
+    echo -e "     ${CYAN}Нужен SSH-доступ на тот сервер по ключу (пароль restic не использует).${NC}"
+    echo -e "  ${GREEN}3)${NC} S3-совместимое хранилище"
+    echo -e "     ${CYAN}AWS, MinIO, Selectel, VK Cloud и подобные. Нужны endpoint, бакет и ключи.${NC}"
+    echo -e "  ${GREEN}4)${NC} Backblaze B2"
+    echo -e "     ${CYAN}Нужны бакет, Account ID и Application Key.${NC}"
+    echo -e "  ${GREEN}5)${NC} Свой rest-server по HTTP(S)"
+    echo -e "     ${CYAN}Адрес вида https://host:8000/ и логин с паролем, если сервер их требует.${NC}"
+    echo -e "  ${GREEN}6)${NC} Ввести готовый адрес вручную"
+    echo ""
+    local choice="" repo="" extra="" kind
+    ask_raw "$(printf '  \033[1mВыбор?\033[0m [1]: ')" choice
+    case "${choice:-1}" in
+        1)
+            local ldir=""
+            ask "Каталог на сервере" "/var/backups/restic" ldir
+            if ! _restic_prepare_local "$ldir"; then
+                print_err "Каталог ${ldir} недоступен для записи: проверь права и место"
+                return 1
+            fi
+            repo="$ldir"
+            print_info "Копия будет на этом же сервере, во внешнее хранилище не уходит"
+            ;;
+        2)
+            local suser="" shost="" spath="" sport=""
+            ask "Пользователь@хост" "backup@example.com" suser
+            ask "Каталог на том сервере" "/srv/restic" spath
+            ask "Порт SSH (Enter - 22, меняй только если sshd на другом)" "22" sport
+            if [[ -z "$suser" || -z "$shost" ]]; then
+                print_err "Нужны пользователь и хост"
+                return 1
+            fi
+            if [[ "$sport" != "22" ]]; then
+                print_info "Порт ${sport} укажи в ~/.ssh/config для хоста ${shost}: restic берёт порт оттуда"
+            fi
+            repo="sftp:${suser}@${shost}:${spath}"
+            ;;
+        3)
+            local sep="" sbucket="" sak="" ssk=""
+            ask "Endpoint (например s3.amazonaws.com)" "s3.amazonaws.com" sep
+            ask "Бакет" "" sbucket
+            ask "Access Key ID" "" sak
+            ask "Secret Access Key" "" ssk
+            if [[ -z "$sbucket" || -z "$sak" ]]; then
+                print_err "Нужны бакет и ключи доступа"
+                return 1
+            fi
+            repo="s3:https://${sep}/${sbucket}"
+            extra="AWS_ACCESS_KEY_ID=${sak}
+AWS_SECRET_ACCESS_KEY=${ssk}"
+            ;;
+        4)
+            local bbucket="" bprefix="" bid="" bkey=""
+            ask "Бакет B2" "" bbucket
+            ask "Папка внутри бакета" "eli" bprefix
+            ask "Account ID" "" bid
+            ask "Application Key" "" bkey
+            if [[ -z "$bbucket" || -z "$bid" ]]; then
+                print_err "Нужны бакет и Account ID"
+                return 1
+            fi
+            repo="b2:${bbucket}:${bprefix}"
+            extra="B2_ACCOUNT_ID=${bid}
+B2_ACCOUNT_KEY=${bkey}"
+            ;;
+        5)
+            local rurl="" ruser="" rpass=""
+            ask "Адрес rest-server (https://host:8000/path)" "" rurl
+            ask "Логин (Enter - без авторизации)" "" ruser
+            if [[ -n "$ruser" ]]; then
+                ask "Пароль" "" rpass
+                extra="RESTIC_REST_USERNAME=${ruser}
+RESTIC_REST_PASSWORD=${rpass}"
+            fi
+            if [[ -z "$rurl" ]]; then
+                print_err "Нужен адрес rest-server"
+                return 1
+            fi
+            repo="rest:${rurl}"
+            ;;
+        6)
+            echo -e "  ${CYAN}Примеры: /var/backups/restic, sftp:user@host:/srv/restic, s3:https://s3.amazonaws.com/bucket, b2:bucket:eli, rest:https://host:8000/${NC}"
+            ask "Адрес репозитория" "" repo
+            ;;
+        *)
+            print_warn "Введите число от 1 до 6"
+            return 1
+            ;;
+    esac
+
+    kind=$(_restic_repo_kind "$repo")
+    if [[ "$kind" == "unknown" ]]; then
+        print_err "Неизвестный адрес репозитория: ${repo}"
+        print_info "Для локального каталога нужен абсолютный путь, например /var/backups/restic"
+        return 1
+    fi
+    print_info "Тип репозитория: ${kind}"
+
+    local pass_new="" pass_choice="" p1="" p2=""
+    echo -e "  ${CYAN}Пароль репозитория.${NC} Он шифрует данные: без него копию не открыть."
+    echo -e "  ${GREEN}1)${NC} Сгенерировать (24 символа)"
+    echo -e "  ${GREEN}2)${NC} Ввести свой"
+    ask_raw "$(printf '  \033[1mВыбор?\033[0m [1]: ')" pass_choice
+    if [[ "${pass_choice:-1}" == "2" ]]; then
+        ask "Свой пароль (минимум 8 символов)" "" p1
+        ask "Повтори пароль" "" p2
+        if (( ${#p1} < 8 )); then
+            print_err "Пароль короче 8 символов: репозиторий слишком легко открыть"
+            return 1
+        fi
+        if [[ "$p1" != "$p2" ]]; then
+            print_err "Пароли не совпали"
+            return 1
+        fi
+        pass_new="$p1"
+        print_ok "Пароль принят (в вывод не печатается)"
+    else
+        pass_new=$(rand_str 24)
+    fi
+    local env_new="${RESTIC_ENV}.new"
+    _restic_write_env "$repo" "$pass_new" "$env_new" || { rm -f "$env_new"; return 1; }
+    if [[ -n "$extra" ]]; then
+        local line
+        while IFS= read -r line; do
+            [[ -n "$line" ]] || continue
+            printf '%s="%s"\n' "${line%%=*}" "$(eli_env_escape "${line#*=}")" >> "$env_new"
+        done <<< "$extra"
+    fi
+    chmod 600 "$env_new"
+    echo ""
+    if [[ "${pass_choice:-1}" != "2" ]]; then
+        echo -e "  ${YELLOW}${BOLD}Пароль репозитория (сохрани, без него данные не открыть):${NC}"
+        echo -e "  ${BOLD}${pass_new}${NC}"
+        echo ""
+    fi
+
+    print_info "Инициализирую репозиторий (если он уже создан - пропуск)"
+    local init_out="" init_rc=0
+    init_out=$(RESTIC_REPOSITORY="$repo" RESTIC_PASSWORD="$pass_new" "$RESTIC_BIN" init 2>&1) || init_rc=$?
+    if (( init_rc == 0 )); then
+        print_ok "Репозиторий создан"
+    elif RESTIC_REPOSITORY="$repo" RESTIC_PASSWORD="$pass_new" "$RESTIC_BIN" snapshots >/dev/null 2>&1; then
+        print_info "init не выполнен: репозиторий уже существует"
+        print_ok "Репозиторий доступен с этим паролем"
+    else
+        print_err "Репозиторий недоступен"
+        if grep -qiE 'already (exists|initialized)|config file already exists' <<< "$init_out"; then
+            print_info "Репозиторий уже создан, но этот пароль не подошёл"
+            print_info "Введи прежний пароль (посмотреть: меню 4.8.4 -> 8) или укажи другой каталог/адрес"
+        else
+            case "$kind" in
+                local) print_info "Проверь каталог ${repo}: права, свободное место, что он смонтирован" ;;
+                sftp)  print_info "Проверь SSH: ssh ${repo#sftp:} (ключ должен пускать без пароля)" ;;
+                s3)    print_info "Проверь endpoint, бакет и ключи; для MinIO часто нужен http вместо https" ;;
+                b2)    print_info "Проверь бакет, Account ID и Application Key" ;;
+                rest)  print_info "Проверь адрес, доступность сервера и логин с паролем" ;;
+            esac
+        fi
+        rm -f "$env_new"
+        return 1
+    fi
+    mv -f "$env_new" "$RESTIC_ENV" || { rm -f "$env_new"; print_err "Не сохранить ${RESTIC_ENV}"; return 1; }
+    chmod 600 "$RESTIC_ENV"
+    print_ok "Env сохранён: ${RESTIC_ENV}"
+    book_write ".backup.offsite" "true" bool
+    book_write ".backup.restic_repository" "$repo"
+    print_info "Пароль хранится в ${RESTIC_ENV} (права 600); посмотреть: меню 4.8.4 -> 8"
+    return 0
+}
+
+# --> RESTIC: ПОКАЗ ПАРОЛЯ <--
+# - пароль нужен для восстановления; файл env доступен только root -
+restic_show_password() {
+    print_section "Restic: пароль репозитория"
+    if [[ ! -f "$RESTIC_ENV" ]]; then
+        print_err "Restic не настроен: пароля нет"
+        return 1
+    fi
+    local repo pass
+    repo=$(_restic_env_value RESTIC_REPOSITORY)
+    pass=$(_restic_env_value RESTIC_PASSWORD)
+    echo -e "  ${BOLD}Репозиторий:${NC} ${repo}"
+    echo -e "  ${BOLD}Пароль:${NC}      ${pass}"
+    print_info "Файл: ${RESTIC_ENV} (права 600, доступен только root)"
+    print_warn "Без этого пароля данные в репозитории не открыть даже при наличии файлов"
+    return 0
+}
+# - набор путей: контракты модулей плюс общие каталоги стека; список -
+# - модулей общий с tar-контуром, конфиги и базы входят из контрактов -
+_restic_paths() {
+    local p m
+    printf '%s\n' /etc/vps-eli-stack \
+        /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/unbound /etc/signal-proxy \
+        /etc/mumble-server.ini /etc/murmur/murmur.ini \
+        /var/lib/mumble-server /var/lib/mumble /var/lib/murmur
+    # - запасной поиск базы TeamSpeak: имя файла могло быть нестандартным -
+    for p in "/opt/teamspeak"/*.sqlitedb; do
+        [[ -f "$p" ]] || continue
+        printf '%s\n' "$p" "${p}-wal" "${p}-shm"
+    done
+    for m in $(eli_backup_modules); do
+        eli_backup_register "$m" 2>/dev/null
+    done
+}
+
+# --> RESTIC: СЛУЖБЫ НА ВРЕМЯ СНАПШОТА <--
+# - базы SQLite входят в снапшот: на время чтения службы останавливаются, -
+# - иначе файл копируется горячим; провал остановки отменяет снапшот -
+RESTIC_STOPPED=()
+_restic_services_stop() {
+    RESTIC_STOPPED=()
+    local u
+    for u in x-ui teamspeak mumble-server murmurd; do
+        systemctl is-active --quiet "$u" 2>/dev/null || continue
+        systemctl stop "$u" 2>/dev/null || true
+        if ! eli_fact_unit "$u" 5 inactive; then
+            print_err "Служба ${u} не остановилась: снапшот отменён, база была бы живой"
+            _restic_services_start
+            return 1
+        fi
+        RESTIC_STOPPED+=("$u")
+    done
+    return 0
+}
+
+# - возврат служб: факт проверяется ожиданием; провал считает вызывающий -
+_restic_services_start() {
+    local u bad=0
+    for u in "${RESTIC_STOPPED[@]}"; do
+        systemctl start "$u" >/dev/null 2>&1 || true
+        eli_fact_unit "$u" 10 || bad=$((bad + 1))
+    done
+    RESTIC_STOPPED=()
+    return "$bad"
+}
+
+# - id снапшотов репозитория: по строке на снапшот; сверка «до» и «после» -
+# - показывает, появился ли новый снапшот независимо от кода возврата -
+_restic_snap_ids() {
+    local repo="$1" pass="$2" list=""
+    list=$(RESTIC_REPOSITORY="$repo" RESTIC_PASSWORD="$pass" \
+        "$RESTIC_BIN" snapshots --json 2>/dev/null) || list=""
+    { printf '%s\n' "$list" | grep -o '"short_id":"[0-9a-f]*"' | cut -d'"' -f4 | sort -u; } || true
+}
+
+restic_backup() {
+    print_section "Restic: снапшот"
+    if ! restic_installed || [[ ! -f "$RESTIC_ENV" ]]; then
+        print_err "Restic не настроен: сначала пункт 1 и 2"
+        return 1
+    fi
+    local repo pass
+    repo=$(_restic_env_value RESTIC_REPOSITORY)
+    pass=$(_restic_env_value RESTIC_PASSWORD)
+    if [[ -z "$repo" || -z "$pass" ]]; then
+        print_err "Env неполон: нет адреса или пароля"
+        return 1
+    fi
+    local -a paths=() add=()
+    while IFS= read -r add; do
+        [[ -n "$add" ]] && [[ -e "$add" ]] && paths+=("$add")
+    done < <(_restic_paths | awk '!seen[$0]++')
+    if [[ ${#paths[@]} -eq 0 ]]; then
+        print_err "Нечего сохранять: пути не найдены"
+        return 1
+    fi
+    _restic_services_stop || return 1
+    # - остановка служб видна пользователю: панель и голосовые серверы -
+    # - на время снапшота недоступны, строку печатает вызывающий -
+    if [[ ${#RESTIC_STOPPED[@]} -gt 0 ]]; then
+        print_info "Службы остановлены на время снапшота (${RESTIC_STOPPED[*]}), поднимутся после"
+    fi
+    local before="" after="" new_id="" sid="" bk_rc=0 svc_rc=0
+    # - список до копии: после копии в репозитории должен появиться новый id -
+    before=$(_restic_snap_ids "$repo" "$pass")
+    RESTIC_REPOSITORY="$repo" RESTIC_PASSWORD="$pass" \
+        "$RESTIC_BIN" backup --tag eli --host "$(hostname)" "${paths[@]}" || bk_rc=$?
+    _restic_services_start || svc_rc=1
+    # - коды restic: 0 - успех, 3 - снапшот создан, часть файлов не прочитана; -
+    # - остальные - провал; факт снапшота подтверждает список репозитория -
+    case "$bk_rc" in
+        0|3) ;;
+        *) print_err "Снапшот не создан (restic вернул ${bk_rc})"; return 1 ;;
+    esac
+    after=$(_restic_snap_ids "$repo" "$pass")
+    local -A known=()
+    while IFS= read -r sid; do
+        [[ -n "$sid" ]] && known["$sid"]=1
+    done <<< "$before"
+    while IFS= read -r sid; do
+        [[ -n "$sid" ]] || continue
+        [[ -n "${known[$sid]:-}" ]] && continue
+        new_id="$sid"
+        break
+    done <<< "$after"
+    if [[ -z "$new_id" ]]; then
+        print_err "Снапшот не подтверждён в репозитории: нового снапшота нет"
+        return 1
+    fi
+    if (( bk_rc == 3 )); then
+        print_warn "Restic не прочитал часть файлов: снапшот создан без них"
+    fi
+    if (( svc_rc != 0 )); then
+        print_err "Снапшот создан, но службы после него не поднялись"
+        return 1
+    fi
+    print_ok "Снапшот создан"
+    local pr=""
+    ask_yn "Применить политику хранения (7 дней, 4 недели, 6 месяцев)?" "y" pr
+    if [[ "$pr" == "yes" ]]; then
+        RESTIC_REPOSITORY="$repo" RESTIC_PASSWORD="$pass" \
+            "$RESTIC_BIN" forget --tag eli --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune >/dev/null 2>&1 \
+            && print_ok "Старые снапшоты вычищены" \
+            || print_warn "forget/prune не выполнился"
+    fi
+    book_write ".backup.last_offsite" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    return 0
+}
+
+restic_snapshots() {
+    print_section "Restic: снапшоты"
+    if ! restic_installed || [[ ! -f "$RESTIC_ENV" ]]; then
+        print_err "Restic не настроен"
+        return 1
+    fi
+    local repo pass
+    repo=$(_restic_env_value RESTIC_REPOSITORY)
+    pass=$(_restic_env_value RESTIC_PASSWORD)
+    RESTIC_REPOSITORY="$repo" RESTIC_PASSWORD="$pass" "$RESTIC_BIN" snapshots || {
+        print_err "Список не получен"
+        return 1
+    }
+    return 0
+}
+
+restic_check() {
+    print_section "Restic: проверка репозитория"
+    if ! restic_installed || [[ ! -f "$RESTIC_ENV" ]]; then
+        print_err "Restic не настроен"
+        return 1
+    fi
+    local repo pass
+    repo=$(_restic_env_value RESTIC_REPOSITORY)
+    pass=$(_restic_env_value RESTIC_PASSWORD)
+    RESTIC_REPOSITORY="$repo" RESTIC_PASSWORD="$pass" "$RESTIC_BIN" check || {
+        print_err "Проверка не прошла"
+        return 1
+    }
+    print_ok "Репозиторий цел"
+    return 0
+}
+
+restic_restore_latest() {
+    print_section "Restic: восстановление последнего снапшота"
+    if ! restic_installed || [[ ! -f "$RESTIC_ENV" ]]; then
+        print_err "Restic не настроен"
+        return 1
+    fi
+    local repo pass
+    repo=$(_restic_env_value RESTIC_REPOSITORY)
+    pass=$(_restic_env_value RESTIC_PASSWORD)
+    print_warn "Файлы снапшота лягут поверх текущих по своим путям."
+    local go=""
+    ask_yn "Продолжить?" "n" go
+    [[ "$go" == "yes" ]] || { print_info "Отмена"; return 0; }
+    RESTIC_REPOSITORY="$repo" RESTIC_PASSWORD="$pass" "$RESTIC_BIN" restore latest --target / || {
+        print_err "Восстановление не выполнено"
+        return 1
+    }
+    print_ok "Последний снапшот разложен по путям"
+    print_info "Проверь службы: Обслуживание -> Диагностика или Prayer of Eli"
+    return 0
+}
+
+restic_remove() {
+    print_section "Restic: удаление настройки"
+    print_warn "Env репозитория и движок будут удалены. Данные в репозитории останутся."
+    local go=""
+    ask_yn "Удалить?" "n" go
+    [[ "$go" == "yes" ]] || { print_info "Отмена"; return 0; }
+    rm -f "$RESTIC_ENV"
+    rm -f "$RESTIC_BIN"
+    book_write ".backup.offsite" "false" bool
+    print_ok "Restic удалён с сервера"
+    return 0
+}
+
+menu_restic() {
+    local choice
+    while true; do
+        eli_header
+        eli_banner "Офсайт-бэкап (Restic)" \
+            "Шифрованная копия настроек в репозитории вне сервера.
+  Локальный tar остаётся: Restic дополняет его, а не заменяет.
+
+  Репозиторий: локальный каталог, SFTP, S3, Backblaze B2, rest-server.
+  Пароль генерируется и показывается один раз при настройке."
+
+        echo -e "  ${GREEN}1)${NC} Установить движок"
+        echo -e "  ${GREEN}2)${NC} Настроить репозиторий"
+        echo -e "  ${GREEN}3)${NC} Создать снапшот"
+        echo -e "  ${GREEN}4)${NC} Список снапшотов"
+        echo -e "  ${GREEN}5)${NC} Проверить репозиторий"
+        echo -e "  ${GREEN}6)${NC} Восстановить последний снапшот [!!!]"
+        echo ""
+        echo -e "  ${GREEN}7)${NC} Удалить настройку Restic [!!!]"
+        echo ""
+        echo -e "  ${GREEN}8)${NC} Показать пароль репозитория"
+        echo ""
+        echo -e "  ${GREEN}0)${NC} Назад"
+        echo ""
+        eli_menu_read choice
+
+        case "$choice" in
+            1) restic_install || print_warn "Ошибка установки Restic" ;;
+            2) restic_setup || print_warn "Ошибка настройки репозитория" ;;
+            3) restic_backup || print_warn "Ошибка снапшота" ;;
+            4) restic_snapshots || print_warn "Ошибка списка" ;;
+            5) restic_check || print_warn "Ошибка проверки" ;;
+            6) restic_restore_latest || print_warn "Ошибка восстановления" ;;
+            7) restic_remove || print_warn "Ошибка удаления" ;;
+            8) restic_show_password || print_warn "Ошибка показа пароля" ;;
+            0) return 0 ;;
+            *) print_warn "Введите число от 0 до 8" ;;
+        esac
+
+        eli_pause
+        eli_header
+    done
 }
 
 # === main.sh ===
@@ -19712,7 +21758,7 @@ menu_vpn() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) menu_awg       || { print_warn "Ошибка в разделе AmneziaWG"; eli_pause; } ;;
@@ -19759,7 +21805,7 @@ menu_awg() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) awg_install    || { print_warn "Ошибка при установке AWG"; }; eli_pause ;;
@@ -19805,7 +21851,7 @@ menu_zapret() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) zapret_install || { print_warn "Ошибка при установке zapret2"; }; eli_pause ;;
@@ -19861,7 +21907,7 @@ menu_wgobfs() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) wgo_install || { print_warn "Ошибка при установке wg-obfuscator"; }; eli_pause ;;
@@ -19916,7 +21962,7 @@ menu_mimic() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) mim_install || { print_warn "Ошибка при установке mimic"; }; eli_pause ;;
@@ -19963,7 +22009,7 @@ menu_xui() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) xui_install       || print_warn "Ошибка при установке 3X-UI" ;;
@@ -20012,7 +22058,7 @@ menu_otl() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) otl_install        || print_warn "Ошибка при установке Outline" ;;
@@ -20059,7 +22105,7 @@ menu_proxy() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) menu_mtp  || { print_warn "Ошибка в разделе MTProto"; eli_pause; } ;;
@@ -20099,7 +22145,7 @@ menu_mtp() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) mtp_add     || print_warn "Ошибка при добавлении MTProto" ;;
@@ -20139,7 +22185,7 @@ menu_s5() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) s5_add    || print_warn "Ошибка при добавлении SOCKS5" ;;
@@ -20182,7 +22228,7 @@ menu_hy2() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) hy2_add         || print_warn "Ошибка при добавлении Hysteria 2" ;;
@@ -20226,7 +22272,7 @@ menu_sig() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) sig_install || print_warn "Ошибка при установке Signal Proxy" ;;
@@ -20264,7 +22310,7 @@ menu_comms() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) menu_ts  || { print_warn "Ошибка в разделе TeamSpeak"; eli_pause; } ;;
@@ -20304,7 +22350,7 @@ menu_ts() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) ts_install     || print_warn "Ошибка при установке TeamSpeak" ;;
@@ -20348,7 +22394,7 @@ menu_mbl() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) mbl_install     || print_warn "Ошибка при установке Mumble" ;;
@@ -20402,7 +22448,7 @@ menu_maint() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) diag_run        || { print_warn "Ошибка при диагностике"; eli_pause; } ;;
@@ -20447,7 +22493,7 @@ menu_unbound() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) unbound_install || print_warn "Ошибка при установке Unbound" ;;
@@ -20488,7 +22534,7 @@ menu_ssh() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) ssh_show_status  || print_warn "Ошибка при показе статуса" ;;
@@ -20548,7 +22594,7 @@ menu_ufw() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) ufw_show_status || print_warn "Ошибка при показе статуса" ;;
@@ -20592,7 +22638,7 @@ menu_update() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) update_scan    || print_warn "Ошибка при проверке обновлений" ;;
@@ -20632,16 +22678,19 @@ menu_backup() {
         echo -e "  ${GREEN}2)${NC} Восстановить из бэкапа"
         echo -e "  ${GREEN}3)${NC} Список бэкапов"
         echo ""
+        echo -e "  ${GREEN}4)${NC} Офсайт-бэкап (Restic)"
+        echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) backup_create   || print_warn "Ошибка при создании бэкапа" ;;
             2) backup_restore  || print_warn "Ошибка при восстановлении" ;;
             3) backup_list     || print_warn "Ошибка при показе списка" ;;
+            4) menu_restic     || print_warn "Ошибка в офсайт-бэкапе" ;;
             0) return 0 ;;
-            *) print_warn "Введите число от 0 до 3" ;;
+            *) print_warn "Введите число от 0 до 4" ;;
         esac
 
         eli_pause
@@ -20675,7 +22724,7 @@ menu_tgbot() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) tgbot_setup   || print_warn "Ошибка при настройке" ;;
@@ -20705,7 +22754,7 @@ eli_main() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Выход"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice nofooter
 
         case "$choice" in
             1) boot_run   || { print_warn "Ошибка в разделе Старт"; }; eli_pause ;;

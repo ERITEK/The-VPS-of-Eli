@@ -1,0 +1,31 @@
+# golden: contract_proxy
+--- вывод ---
+== mtproto ==
+-- artifact --
+<SB>/etc/mtproto/instance_1.env
+<SB>/etc/mtproto/config_1.toml
+<SB>/etc/mtproto/instance_2.env
+<SB>/etc/mtproto/config_2.toml
+-- backup --
+<SB>/etc/mtproto
+-- probe --
+cmd:docker ps --format '{{.Names}}' | grep -qx mtg-1
+port:tcp:8443
+cmd:docker ps --format '{{.Names}}' | grep -qx mtg-2
+port:tcp:8444
+present: да
+== socks5 ==
+-- artifact --
+<SB>/etc/socks5/instance_1.env
+<SB>/etc/socks5/instance_2.env
+-- backup --
+<SB>/etc/socks5
+-- probe --
+cmd:docker ps --format '{{.Names}}' | grep -qx socks5-1
+port:tcp:1080
+cmd:docker ps --format '{{.Names}}' | grep -qx socks5-2
+port:tcp:1081
+present: да
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

@@ -1,0 +1,9 @@
+# golden: asset_sha
+--- вывод ---
+a: aa11bb22
+b: []
+c: []
+empty: []
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

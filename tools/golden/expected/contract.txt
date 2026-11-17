@@ -1,0 +1,34 @@
+# golden: contract
+--- вывод ---
+xui unit: x-ui
+xui backup строк: 2
+xui probe: 2
+ufw config: <SB>/etc/ufw/user.rules
+awg unit строк: 0
+ts present: да
+ts artifact:
+<SB>/opt/teamspeak/tsserver
+<SB>/ts/tsserver.sqlitedb
+ts unit:
+teamspeak
+ts config:
+<SB>/etc/teamspeak/teamspeak.env
+ts backup:
+<SB>/etc/teamspeak
+<SB>/ts/tsserver.sqlitedb
+<SB>/ts/tsserver.sqlitedb-wal
+<SB>/ts/tsserver.sqlitedb-shm
+ts probe:
+unit:teamspeak
+port:udp:9997
+port:tcp:30044
+ts register:
+<SB>/etc/teamspeak
+<SB>/ts/tsserver.sqlitedb
+<SB>/ts/tsserver.sqlitedb-wal
+<SB>/ts/tsserver.sqlitedb-shm
+unknown rc=1
+--- вызовы платформы ---
+CMD flock -n 200
+CMD awg show interfaces
+rc=0

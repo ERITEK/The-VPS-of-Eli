@@ -1,0 +1,15 @@
+# golden: txn
+--- вывод ---
+== commit ==
+begin rc=0
+backup rc=0
+expect rc=0
+commit rc=0 content=new
+== rollback по провалу ==
+expect rc=1
+commit rc=1 content=new
+== созданный файл удаляется ==
+rollback rc=0 exists=нет
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

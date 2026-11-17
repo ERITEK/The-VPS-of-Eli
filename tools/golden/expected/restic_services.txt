@@ -1,0 +1,59 @@
+# golden: restic_services
+--- вывод ---
+
+<cyan><bold>>> Restic: снапшот<off>
+<cyan>------------------------------------------------------<off>
+  <cyan>*<off> Службы остановлены на время снапшота (x-ui), поднимутся после
+snapshot b0000001 saved
+  <green>[-OK-]<off> Снапшот создан
+rc=0
+--- вызовы ---
+restic snapshots
+restic backup
+x-ui: inactive
+restic snapshots
+--- состояние ---
+x-ui=active
+== службы не активны: строки об остановке нет ==
+
+<cyan><bold>>> Restic: снапшот<off>
+<cyan>------------------------------------------------------<off>
+snapshot b0000002 saved
+  <green>[-OK-]<off> Снапшот создан
+rc=0
+--- вызовы ---
+restic snapshots
+restic backup
+x-ui: inactive
+restic snapshots
+== служба не остановилась ==
+
+<cyan><bold>>> Restic: снапшот<off>
+<cyan>------------------------------------------------------<off>
+  <red>[xXx]<off> Служба x-ui не остановилась: снапшот отменён, база была бы живой
+rc=1
+--- вызовы ---
+== служба не поднялась после снапшота ==
+
+<cyan><bold>>> Restic: снапшот<off>
+<cyan>------------------------------------------------------<off>
+  <cyan>*<off> Службы остановлены на время снапшота (x-ui), поднимутся после
+snapshot b0000003 saved
+  <red>[xXx]<off> Снапшот создан, но службы после него не поднялись
+rc=1
+--- состояние ---
+x-ui=inactive
+--- вызовы платформы ---
+CMD flock -n 200
+CMD awg show interfaces
+CMD awg show interfaces
+CMD hostname
+CMD awg show interfaces
+CMD awg show interfaces
+CMD hostname
+CMD awg show interfaces
+CMD awg show interfaces
+CMD awg show interfaces
+CMD awg show interfaces
+CMD hostname
+rc=0

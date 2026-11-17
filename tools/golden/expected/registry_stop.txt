@@ -1,0 +1,18 @@
+# golden: registry_stop
+--- вывод ---
+== манифест с x-ui и teamspeak ==
+rc=0 stopped=x-ui
+== возврат служб ==
+rc=0 stopped=нет
+== провал остановки ==
+  <red>[xXx]<off> 3X-UI не остановился: реестр не восстанавливается
+rc=1 stopped=0
+== чужие пути ==
+rc=0 stopped=0
+--- вызовы ---
+stop x-ui
+start x-ui
+stop x-ui
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

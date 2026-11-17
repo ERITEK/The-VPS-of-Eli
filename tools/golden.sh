@@ -117,6 +117,206 @@ done
 # - дойти и до файла, и до живого интерфейса. Состояние песочницы возвращается -
 CASES+=('awg_add_client|-|cp -a "$SB/etc/awg-setup" "$SB/tmp/awg-setup.bak"; mkdir -p "$SB/etc/awg-setup/server_write0" "$SB/etc/awg-setup/clients_write0"; cp "$SB/state/write_case/iface_write0.env" "$SB/etc/awg-setup/iface_write0.env"; cp "$SB/state/write_case/server_write0.pub" "$SB/etc/awg-setup/server_write0/server.pub"; awg_select_iface(){ AWG_ACTIVE_IFACE=write0; }; ask(){ case "$1" in *Имя*) printf -v "$3" "kit-test";; *) printf -v "$3" "%s" "${2:-}";; esac; }; ask_yn(){ printf -v "$3" "%s" no; }; awg_add_client; echo "--- client.conf ---"; cat "$SB/etc/awg-setup/clients_write0/kit-test/client.conf"; rm -rf "$SB/etc/awg-setup"; mv "$SB/tmp/awg-setup.bak" "$SB/etc/awg-setup"')
 
+# - путь записи: смена порта AWG. Успех подтверждается живым портом и правилом
+# - UFW, провал обязательного факта возвращает файлы транзакцией и живое
+# - состояние: рестарт на старом порту, книга, mimic и правило UFW -
+AWG_CHANGE_PORT_CASE='
+awg_select_iface(){ AWG_ACTIVE_IFACE=awg0; }
+_awg_default_port(){ echo 40000; }
+_awg_port_in_burned(){ return 1; }
+_awg_port_in_use(){ return 1; }
+_awg_tunnel_check(){ :; }
+wgo_iface_bound(){ return 1; }
+mim_retarget(){ echo "mim_retarget $*" >> "$SB/tmp/mim_calls"; return 0; }
+ask(){ printf -v "$3" "%s" "${2:-}"; }
+ask_yn(){ case "$1" in *"Сменить порт"*) printf -v "$3" yes ;; *) printf -v "$3" no ;; esac; }
+live="$SB/tmp/awg_live"
+awg(){ case "$*" in *listen-port*) cat "$live" ;; esac; }
+systemctl(){
+    local verb="$1" a unit=""
+    for a in "${@:2}"; do [[ "$a" == -* ]] && continue; unit="$a"; break; done
+    case "$verb" in
+        restart) [[ "$unit" == awg-quick@* ]] && awk "/^ListenPort = /{print \$3}" "$SB/etc/amnezia/amneziawg/awg0.conf" > "$live" ;;
+        is-active) return 0 ;;
+        *) : ;;
+    esac
+    return 0
+}
+_ufw_has_rule(){
+    [[ "$1" == 40000 && -n "${UFW_NEW:-}" ]] && return 0
+    [[ "$1" == 1618 && -n "${UFW_OLD:-}" ]] && return 0
+    return 1
+}
+ufw(){
+    echo "ufw $*" >> "$SB/tmp/ufw_calls"
+    if [[ "$*" == *"allow 40000/udp"* ]]; then [[ -n "${UFW_FAIL_NEW:-}" ]] || UFW_NEW=1; fi
+    if [[ "$*" == *"allow 1618/udp"* ]]; then UFW_OLD=1; fi
+    if [[ "$*" == *"delete allow 1618/udp"* ]]; then UFW_OLD=""; fi
+    if [[ "$*" == *"delete allow 40000/udp"* ]]; then UFW_NEW=""; fi
+    return 0
+}
+conf="$SB/etc/amnezia/amneziawg/awg0.conf"
+env="$SB/etc/awg-setup/iface_awg0.env"
+cfile="$SB/etc/awg-setup/clients_awg0/client1/client.conf"
+mkdir -p "$SB/etc/amnezia/amneziawg" "$SB/etc/awg-setup/clients_awg0/client1"
+reset_all(){
+    printf "[Interface]\nListenPort = 1618\n" > "$conf"
+    printf "SERVER_PORT=\"1618\"\n" > "$env"
+    printf "[Peer]\nEndpoint = 203.0.113.9:1618\n" > "$cfile"
+    book_write ".awg.interfaces.awg0.port" 1618 number
+    echo 1618 > "$live"
+    UFW_NEW=""; UFW_OLD=1
+    : > "$SB/tmp/ufw_calls"; : > "$SB/tmp/mim_calls"
+}
+state(){
+    echo "conf: $(sed -n "s/^ListenPort = //p" "$conf")"
+    echo "env: $(sed -n "s/^SERVER_PORT=//p" "$env")"
+    echo "client: $(sed -n "s/^Endpoint = .*://p" "$cfile")"
+    echo "book: $(book_read ".awg.interfaces.awg0.port")"
+    echo "live: $(cat "$live")"
+    echo "ufw_new: ${UFW_NEW:-нет} ufw_old: ${UFW_OLD:-нет}"
+}
+echo "== s1: UFW не разрешил новый порт - откат файлов и живого состояния =="
+reset_all
+UFW_FAIL_NEW=1 YN_ANSWER=yes awg_change_port; echo "rc=$?"
+state
+echo "--- ufw ---"; cat "$SB/tmp/ufw_calls"
+echo "== s2: успех =="
+reset_all
+YN_ANSWER=yes awg_change_port; echo "rc=$?"
+state
+echo "--- ufw ---"; cat "$SB/tmp/ufw_calls"
+echo "--- mimic ---"; cat "$SB/tmp/mim_calls"
+rm -rf "$SB/etc/amnezia/amneziawg" "$SB/etc/awg-setup" "$live" "$SB/tmp/ufw_calls" "$SB/tmp/mim_calls"
+'
+CASES+=("awg_change_port|jq,write|${AWG_CHANGE_PORT_CASE}")
+
+# - смена порта второго интерфейса: legacy server.env принадлежит первому, -
+# - его проверка не должна откатывать валидную смену порта другого интерфейса -
+AWG_CHANGE_PORT_LEGACY_CASE='
+awg_select_iface(){ AWG_ACTIVE_IFACE=awg1; }
+_awg_default_port(){ echo 40001; }
+_awg_port_in_burned(){ return 1; }
+_awg_port_in_use(){ return 1; }
+_awg_tunnel_check(){ :; }
+wgo_iface_bound(){ return 1; }
+mim_retarget(){ :; }
+ask(){ printf -v "$3" "%s" "${2:-}"; }
+ask_yn(){ case "$1" in *"Сменить порт"*) printf -v "$3" yes ;; *) printf -v "$3" no ;; esac; }
+live="$SB/tmp/awg_live1"
+awg(){ case "$*" in *listen-port*) cat "$live" ;; esac; }
+systemctl(){
+    local verb="$1" a unit=""
+    for a in "${@:2}"; do [[ "$a" == -* ]] && continue; unit="$a"; break; done
+    case "$verb" in
+        restart) [[ "$unit" == awg-quick@* ]] && awk "/^ListenPort = /{print \$3}" "$SB/etc/amnezia/amneziawg/awg1.conf" > "$live" ;;
+        is-active) return 0 ;;
+        *) : ;;
+    esac
+    return 0
+}
+_ufw_has_rule(){ [[ "$1" == 40001 ]] && return 0; return 1; }
+_ufw_no_rule(){ return 0; }
+ufw(){ :; }
+conf="$SB/etc/amnezia/amneziawg/awg1.conf"
+env="$SB/etc/awg-setup/iface_awg1.env"
+legacy="$SB/etc/awg-setup/server.env"
+mkdir -p "$SB/etc/amnezia/amneziawg" "$SB/etc/awg-setup"
+reset_all(){
+    rm -rf "$SB/etc/awg-setup/clients_awg1"
+    printf "[Interface]\nListenPort = 56561\n" > "$conf"
+    printf "SERVER_PORT=\"56561\"\n" > "$env"
+    printf "SERVER_PORT=\"1618\"\nMAIN_IFACE=\"awg0\"\n" > "$legacy"
+    book_write ".awg.interfaces.awg1.port" 56561 number
+    echo 56561 > "$live"
+}
+state(){
+    echo "conf: $(sed -n "s/^ListenPort = //p" "$conf")"
+    echo "iface_env: $(sed -n "s/^SERVER_PORT=//p" "$env")"
+    echo "legacy_env: $(sed -n "s/^SERVER_PORT=//p" "$legacy")"
+    echo "book: $(book_read ".awg.interfaces.awg1.port")"
+    echo "live: $(cat "$live")"
+}
+echo "== второй интерфейс: чужой legacy server.env не блокирует смену порта =="
+reset_all
+awg_change_port; echo "rc=$?"
+state
+rm -rf "$SB/etc/amnezia/amneziawg" "$SB/etc/awg-setup" "$live"
+'
+CASES+=("awg_change_port_legacy|jq,write|${AWG_CHANGE_PORT_LEGACY_CASE}")
+
+# - путь записи: правка клиента AWG. Правки одного клиента идут транзакцией:
+# - успех фиксируется, провал факта возвращает конфиг целиком -
+AWG_EDIT_CLIENT_CASE='
+awg_select_iface(){ AWG_ACTIVE_IFACE=awg0; }
+awg_get_client_list(){ echo client1; }
+awg_client_exists(){ [[ "$2" == client1 ]]; }
+cfg="$SB/etc/awg-setup/clients_awg0/client1/client.conf"
+mkdir -p "$SB/etc/awg-setup/clients_awg0/client1"
+reset_cfg(){ printf "[Interface]\nDNS = 1.1.1.1\nMTU = 1320\n[Peer]\nEndpoint = 203.0.113.9:39255\nAllowedIPs = 0.0.0.0/0, ::/0\n" > "$cfg"; }
+ask(){ case "$1" in *Имя*) printf -v "$3" client1 ;; *Endpoint*) printf -v "$3" "${EP_NEW:-}" ;; *) printf -v "$3" "${2:-}" ;; esac; }
+ask_raw(){ printf -v "$2" "%s" "${Q[0]}"; Q=("${Q[@]:1}"); }
+ask_yn(){ printf -v "$3" no; }
+echo "== s1: endpoint обновлён, транзакция зафиксирована =="
+reset_cfg
+Q=(1 0); EP_NEW="203.0.113.9:40000"
+awg_edit_client; echo "rc=$?"
+grep -E "^(Endpoint|DNS|MTU)" "$cfg"
+echo "== s2: факт не подтверждён - конфиг возвращён целиком =="
+reset_cfg
+Q=(1 0); EP_NEW="203.0.113.9:40001"
+eli_fact_line(){ return 1; }
+awg_edit_client; echo "rc=$?"
+grep -E "^(Endpoint|DNS|MTU)" "$cfg"
+rm -rf "$SB/etc/awg-setup"
+'
+CASES+=("awg_edit_client|jq,write|${AWG_EDIT_CLIENT_CASE}")
+
+# - путь записи: удаление клиента AWG. Пир снимается с конфига и живого
+# - интерфейса, каталог уводится в карантин до фиксации; провал факта
+# - возвращает конфиг транзакцией, каталог и пир на живом интерфейсе -
+AWG_DELETE_CLIENT_CASE='
+awg_select_iface(){ AWG_ACTIVE_IFACE=awg0; }
+awg_get_client_list(){ echo client1; }
+awg_client_exists(){ [[ "$2" == client1 ]]; }
+ask(){ printf -v "$3" client1; }
+ask_yn(){ printf -v "$3" yes; }
+pub="1avHyhCX2p2ibjckf3TO+iQKpFCVpp3qs2COfBUsDmU="
+conf="$SB/etc/amnezia/amneziawg/awg0.conf"
+cdir="$SB/etc/awg-setup/clients_awg0/client1"
+mkdir -p "$cdir" "$SB/etc/amnezia/amneziawg"
+reset_all(){
+    mkdir -p "$cdir"
+    printf "[Interface]\nListenPort = 1618\n\n[Peer]\nPublicKey = %s\nAllowedIPs = 10.8.0.2/32\n" "$pub" > "$conf"
+    printf "%s\n" "$pub" > "$cdir/public.key"
+    printf "[Interface]\nPrivateKey = x\n" > "$cdir/client.conf"
+    printf "%s\n" "$pub" > "$SB/tmp/awg_live_peers"
+    : > "$SB/tmp/awg_apply"
+}
+awg(){ case "$*" in *"show awg0 peers"*) cat "$SB/tmp/awg_live_peers" ;; esac; }
+awg_remove_peer_by_pubkey(){ printf "[Interface]\nListenPort = 1618\n" > "$1"; return 0; }
+awg_apply_peer(){ echo "apply $2" >> "$SB/tmp/awg_apply"; : > "$SB/tmp/awg_live_peers"; return 0; }
+awg_reload_iface(){ echo "reload $1" >> "$SB/tmp/awg_apply"; return 0; }
+state(){
+    echo "conf_peer: $(grep -c PublicKey "$conf")"
+    echo "dir: $( [[ -d "$cdir" ]] && echo есть || echo нет )"
+    echo "live: $(tr -d "\n" < "$SB/tmp/awg_live_peers")"
+}
+echo "== s1: успех =="
+reset_all
+awg_delete_client; echo "rc=$?"
+state
+echo "--- apply ---"; cat "$SB/tmp/awg_apply"
+echo "== s2: пир остался живым - конфиг, каталог и пир возвращаются =="
+reset_all
+_awg_live_peer_absent(){ return 1; }
+awg_delete_client; echo "rc=$?"
+state
+echo "--- apply ---"; cat "$SB/tmp/awg_apply"
+rm -rf "$SB/etc/awg-setup" "$SB/etc/amnezia/amneziawg" "$SB/tmp/awg_live_peers" "$SB/tmp/awg_apply"
+'
+CASES+=("awg_delete_client|jq,write|${AWG_DELETE_CLIENT_CASE}")
+
 # - путь записи: бэкап БД панели. Снимок согласованный - служба останавливается -
 # - на время копии и возвращается после; проверяется и файл, и порядок вызовов -
 CASES+=('xui_backup_db|jq,write|date(){ echo 20260913_120000; }; mkdir -p "$SB/usr/local/x-ui/db"; printf "SQLITE-DB\n" > "$SB/usr/local/x-ui/db/x-ui.db"; xui_backup_db; echo "--- файлы бэкапа ---"; ls "$SB/etc/3xui/backups" 2>/dev/null; rm -rf "$SB/etc/3xui"')
@@ -130,8 +330,89 @@ CASES+=('mtp_add_fail|jq,write|curl(){ echo 203.0.113.9; }; _mtp_gen_secret(){ e
 CASES+=('ts_backup_db|jq,write|date(){ echo 20260913_120000; }; mkdir -p "$SB/opt/teamspeak"; printf "TS-DB\n" > "$SB/opt/teamspeak/tsserver.sqlitedb"; sed -i "s/^teamspeak=inactive$/teamspeak=active/" "$SB/state/services"; ts_backup_db; echo "--- каталог бэкапа ---"; ls "$SB/etc/teamspeak/backups"; sed -i "s/^teamspeak=active$/teamspeak=inactive/" "$SB/state/services"; rm -rf "$SB/etc/teamspeak/backups"')
 
 # - ввод порта в ufw_add_port: диапазон без протокола отвергается, отказ ufw -
-# - печатается отказом, а не успехом (подпорка ufw отвечает заданным кодом) -
-CASES+=('ufw_add_port_range|-|declare -a Q=("80:90" "80:90/udp"); ask_raw(){ local a=""; if [[ "$1" == *Порт* ]]; then a="${Q[0]}"; Q=("${Q[@]:1}"); fi; printf -v "$2" "%s" "$a"; }; ask(){ printf -v "$3" "%s" "${2:-}"; }; ufw(){ echo "ufw $*"; return "${UFW_RC:-0}"; }; UFW_RC=1; ufw_add_port; echo "rc=$?"; Q=("80:90/udp"); UFW_RC=0; ufw_add_port; echo "rc=$?"')
+# - печатается отказом, а не успехом; успех подтверждается фактом правила -
+UFW_ADD_PORT_CASE='
+mkdir -p "$SB/etc/ufw"
+printf "# rules\n" > "$SB/etc/ufw/user.rules"
+: > "$SB/tmp/ufw_added"
+ufw(){
+    echo "ufw $*" >> "$SB/tmp/ufw_calls"
+    case "$1" in
+        allow) [[ -n "${UFW_REJECT:-}" ]] && return 1; printf "%s\n" "$2" >> "$SB/tmp/ufw_added"; return 0 ;;
+        delete) grep -vxF -- "$3" "$SB/tmp/ufw_added" > "$SB/tmp/ufw_added.tmp" 2>/dev/null; mv "$SB/tmp/ufw_added.tmp" "$SB/tmp/ufw_added"; return 0 ;;
+        show) cat "$SB/tmp/ufw_added" ;;
+        *) : ;;
+    esac
+    return 0
+}
+declare -a Q=("80:90" "80:90/udp")
+ask_raw(){ local a=""; if [[ "$1" == *Порт* ]]; then a="${Q[0]}"; Q=("${Q[@]:1}"); fi; printf -v "$2" "%s" "$a"; }
+ask(){ printf -v "$3" "%s" ""; }
+echo "== отказ ufw =="
+Q=("80:90" "80:90/udp"); UFW_REJECT=1
+ufw_add_port; echo "rc=$?"
+echo "--- правила ---"; cat "$SB/tmp/ufw_added"
+echo "== успех =="
+Q=("80:90/udp"); UFW_REJECT=""
+ufw_add_port; echo "rc=$?"
+echo "--- правила ---"; cat "$SB/tmp/ufw_added"
+echo "--- файлы ufw ---"; cat "$SB/etc/ufw/user.rules"
+echo "--- вызовы ufw ---"; cat "$SB/tmp/ufw_calls"
+rm -rf "$SB/etc/ufw" "$SB/tmp/ufw_added" "$SB/tmp/ufw_calls"
+'
+CASES+=("ufw_add_port|write|${UFW_ADD_PORT_CASE}")
+
+# - путь записи: удаление правила UFW. Нумерованный список, снятие v4/v6-пары
+# - и проверка факта; провал возвращает файлы правил и перечитывает файрвол -
+UFW_DELETE_RULE_CASE='
+mkdir -p "$SB/etc/ufw"
+printf "# rules\n" > "$SB/etc/ufw/user.rules"
+: > "$SB/tmp/ufw_calls"
+reset_rules(){
+    printf "22/tcp\n18080/tcp\n" > "$SB/tmp/ufw_rules"
+    printf "# rules\n" > "$SB/etc/ufw/user.rules"
+    : > "$SB/tmp/ufw_calls"
+}
+ufw(){
+    echo "ufw $*" >> "$SB/tmp/ufw_calls"
+    case "$1" in
+        status)
+            if [[ "${2:-}" == "numbered" ]]; then
+                echo "Status: active"
+                echo "     To                         Action      From"
+                echo "     --                         ------      ----"
+                local i=0 r
+                while IFS= read -r r; do
+                    i=$(( i + 1 ))
+                    printf "[%2d] %-25s ALLOW       Anywhere\n" "$i" "$r"
+                done < "$SB/tmp/ufw_rules"
+            else
+                echo "Status: active"
+            fi
+            ;;
+        delete) if [[ -z "${UFW_DELETE_FAIL:-}" ]]; then sed -i "${2}d" "$SB/tmp/ufw_rules"; printf "deleted %s\n" "$2" >> "$SB/etc/ufw/user.rules"; fi ;;
+        reload) echo "reload" >> "$SB/tmp/ufw_calls" ;;
+        show)   cat "$SB/tmp/ufw_rules" ;;
+        *)      : ;;
+    esac
+    return 0
+}
+ask_raw(){ printf -v "$2" "%s" "${NUM}"; }
+ask_yn(){ printf -v "$3" yes; }
+state(){ echo "правила: $(tr "\n" " " < "$SB/tmp/ufw_rules")"; echo "файл: $(cat "$SB/etc/ufw/user.rules")"; }
+echo "== s1: удаление #2 =="
+reset_rules; NUM=2
+ufw_delete_rule; echo "rc=$?"
+state
+echo "--- ufw ---"; cat "$SB/tmp/ufw_calls"
+echo "== s2: факт не подтверждён - файлы возвращаются и файрвол перечитывается =="
+reset_rules; NUM=1; UFW_DELETE_FAIL=1
+ufw_delete_rule; echo "rc=$?"
+state
+echo "--- ufw ---"; cat "$SB/tmp/ufw_calls"
+rm -rf "$SB/etc/ufw" "$SB/tmp/ufw_rules" "$SB/tmp/ufw_calls"
+'
+CASES+=("ufw_delete_rule|write|${UFW_DELETE_RULE_CASE}")
 
 # - путь записи: восстановление стека из архива. Архив собирается в песочнице: -
 # - в нём настройки AWG, база TeamSpeak (у цели лежит журнал чужой базы) и -
@@ -174,7 +455,7 @@ CASES+=('tgbot_disable|jq,write|printf "%s\n" "*/10 * * * * /usr/local/bin/eli-t
 # - страховочного таймера (таблица снята до подтверждения - фиксации нет). -
 # - инстанс и связность подпёрты, состояние песочницы возвращается -
 ZAPRET_BIND_CASE='
-_zap_verify_active(){ return "${ZAP_VA:-0}"; }
+eli_service_start(){ return "${ZAP_VA:-0}"; }
 _zap_connectivity_ok(){ return "${ZAP_CONN:-0}"; }
 eli_safety_arm(){ if [[ -n "${ZAP_ARM:-}" ]]; then print_info "таймер поставлен (подпорка)"; return 0; fi; print_warn "таймер не поставлен (подпорка)"; return 1; }
 eli_safety_disarm(){ :; }
@@ -221,6 +502,7 @@ ZAP_SEL=2 ZAP_VA=0 ZAP_CONN=0 ZAP_ARM=1 ZAP_YN=yes zapret_bind_iface; echo "rc=$
 files
 echo "bound=$(bound) strategy=$(jq -rc .zapret.interfaces.awg1.strategy "$_BOOK")"
 echo "--- conf ---"; cat "$conf"
+echo "--- loader ---"; awk "/Service/,/Install/" "$loader"
 echo "== s5: страховочный таймер сработал до подтверждения =="
 book_write .zapret.interfaces.awg1.bound false bool
 rm -f "$conf" "$hosts" "$loader" "$SB/state/nftflag"
@@ -235,6 +517,24 @@ for e in $made; do rm -f "$e"; done
 '
 CASES+=("zapret_bind|jq,write|${ZAPRET_BIND_CASE}")
 
+# - сверка приводит юнит загрузки правил к текущему шаблону: юнит прошлой -
+# - сборки без предварительного снятия таблицы переписывается, актуальный -
+# - юнит не трогается (маркер, дописанный перед повторной сверкой, остаётся) -
+ZAPRET_LOADER_SYNC_CASE='
+old="$SB/etc/systemd/system/zeli-nft-awg0.service"
+printf "[Unit]\nDescription=old unit\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/sbin/nft -f %s\nExecStop=/usr/sbin/nft delete table inet zeli_awg0\n\n[Install]\nWantedBy=multi-user.target\n" "$SB/etc/vps-eli-stack/zapret2/awg0.nft" > "$old"
+echo "== юнит прошлой сборки =="
+awk "/Service/,/Install/" "$old"
+_zap_sync_loaders
+echo "== после сверки =="
+awk "/Service/,/Install/" "$old"
+echo "== повторная сверка =="
+echo "# marker" >> "$old"
+_zap_sync_loaders
+echo "строк-маркеров: $(grep -c "# marker" "$old")"
+'
+CASES+=("zapret_loader_sync|jq,write|${ZAPRET_LOADER_SYNC_CASE}")
+
 # - путь записи: привязка wg-obfuscator. Проверяются закрытие порта туннеля -
 # - (запасное правило DROP: неприменилось - запись снимается, привязка отменена), -
 # - откат при неудержавшемся инстансе (allow порта туннеля возвращается, порт -
@@ -243,7 +543,7 @@ CASES+=("zapret_bind|jq,write|${ZAPRET_BIND_CASE}")
 # - инстанс, UFW и iptables подпёрты, состояние песочницы возвращается -
 WGO_BIND_CASE='
 _wgo_ensure_vanilla(){ WGO_TARGET_IFACE=awg1; return 0; }
-_wgo_verify_active(){ return "${WGO_VA:-0}"; }
+eli_service_start(){ return "${WGO_VA:-0}"; }
 ask(){ case "$1" in *Порт*) printf -v "$3" "%s" "23456";; *Ключ*) printf -v "$3" "%s" "obfkey123";; *) printf -v "$3" "%s" "${2:-}";; esac; }
 ask_raw(){ printf -v "$2" "%s" "1"; }
 ask_yn(){ printf -v "$3" "%s" "no"; }
@@ -341,7 +641,7 @@ CASES+=("wgo_bind|jq,write|${WGO_BIND_CASE}")
 # - архив читается и содержит client.conf, wg-obfuscator.conf и README. Состояние -
 # - песочницы возвращается -
 WGO_KIT_CASE='
-_wgo_verify_active(){ return 0; }
+eli_service_start(){ return 0; }
 ask_raw(){ printf -v "$2" "%s" "${Q[0]}"; Q=("${Q[@]:1}"); }
 ask_yn(){ printf -v "$3" "%s" "no"; }
 cp -a "$SB/etc/vps-eli-stack/book_of_Eli.json" "$SB/tmp/book.bak"
@@ -689,7 +989,7 @@ XUI_ARM_BINARY_CASE='
 SB_TARBALL=""
 _xui_verify_sha256(){ return 0; }
 _make_arch(){ mkdir -p "$SB/tmp/stage/x-ui/bin"; printf "XUI-BIN\n" > "$SB/tmp/stage/x-ui/x-ui"; printf "#!/bin/sh\n" > "$SB/tmp/stage/x-ui/x-ui.sh"; printf "[Unit]\n" > "$SB/tmp/stage/x-ui/x-ui.service.debian"; printf "XRAY\n" > "$SB/tmp/stage/x-ui/bin/xray-linux-$1"; printf "MTG\n" > "$SB/tmp/stage/x-ui/bin/mtg-linux-$1"; }
-curl(){ local out="" want=0 a url=""; for a in "$@"; do if (( want )); then out="$a"; want=0; continue; fi; if [[ "$a" =~ ^-[A-Za-z0-9]*o$ ]]; then want=1; continue; fi; [[ "$a" == http* ]] && url="$a"; done; if [[ -z "$SB_TARBALL" && -n "$out" ]]; then _make_arch "${CURL_ARCH:-armv7}"; tar czf "$out" -C "$SB/tmp/stage" x-ui; SB_TARBALL="$out"; return 0; fi; case "$url" in
+curl(){ local out="" want=0 a url=""; for a in "$@"; do if (( want )); then out="$a"; want=0; continue; fi; if [[ "$a" =~ ^-[A-Za-z0-9]*o$ ]]; then want=1; continue; fi; [[ "$a" == http* ]] && url="$a"; done; if [[ -z "$SB_TARBALL" && -n "$out" ]]; then _make_arch "${CURL_ARCH:-armv7}"; tar czf "$out" -C "$SB/tmp/stage" x-ui; SB_TARBALL="$out"; printf "200"; return 0; fi; case "$url" in
         *.sha256) printf "%s  x-ui-linux-%s.tar.gz\n" "$(sha256sum "$SB_TARBALL" 2>/dev/null | awk "{print \$1}")" "${CURL_ARCH:-armv7}" > "$out"; printf "200"; return 0 ;;
         *) return 7 ;;
     esac; }
@@ -698,6 +998,7 @@ rm -rf "$SB/usr/local/x-ui/db"
 cp -a "$SB/usr/local/x-ui" "$SB/tmp/xui-fixture.bak"
 cp -a "$SB/state/services" "$SB/tmp/services.bak"
 XUI_TAG=v3.11.0
+XUI_TARBALL_URL="https://example.test/x-ui-linux.tar.gz"
 echo "== armv7: бинарь переименовывается в xray-linux-arm32 =="
 _xui_fetch_and_extract; echo "rc=$?"
 echo "--- bin ---"; ls "$SB/usr/local/x-ui/bin"
@@ -791,6 +1092,9 @@ _zap_domain_direct_code discord.com; echo
 curl(){ return 28; }
 echo "== s3: запрос не прошёл =="
 _zap_domain_direct_code discord.com; echo
+curl(){ printf "000"; return 7; }
+echo "== s4: провал с печатью 000 из write-out =="
+_zap_domain_direct_code discord.com; echo
 '
 CASES+=("zap_direct_code|-|${ZAP_DIRECT_CASE}")
 
@@ -838,6 +1142,933 @@ echo "== s6: 1.10 новее 1.9 =="
 _self_newer 1.10.0 1.9.0 && echo "rc=0" || echo "rc=1"
 '
 CASES+=("self_update|-|${SELF_UPD_CASE}")
+
+# - диагностика самообновления: причина словами и повторы запроса -
+SELF_NET_CASE='
+echo "== s1: DNS =="
+_self_http_hint 6 000 no
+echo "== s2: нет соединения =="
+_self_http_hint 7 000 yes
+echo "== s3: лимит GitHub =="
+_self_http_hint 0 403 yes
+echo "== s4: ошибка сервера =="
+_self_http_hint 0 502 yes
+echo "== s5: прочий код =="
+_self_http_hint 0 418 yes
+echo "== s6: повтор до успеха =="
+getent(){ return 0; }
+sleep(){ :; }
+calls="$SB/curl_calls"
+: > "$calls"
+curl(){
+    echo x >> "$calls"
+    if (( $(wc -l < "$calls") < 3 )); then
+        printf "{\"message\":\"busy\"}\n500"
+    else
+        printf "{\"tag_name\":\"v9.9.9\"}\n200"
+    fi
+}
+_self_fetch_release; echo "rc=$?"; echo "json=${_SELF_JSON}"; echo "calls=$(wc -l < "$calls")"
+echo "== s7: все попытки мимо =="
+: > "$calls"
+curl(){ echo x >> "$calls"; printf "{\"message\":\"rate\"}\n403"; }
+_self_fetch_release; echo "rc=$?"; echo "reason=${_SELF_FAIL_REASON}"; echo "calls=$(wc -l < "$calls")"
+rm -f "$calls"
+'
+CASES+=("self_net_hint|-|${SELF_NET_CASE}")
+
+# - быстрый выход: X в меню, остальные клавиши обычное поведение -
+EXIT_KEY_CASE='
+for k in x X 0 "" q; do
+    if _eli_is_exit_key "$k"; then
+        printf "%s=yes\n" "${k:-пусто}"
+    else
+        printf "%s=no\n" "${k:-пусто}"
+    fi
+done
+'
+CASES+=("exit_key|-|${EXIT_KEY_CASE}")
+
+# - загрузка ассета: успех, провал суммы с повтором, полный провал -
+FETCH_ASSET_CASE='
+TMPDIR="$SB/tmp"; mkdir -p "$TMPDIR"
+calls="$SB/fetch_calls"; : > "$calls"
+sha=$(printf "good\n" | sha256sum | cut -d" " -f1)
+curl(){
+    local out="" prev="" a url=""
+    for a in "$@"; do [[ "$prev" == "-o" ]] && out="$a"; prev="$a"; done
+    url="${!#}"
+    echo x >> "$calls"
+    case "$url" in
+        *a.tgz) printf "good\n" > "$out"; printf "200" ;;
+        *b.tgz)
+            if [[ -f "$SB/b_seen" ]]; then
+                printf "good\n" > "$out"; printf "200"
+            else
+                : > "$SB/b_seen"; printf "bad\n" > "$out"; printf "200"
+            fi ;;
+        *) printf "nope" > "$out"; printf "500" ;;
+    esac
+}
+sleep(){ :; }
+echo "== s1: без суммы =="
+if eli_fetch_asset "https://example.test/a.tgz" a.tgz; then echo "rc=0 content=$(cat "$ELI_ASSET_PATH")"; else echo "rc=$?"; fi
+echo "== s1b: сверку делает вызывающий =="
+if eli_fetch_asset "https://example.test/a.tgz" a.tgz -; then echo "rc=0 content=$(cat "$ELI_ASSET_PATH")"; else echo "rc=$?"; fi
+echo "== s2: сумма не сошлась, повтор =="
+if eli_fetch_asset "https://example.test/b.tgz" b.tgz "$sha"; then echo "rc=0 content=$(cat "$ELI_ASSET_PATH")"; else echo "rc=$?"; fi
+echo "== s3: все попытки мимо =="
+: > "$calls"
+eli_fetch_asset "https://example.test/c.tgz" c.tgz; echo "rc=$? path=${ELI_ASSET_PATH:-пусто}"
+echo "== s4: без URL =="
+eli_fetch_asset "" "x" 2>/dev/null; echo "rc=$?"
+rm -rf "$TMPDIR" "$calls"
+'
+CASES+=("fetch_asset|-|${FETCH_ASSET_CASE}")
+
+# - sha256 ассета из ответа API: digest по имени, отсутствие и пустой ответ -
+ASSET_SHA_CASE='
+api=$(printf "%s" "{\"assets\":[{\"name\":\"a.tgz\",\"digest\":\"sha256:aa11bb22\"},{\"name\":\"b.tgz\"}]}")
+echo "a: $(eli_github_asset_sha "$api" a.tgz)"
+echo "b: [$(eli_github_asset_sha "$api" b.tgz)]"
+echo "c: [$(eli_github_asset_sha "$api" c.tgz)]"
+echo "empty: [$(eli_github_asset_sha "" a.tgz)]"
+'
+CASES+=("asset_sha|-|${ASSET_SHA_CASE}")
+
+# - транзакции: фиксация, откат файла, удаление созданного -
+TXN_CASE='
+mkdir -p "$SB/tmp" "$SB/txn"
+f="$SB/txn/conf.txt"; printf "old\n" > "$f"
+echo "== commit =="
+eli_txn_begin "t.commit" >/dev/null; echo "begin rc=$?"
+eli_txn_backup_file "$f"; echo "backup rc=$?"
+printf "new\n" > "$f"
+eli_txn_expect "факт" true >/dev/null; echo "expect rc=$?"
+eli_txn_commit >/dev/null; echo "commit rc=$? content=$(cat "$f")"
+echo "== rollback по провалу =="
+eli_txn_begin "t.rollback" >/dev/null
+eli_txn_backup_file "$f"
+printf "changed\n" > "$f"
+eli_txn_expect "провал" false >/dev/null 2>&1; echo "expect rc=$?"
+eli_txn_commit >/dev/null 2>&1; echo "commit rc=$? content=$(cat "$f")"
+echo "== созданный файл удаляется =="
+eli_txn_begin "t.new" >/dev/null
+eli_txn_backup_file "$SB/txn/new.txt"
+printf "x\n" > "$SB/txn/new.txt"
+eli_txn_expect "провал" false >/dev/null 2>&1
+eli_txn_rollback >/dev/null 2>&1; echo "rollback rc=$? exists=$([[ -e "$SB/txn/new.txt" ]] && echo да || echo нет)"
+rm -rf "$SB/txn"
+'
+CASES+=("txn|-|${TXN_CASE}")
+
+# - контракты: виды строк и неизвестный модуль -
+CONTRACT_CASE='
+eli_contract_load xui; echo "xui unit: $(eli_contract_kind unit)"
+echo "xui backup строк: $(eli_contract_kind backup | wc -l)"
+echo "xui probe: $(eli_contract_kind probe | wc -l)"
+eli_contract_load ufw; echo "ufw config: $(eli_contract_kind config)"
+eli_contract_load awg; echo "awg unit строк: $(eli_contract_kind unit | wc -l)"
+book_read(){ case "$1" in
+    .teamspeak.installed) printf 'true' ;;
+    .teamspeak.voice_port) printf '9997' ;;
+    .teamspeak.ft_port) printf '30044' ;;
+    .teamspeak.db_path) printf '%s' "$SB/ts/tsserver.sqlitedb" ;;
+esac; }
+eli_contract_load teamspeak
+echo "ts present: $(eli_contract_present teamspeak && echo да || echo нет)"
+for k in artifact unit config backup probe; do
+    echo "ts ${k}:"; eli_contract_kind "$k"
+done
+echo "ts register:"; eli_backup_register teamspeak
+eli_contract_load nope; echo "unknown rc=$?"
+'
+CASES+=("contract|-|${CONTRACT_CASE}")
+
+# - контракт Mumble: порт из конфига, книга - запасной источник; наличие по пакету -
+CONTRACT_MUMBLE_CASE='
+mbl_conf(){ printf "%s" "$SB/etc/mumble-server.ini"; }
+book_read(){ case "$1" in .mumble.port) printf "64739" ;; esac; }
+echo "== конфиг есть =="
+eli_contract_load mumble
+for k in artifact config backup probe; do
+    echo "-- ${k} --"; eli_contract_kind "$k"
+done
+echo "== конфига нет: порт из книги =="
+mv "$SB/etc/mumble-server.ini" "$SB/tmp/mbl.ini"
+eli_contract_load mumble
+eli_contract_kind probe
+mv "$SB/tmp/mbl.ini" "$SB/etc/mumble-server.ini"
+echo "== наличие =="
+MBL_FAKE=0
+mbl_installed(){ (( MBL_FAKE )); }
+if eli_contract_present mumble; then echo "нет пакета: да"; else echo "нет пакета: нет"; fi
+MBL_FAKE=1
+if eli_contract_present mumble; then echo "есть пакет: да"; else echo "есть пакет: нет"; fi
+'
+CASES+=("contract_mumble|-|${CONTRACT_MUMBLE_CASE}")
+
+# - контракт Outline: пробы портов добавляются только для известных значений -
+CONTRACT_OUTLINE_CASE='
+book_read(){ case "$1" in
+    .outline.installed) printf "true" ;;
+    .outline.mgmt_port) printf "5555" ;;
+    .outline.keys_port) printf "6666" ;;
+esac; }
+eli_contract_load outline
+echo "outline present: $(eli_contract_present outline && echo да || echo нет)"
+for k in artifact config backup probe; do
+    echo "-- ${k} --"; eli_contract_kind "$k"
+done
+book_read(){ case "$1" in
+    .outline.mgmt_port) printf "" ;;
+    .outline.keys_port) printf "0" ;;
+esac; }
+eli_contract_load outline
+echo "== без портов =="
+eli_contract_kind probe
+'
+CASES+=("contract_outline|-|${CONTRACT_OUTLINE_CASE}")
+
+# - контракты MTProto и SOCKS5: состав по env-файлам инстансов -
+# - файлы создаются в кейсе: предыдущие кейсы убирают фикстуры /etc/mtproto -
+CONTRACT_PROXY_CASE='
+mkdir -p "$SB/etc/mtproto" "$SB/etc/socks5"
+printf "SERVER_IP=\"203.0.113.9\"\nPORT=\"8443\"\nCONTAINER=\"mtg-1\"\n" > "$SB/etc/mtproto/instance_1.env"
+printf "secret = \"x\"\nbind-to = \"0.0.0.0:3128\"\n" > "$SB/etc/mtproto/config_1.toml"
+printf "SERVER_IP=\"203.0.113.9\"\nPORT=\"8444\"\nCONTAINER=\"mtg-2\"\n" > "$SB/etc/mtproto/instance_2.env"
+printf "secret = \"y\"\nbind-to = \"0.0.0.0:3128\"\n" > "$SB/etc/mtproto/config_2.toml"
+printf "SERVER_IP=\"203.0.113.9\"\nPORT=\"1080\"\nCONTAINER=\"socks5-1\"\n" > "$SB/etc/socks5/instance_1.env"
+printf "SERVER_IP=\"203.0.113.9\"\nPORT=\"1081\"\nCONTAINER=\"socks5-2\"\n" > "$SB/etc/socks5/instance_2.env"
+book_read(){ case "$1" in
+    .mtproto.installed) printf "true" ;;
+    .socks5.installed) printf "true" ;;
+esac; }
+echo "== mtproto =="
+eli_contract_load mtproto
+for k in artifact backup probe; do
+    echo "-- ${k} --"; eli_contract_kind "$k"
+done
+echo "present: $(eli_contract_present mtproto && echo да || echo нет)"
+echo "== socks5 =="
+eli_contract_load socks5
+for k in artifact backup probe; do
+    echo "-- ${k} --"; eli_contract_kind "$k"
+done
+echo "present: $(eli_contract_present socks5 && echo да || echo нет)"
+'
+CASES+=("contract_proxy|-|${CONTRACT_PROXY_CASE}")
+
+# - контракт Hysteria 2: состав инстанса и его юнит -
+CONTRACT_HY2_CASE='
+mkdir -p "$SB/etc/hysteria/instance_1" "$SB/etc/hysteria/instance_2"
+printf "SERVER_IP=\"203.0.113.9\"\nPORT=\"443\"\nVERSION=\"v2.6.0\"\n" > "$SB/etc/hysteria/instance_1/hysteria.env"
+printf "SERVER_IP=\"203.0.113.9\"\nPORT=\"8443\"\nVERSION=\"v2.6.0\"\n" > "$SB/etc/hysteria/instance_2/hysteria.env"
+book_read(){ case "$1" in .hysteria2.installed) printf "true" ;; esac; }
+eli_contract_load hysteria2
+for k in artifact unit config backup probe; do
+    echo "-- ${k} --"; eli_contract_kind "$k"
+done
+echo "present: $(eli_contract_present hysteria2 && echo да || echo нет)"
+'
+CASES+=("contract_hysteria|-|${CONTRACT_HY2_CASE}")
+
+# - контракт zapret2: состав по привязанным интерфейсам, движок и его lua -
+CONTRACT_ZAPRET_CASE='
+mkdir -p "$SB/opt/zapret2/lua" "$SB/opt/zapret2/eli"
+: > "$SB/opt/zapret2/lua/zapret-lib.lua"
+: > "$SB/opt/zapret2/lua/zapret-antidpi.lua"
+for iface in awg0 awg1; do
+    printf "youtube.com\n" > "$SB/opt/zapret2/eli/${iface}.hosts"
+    printf "table inet zeli_%s {}\n" "$iface" > "$SB/etc/vps-eli-stack/zapret2/${iface}.nft"
+    printf "[Unit]\n" > "$SB/etc/systemd/system/zeli-nft-${iface}.service"
+done
+printf "[Unit]\n" > "$SB/etc/systemd/system/zapret2-eli@.service"
+eli_contract_load zapret2
+for k in artifact unit config backup probe; do
+    echo "-- ${k} --"; eli_contract_kind "$k"
+done
+echo "present: $(eli_contract_present zapret2 && echo да || echo нет)"
+rm -f "$SB/opt/zapret2/lua/zapret-lib.lua" "$SB/opt/zapret2/lua/zapret-antidpi.lua" \
+    "$SB/opt/zapret2/eli/awg0.hosts" "$SB/opt/zapret2/eli/awg1.hosts" \
+    "$SB/etc/vps-eli-stack/zapret2/awg0.nft" "$SB/etc/vps-eli-stack/zapret2/awg1.nft" \
+    "$SB/etc/systemd/system/zapret2-eli@.service" \
+    "$SB/etc/systemd/system/zeli-nft-awg0.service" "$SB/etc/systemd/system/zeli-nft-awg1.service"
+'
+CASES+=("contract_zapret|-|${CONTRACT_ZAPRET_CASE}")
+
+# - контракт wgobfs: движок, шаблон юнита, инстансы привязанных интерфейсов; -
+# - порт инстанса берётся из конфига, при его отсутствии - из книги; awg-мок -
+# - держит привязанные интерфейсы живыми, иначе юниты не попадают в контракт -
+CONTRACT_WGOBFS_CASE='
+awg(){ case "$*" in *"show interfaces"*) printf "awg0\nawg1\n";; esac; return 0; }
+eli_contract_load wgobfs
+for k in artifact unit config backup probe; do
+    echo "-- ${k} --"; eli_contract_kind "$k"
+done
+echo "present: $(eli_contract_present wgobfs && echo да || echo нет)"
+printf "[test0]\nsource-lport = 40123\n" > "$SB/etc/vps-eli-stack/wgobfs/test0.conf"
+echo "== порт из конфига =="
+eli_contract_load wgobfs
+eli_contract_kind probe | grep -E "test0|40123"
+rm -f "$SB/etc/vps-eli-stack/wgobfs/test0.conf"
+'
+CASES+=("contract_wgobfs|-|${CONTRACT_WGOBFS_CASE}")
+
+# - контракт mimic: движок, шаблон юнита и общий конфиг WAN -
+CONTRACT_MIMIC_CASE='
+eli_contract_load mimic
+for k in artifact unit config backup probe; do
+    echo "-- ${k} --"; eli_contract_kind "$k"
+done
+echo "present: $(eli_contract_present mimic && echo да || echo нет)"
+'
+CASES+=("contract_mimic|-|${CONTRACT_MIMIC_CASE}")
+
+# - сверка контракта: недостающий артефакт и провальная проба считаются -
+RECONCILE_CASE='
+mkdir -p "$SB/txn"
+: > "$SB/txn/есть.txt"
+eli_contract_load(){
+    ELI_CONTRACT_MOD="$1"
+    ELI_CONTRACT=(
+        "artifact:$SB/txn/есть.txt"
+        "artifact:$SB/txn/нет.txt"
+        "probe:cmd:true"
+        "probe:cmd:false"
+    )
+    return 0
+}
+echo "== check =="
+eli_reconcile fake; echo "rc=$?"
+echo "== fix: неактивный юнит поднимается =="
+svc_active=0
+mkdir -p "$SB/bin"; : > "$SB/bin/demo-bin"
+eli_contract_load(){ ELI_CONTRACT_MOD="$1"; ELI_CONTRACT=("unit:demo"); return 0; }
+systemctl(){ case "$1" in cat) echo "ExecStart=$SB/bin/demo-bin";; start) svc_active=1;; esac; return 0; }
+eli_fact_unit(){ (( svc_active )); }
+eli_reconcile fake fix; echo "rc=$? changed=$ELI_RECONCILE_CHANGED"
+echo "== неизвестный модуль =="
+unset -f eli_contract_load
+eli_reconcile nope 2>/dev/null; echo "rc=$?"
+rm -rf "$SB/txn"
+'
+CASES+=("reconcile|-|${RECONCILE_CASE}")
+
+# - сверка после подъёма юнита: проба порта ждёт, пока служба начнёт слушать; -
+# - снимок сразу за стартом даёт ложную проблему, а молчащий до конца срока -
+# - порт остаётся провалом; без подъёма юнита проба идёт один раз -
+RECONCILE_WAIT_CASE='
+mkdir -p "$SB/txn"
+eli_contract_load(){ ELI_CONTRACT_MOD="$1"; ELI_CONTRACT=("unit:demo" "probe:port:tcp:9999"); return 0; }
+svc_active=0
+SCEN="wait"
+mkdir -p "$SB/bin"; : > "$SB/bin/demo-bin"
+systemctl(){ case "$1" in cat) echo "ExecStart=$SB/bin/demo-bin";; start) svc_active=1;; esac; return 0; }
+eli_fact_unit(){ (( svc_active )); }
+sleep(){ :; }
+ss(){
+    local n
+    n=$(( $(cat "$SB/tmp/ss_calls" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$SB/tmp/ss_calls"
+    case "$SCEN" in
+        wait)  (( n >= 3 )) && echo "LISTEN 0 4096 *:9999 *:*" ;;
+        never) echo "LISTEN 0 4096 *:22 *:*" ;;
+    esac
+    return 0
+}
+echo "== починка: юнит поднят, порт слушает не сразу =="
+eli_reconcile fake fix; echo "rc=$? changed=$ELI_RECONCILE_CHANGED"
+echo "опросов порта: $(cat "$SB/tmp/ss_calls")"
+echo "== починка: порт не поднялся вовсе =="
+rm -f "$SB/tmp/ss_calls"; SCEN="never"; svc_active=0
+eli_reconcile fake fix; echo "rc=$?"
+echo "опросов порта: $(cat "$SB/tmp/ss_calls")"
+echo "== check активного юнита: снимок без ожидания =="
+rm -f "$SB/tmp/ss_calls"; svc_active=1
+eli_reconcile fake; echo "rc=$?"
+echo "опросов порта: $(cat "$SB/tmp/ss_calls")"
+rm -rf "$SB/txn" "$SB/tmp/ss_calls"
+'
+CASES+=("reconcile_wait|-|${RECONCILE_WAIT_CASE}")
+
+# - юнит без бинаря из ExecStart не поднимается починкой: это остаток restore -
+# - у удалённого компонента, старт дал бы вечный рестарт-цикл; юнит с живым -
+# - бинарем поднимается как раньше -
+RECONCILE_GHOST_CASE='
+mkdir -p "$SB/txn" "$SB/usr/bin"
+touch "$SB/usr/bin/live-bin-267"
+eli_contract_load(){ ELI_CONTRACT_MOD="$1"; ELI_CONTRACT=("unit:ghost-267" "unit:live-267"); return 0; }
+svc_active=""
+systemctl(){
+    case "$1" in
+        cat)
+            if [[ "$2" == ghost-267 ]]; then
+                echo "ExecStart=$SB/usr/bin/no-such-bin-267 -c x"
+            else
+                echo "ExecStart=$SB/usr/bin/live-bin-267 -c x"
+            fi ;;
+        start) svc_active="$2" ;;
+    esac
+    return 0
+}
+eli_fact_unit(){ [[ "$svc_active" == "$1" ]]; }
+eli_reconcile fake fix; echo "rc=$? changed=$ELI_RECONCILE_CHANGED"
+echo "active: ${svc_active:-никто}"
+rm -rf "$SB/txn" "$SB/usr/bin"
+'
+CASES+=("reconcile_ghost|-|${RECONCILE_GHOST_CASE}")
+
+# - контракт wgobfs содержит юниты только живых интерфейсов: конфиг без -
+# - интерфейса - остаток restore у удалённой привязки, подъём дал бы -
+# - обфускатор впустую -
+WGO_CONTRACT_LIVE_CASE='
+mkdir -p "$SB/etc/vps-eli-stack/wgobfs"
+echo "source-lport = 33333" > "$SB/etc/vps-eli-stack/wgobfs/awg8.conf"
+echo "source-lport = 34444" > "$SB/etc/vps-eli-stack/wgobfs/awg9.conf"
+awg(){ case "$*" in *"show interfaces"*) printf "awg8\n";; esac; return 0; }
+eli_contract_load wgobfs
+printf "%s\n" "${ELI_CONTRACT[@]}" | grep -a "unit:"
+'
+CASES+=("wgo_contract_live|-|${WGO_CONTRACT_LIVE_CASE}")
+
+# - Prayer сверяет контракты через reconcile с починкой и пишет счётчики -
+PRAYER_CONTRACT_CASE='
+mkdir -p "$SB/tmp"
+calls="$SB/tmp/pc_calls"; : > "$calls"
+eli_contract_present(){ [[ "$1" == xui || "$1" == teamspeak || "$1" == mumble || "$1" == outline || "$1" == mtproto || "$1" == socks5 || "$1" == hysteria2 || "$1" == zapret2 || "$1" == wgobfs || "$1" == mimic ]]; }
+eli_reconcile(){
+    echo "reconcile $1 $2" >> "$calls"
+    ELI_RECONCILE_CHANGED=2
+    return 1
+}
+_PR_FIXED=(); _PR_WARN=()
+_pr_contract_phase
+echo "--- вызовы ---"; cat "$calls"
+echo "fixed: ${_PR_FIXED[*]}"
+echo "warn: ${_PR_WARN[*]}"
+rm -f "$calls"
+'
+CASES+=("prayer_contract|-|${PRAYER_CONTRACT_CASE}")
+
+# - коррекция Prayer у модуля без движка: конфиги привязок вернулись restore-ом -
+# - и потому пережили призрачный цикл; записи привязок обязаны сниматься, -
+# - иначе свежая установка отказывает в привязке по устаревшей книге -
+D264_CASE='
+_pr_contract_phase(){ :; }
+eli_pause(){ :; }
+modprobe(){ :; }
+mkdir -p "$SB/tmp/d264"
+cp -a "$SB/etc/vps-eli-stack/book_of_Eli.json" "$SB/tmp/d264/book.bak"
+cp -a "$SB/opt/zapret2/nfq2/nfqws2" "$SB/opt/wg-obfuscator/wg-obfuscator" "$SB/usr/sbin/mimic" "$SB/tmp/d264/"
+rm -f "$SB/opt/zapret2/nfq2/nfqws2" "$SB/opt/wg-obfuscator/wg-obfuscator" "$SB/usr/sbin/mimic"
+# - сценарий задаёт метки установки сам: песочница общая, прошлые кейсы -
+# - записи могли оставить в книге свои значения -
+book_write ".zapret.installed" "true" bool
+book_write ".wgobfs.installed" "true" bool
+book_write ".mimic.installed" "true" bool
+echo "== книга до коррекции =="
+for p in .zapret.installed .zapret.interfaces.awg0.bound .zapret.interfaces.awg1.bound .wgobfs.installed .wgobfs.instances.awg0.lport .wgobfs.instances.awg1.lport .mimic.installed .mimic.instances.awg0.port; do
+    printf "%s=[%s]\n" "$p" "$(book_read "$p")"
+done
+prayer_run >/dev/null 2>&1
+echo "== книга после коррекции =="
+for p in .zapret.installed .zapret.interfaces.awg0 .zapret.interfaces.awg1 .zapret.autoupdate_enabled .wgobfs.installed .wgobfs.instances.awg0 .wgobfs.instances.awg1 .mimic.installed .mimic.instances.awg0 .mimic.wan_iface; do
+    printf "%s=[%s]\n" "$p" "$(book_read "$p")"
+done
+mv -f "$SB/tmp/d264/nfqws2" "$SB/opt/zapret2/nfq2/nfqws2"
+mv -f "$SB/tmp/d264/wg-obfuscator" "$SB/opt/wg-obfuscator/wg-obfuscator"
+mv -f "$SB/tmp/d264/mimic" "$SB/usr/sbin/mimic"
+mv -f "$SB/tmp/d264/book.bak" "$SB/etc/vps-eli-stack/book_of_Eli.json"
+rm -rf "$SB/tmp/d264"
+: > "$SB/calls.log"
+'
+CASES+=("prayer_d264|jq,write|${D264_CASE}")
+
+# - реестр бэкапа: единый список модулей, пути из контрактов и неизвестный модуль -
+BACKUP_REG_CASE='
+echo "modules:"; eli_backup_modules
+echo "xui:"; eli_backup_register xui
+echo "awg:"; eli_backup_register awg
+echo "ufw:"; eli_backup_register ufw
+echo "unknown:"; eli_backup_register nope; echo "rc=$?"
+'
+CASES+=("backup_register|-|${BACKUP_REG_CASE}")
+
+# - сохранение доступа при восстановлении: drop-in с портами и правила UFW -
+KEEP_SSH_CASE='
+_rst_keep_ssh_access "2222 2200"; echo rc=$?
+echo "--- drop-in ---"
+cat "$SB/etc/ssh/sshd_config.d/99-eli-keep-port.conf"
+_rst_keep_ssh_access ""; echo "empty rc=$?"
+true
+'
+CASES+=("keep_ssh|write|${KEEP_SSH_CASE}")
+
+# - провал sshd -t после записи drop-in: файл снимается, прежний возвращается -
+KEEP_SSH_FAIL_CASE='
+mkdir -p "$SB/etc/ssh/sshd_config.d"
+conf="$SB/etc/ssh/sshd_config.d/99-eli-keep-port.conf"
+printf "Port 22\n" > "$conf"
+sshd(){ return 1; }
+_rst_apply_keep_ports "2222"; echo "rc(провал, прежний файл)=$?"
+echo "--- файл ---"; cat "$conf"
+rm -f "$conf"
+_rst_apply_keep_ports "2222"; echo "rc(провал, файла не было)=$?"
+if [[ -f "$conf" ]]; then echo "файл остался"; else echo "файл снят"; fi
+sshd(){ return 0; }
+_rst_apply_keep_ports "2222 2200"; echo "rc(успех)=$?"
+echo "--- drop-in ---"; cat "$conf"
+rm -rf "$SB/etc/ssh/sshd_config.d"
+'
+CASES+=("keep_ssh_fail|write|${KEEP_SSH_FAIL_CASE}")
+
+# - реестр бэкапа: каталог возвращается содержимым, а не вложенной копией -
+REGISTRY_RESTORE_CASE='
+mkdir -p "$SB/rr/registry/xui__etc_3xui" "$SB/rr/etc/3xui" "$SB/rr/etc/mtproto"
+printf "env\n" > "$SB/rr/registry/xui__etc_3xui/3xui.env"
+printf "старый\n" > "$SB/rr/etc/3xui/old.txt"
+printf "cfg\n" > "$SB/rr/registry/mtp__etc_mtproto_config.toml"
+printf "%s\t%s\n" "$SB/rr/etc/3xui" "registry/xui__etc_3xui" > "$SB/rr/files.tsv"
+printf "%s\t%s\n" "$SB/rr/etc/mtproto/config.toml" "registry/mtp__etc_mtproto_config.toml" >> "$SB/rr/files.tsv"
+RST_REG_OK=0; RST_REG_FAIL=0
+_rst_registry_restore "$SB/rr" "$SB/rr/files.tsv"
+echo "ok=${RST_REG_OK} fail=${RST_REG_FAIL}"
+echo "--- /etc/3xui ---"; ls "$SB/rr/etc/3xui" | sort
+echo "--- вложенный ---"
+if [[ -d "$SB/rr/etc/3xui/xui__etc_3xui" ]]; then echo "есть"; else echo "нет"; fi
+echo "--- файл ---"; cat "$SB/rr/etc/mtproto/config.toml"
+rm -rf "$SB/rr"
+'
+CASES+=("registry_restore|write|${REGISTRY_RESTORE_CASE}")
+
+# - реестр перед восстановлением: служба гасится, только если её путь есть -
+# - в манифесте; провал остановки отменяет возврат, чужие пути не трогаются -
+REGISTRY_STOP_CASE='
+mkdir -p "$SB/tmp/reg"
+reg="$SB/tmp/reg/files.tsv"
+printf "%s\t%s\n" "$SB/etc/x-ui/x-ui.db" "registry/xui" > "$reg"
+printf "%s\t%s\n" "$SB/etc/teamspeak/teamspeak.env" "registry/ts" >> "$reg"
+cp -a "$SB/state/services" "$SB/tmp/services.rs_bak"
+systemctl(){
+    local a="$1"; shift
+    local u="${@: -1}"
+    case "$a" in
+        is-active) grep -qx "${u}=active" "$SB/state/services" ;;
+        stop) sed -i "s|^${u}=.*|${u}=inactive|" "$SB/state/services"; echo "stop ${u}" >> "$SB/tmp/reg/calls" ;;
+        start) sed -i "s|^${u}=.*|${u}=active|" "$SB/state/services"; echo "start ${u}" >> "$SB/tmp/reg/calls" ;;
+        *) return 1 ;;
+    esac
+}
+eli_fact_unit(){ local u="$1" want="${3:-active}"; if [[ "$want" == "active" ]]; then systemctl is-active --quiet "$u"; else ! systemctl is-active --quiet "$u"; fi; }
+sed -i "s/^x-ui=.*/x-ui=active/; s/^teamspeak=.*/teamspeak=inactive/" "$SB/state/services"
+echo "== манифест с x-ui и teamspeak =="
+_rst_stop_for_registry "$reg"; echo "rc=$? stopped=${RST_REG_STOPPED[*]}"
+echo "== возврат служб =="
+_rst_resume_registry_services; echo "rc=$? stopped=${RST_REG_STOPPED[*]:-нет}"
+echo "== провал остановки =="
+cp -a "$SB/tmp/services.rs_bak" "$SB/state/services"
+sed -i "s/^x-ui=.*/x-ui=active/; s/^teamspeak=.*/teamspeak=inactive/" "$SB/state/services"
+eli_fact_unit(){ return 1; }
+_rst_stop_for_registry "$reg"; echo "rc=$? stopped=${#RST_REG_STOPPED[@]}"
+echo "== чужие пути =="
+printf "%s\t%s\n" "$SB/etc/ssh/sshd_config" "registry/s" > "$reg"
+RST_REG_STOPPED=()
+_rst_stop_for_registry "$reg"; echo "rc=$? stopped=${#RST_REG_STOPPED[@]}"
+echo "--- вызовы ---"; cat "$SB/tmp/reg/calls"
+cp -a "$SB/tmp/services.rs_bak" "$SB/state/services"
+rm -rf "$SB/tmp/reg" "$SB/tmp/services.rs_bak"
+'
+CASES+=("registry_stop|-|${REGISTRY_STOP_CASE}")
+
+# - юнит с отсутствующим ExecStart: хелпер различает живой и мёртвый путь -
+RST_EXEC_CASE='
+mkdir -p "$SB/etc/systemd/system"
+printf "[Service]\nExecStart=/bin/sh -c true\n" > "$SB/etc/systemd/system/ok.service"
+printf "[Service]\nExecStart=/nonexistent/engine serve\n" > "$SB/etc/systemd/system/bad.service"
+if _rst_unit_exec_missing "$SB/etc/systemd/system/ok.service"; then echo "ok: пропуск"; else echo "ok: живой"; fi
+if _rst_unit_exec_missing "$SB/etc/systemd/system/bad.service"; then echo "bad: пропуск"; else echo "bad: живой"; fi
+if _rst_unit_exec_missing "$SB/etc/systemd/system/none.service"; then echo "none: пропуск"; else echo "none: живой"; fi
+rm -rf "$SB/etc/systemd/system/ok.service" "$SB/etc/systemd/system/bad.service"
+'
+CASES+=("rst_exec_missing|-|${RST_EXEC_CASE}")
+
+# - порт за DROP: правило INPUT перекрывает разрешение UFW -
+DROP_CHECK_CASE='
+iptables(){ printf -- "-A INPUT -p udp -m udp --dport 40050 -j DROP\n"; }
+if eli_port_dropped 40050; then echo "drop: да"; else echo "drop: нет"; fi
+iptables(){ printf -- "-A INPUT -p udp -m udp --dport 40050 -j ACCEPT\n"; }
+if eli_port_dropped 40050; then echo "accept: да"; else echo "accept: нет"; fi
+iptables(){ printf -- "-A INPUT -p udp -m udp --dport 40051 -j DROP\n"; }
+if eli_port_dropped 40050; then echo "другой порт: да"; else echo "другой порт: нет"; fi
+if eli_port_dropped ""; then echo "пусто: да"; else echo "пусто: нет"; fi
+'
+CASES+=("drop_check|-|${DROP_CHECK_CASE}")
+
+# - наличие модуля для сверки контрактов: книга, живые интерфейсы, бинарь -
+CONTRACT_PRESENT_CASE='
+book_read(){ case "$1" in .3xui.installed) printf "%s" "${XUI_INST:-}" ;; .teamspeak.installed) printf "%s" "${TS_INST:-}" ;; esac; }
+awg(){ printf "%s" "${AWG_OUT:-}"; }
+XUI_INST=""; TS_INST=""; AWG_OUT=""
+for m in xui awg ufw teamspeak; do
+    if eli_contract_present "$m"; then echo "$m: да"; else echo "$m: нет"; fi
+done
+XUI_INST=true
+if eli_contract_present xui; then echo "xui true: да"; else echo "xui true: нет"; fi
+TS_INST=true
+if eli_contract_present teamspeak; then echo "teamspeak true: да"; else echo "teamspeak true: нет"; fi
+AWG_OUT=awg0
+if eli_contract_present awg; then echo "awg живой: да"; else echo "awg живой: нет"; fi
+mkdir -p "$SB/tmp/empty"
+OLDPATH="$PATH"; PATH="$SB/tmp/empty"
+ufw(){ :; }
+if eli_contract_present ufw; then echo "ufw с бинарём: да"; else echo "ufw с бинарём: нет"; fi
+unset -f ufw
+if eli_contract_present ufw; then echo "ufw без бинаря: да"; else echo "ufw без бинаря: нет"; fi
+PATH="$OLDPATH"; rm -rf "$SB/tmp/empty"
+'
+CASES+=("contract_present|write|${CONTRACT_PRESENT_CASE}")
+
+# - юнит службы: запись и запуск, откат нового юнита при провале старта -
+SVC_APPLY_CASE='
+echo "== успех =="
+eli_service_apply "x-ui" "[Unit]
+Description=test" yes; echo "rc=$?"
+echo "файл: $(head -2 "$SB/etc/systemd/system/x-ui.service" | tr "\n" " ")"
+echo "active: $(systemctl is-active x-ui)"
+echo "== провал: юнита нет в состоянии, старт не подтвердится =="
+eli_service_apply "ghost-unit" "[Unit]
+Description=bad" yes; echo "rc=$?"
+if [[ -f "$SB/etc/systemd/system/ghost-unit.service" ]]; then echo "файл остался"; else echo "файл убран"; fi
+echo "== откат прежнего файла =="
+mkdir -p "$SB/etc/systemd/system"
+printf "[Unit]\nDescription=старый\n" > "$SB/etc/systemd/system/ghost-unit.service"
+eli_service_apply "ghost-unit" "[Unit]
+Description=новый" yes; echo "rc=$?"
+echo "после отката: $(sed -n 2p "$SB/etc/systemd/system/ghost-unit.service")"
+rm -f "$SB/etc/systemd/system/ghost-unit.service"
+'
+CASES+=("svc_apply|write|${SVC_APPLY_CASE}")
+
+# - откат юнита: прежняя служба поднимается обратно после провала новой -
+SVC_ROLLBACK_CASE='
+mkdir -p "$SB/etc/systemd/system" "$SB/tmp"
+svc_state="$SB/tmp/svc_state"; echo "demo=active" > "$svc_state"
+: > "$SB/tmp/svc_calls"
+systemctl(){
+    local verb="$1" u="" a
+    for a in "${@:2}"; do [[ "$a" == -* ]] && continue; u="$a"; break; done
+    case "$verb" in
+        is-active) grep -q "^${u}=active$" "$svc_state" ;;
+        restart) echo "restart ${u}" >> "$SB/tmp/svc_calls"; sed -i "s/^${u}=.*/${u}=failed/" "$svc_state" 2>/dev/null; return 0 ;;
+        start)   echo "start ${u}" >> "$SB/tmp/svc_calls"; sed -i "s/^${u}=.*/${u}=active/" "$svc_state" 2>/dev/null; return 0 ;;
+        *) return 0 ;;
+    esac
+}
+eli_fact_unit(){ grep -q "^${1}=active$" "$svc_state"; }
+printf "[Unit]\nDescription=старый\n" > "$SB/etc/systemd/system/demo.service"
+eli_service_apply demo "[Unit]
+Description=новый" yes; echo "rc=$?"
+echo "--- файл ---"; sed -n 2p "$SB/etc/systemd/system/demo.service"
+echo "--- состояние ---"; cat "$svc_state"
+echo "--- вызовы ---"; cat "$SB/tmp/svc_calls"
+echo "--- новый юнит без файла ---"
+eli_service_apply ghost "[Unit]
+Description=ghost" yes; echo "rc=$?"
+if [[ -f "$SB/etc/systemd/system/ghost.service" ]]; then echo "ghost: остался"; else echo "ghost: убран"; fi
+rm -rf "$SB/etc/systemd/system/demo.service" "$SB/etc/systemd/system/ghost.service" "$SB/tmp/svc_state" "$SB/tmp/svc_calls"
+'
+CASES+=("svc_apply_rollback|write|${SVC_ROLLBACK_CASE}")
+
+# - запуск готового юнита: успех и неудержавшийся инстанс с хвостом журнала -
+SVC_START_CASE='
+sst="$SB/tmp/svc_start_state"
+systemctl(){
+    local verb="$1"; shift
+    local unit="" a
+    for a in "$@"; do [[ "$a" == -* ]] && continue; unit="$a"; done
+    case "$verb" in
+        show) sed -n "s/^sub_${unit}=//p" "$sst" ;;
+        is-active) [[ "$(sed -n "s/^st_${unit}=//p" "$sst")" == "active" ]] ;;
+        enable|restart) echo "$verb ${unit}" >> "$SB/tmp/svc_start_calls"; return 0 ;;
+        *) return 0 ;;
+    esac
+}
+journalctl(){ echo "journal: конфиг не разобран"; }
+printf "sub_web=running\nst_web=active\n" > "$sst"
+echo "== успех =="
+eli_service_start web; echo "rc=$?"
+printf "sub_bad=failed\nst_bad=active\n" > "$sst"
+echo "== не удержался =="
+eli_service_start bad 2; echo "rc=$?"
+echo "--- вызовы ---"; cat "$SB/tmp/svc_start_calls"
+rm -f "$sst" "$SB/tmp/svc_start_calls"
+'
+CASES+=("svc_start|write|${SVC_START_CASE}")
+
+# - юнит TeamSpeak: рендер содержимого с путями установки и портами -
+TS_UNIT_CASE='
+_ts_unit_content 9987 30033
+'
+CASES+=("ts_unit|-|${TS_UNIT_CASE}")
+
+# - restic: вид репозитория по схеме и запись env с правами 600 -
+RESTIC_CASE='
+for repo in /mnt/disk/restic sftp:backup@host:/srv/eli s3:s3.amazonaws.com/bkt b2:bkt:eli rest:http://host:8000 rclone:remote:path "C:/x" ""; do
+    printf "%s -> %s\n" "${repo:-пусто}" "$(_restic_repo_kind "$repo")"
+done
+_restic_write_env "sftp:backup@host:/srv/eli" "pass word \$x"; echo "write rc=$?"
+cat "$SB/etc/restic/env"
+echo "read repo: $(eli_source_env "$SB/etc/restic/env" RESTIC_REPOSITORY)"
+echo "read pass: $(eli_source_env "$SB/etc/restic/env" RESTIC_PASSWORD)"
+_restic_write_env "" "x" 2>/dev/null; echo "empty rc=$?"
+rm -rf "$SB/etc/restic"
+'
+CASES+=("restic|write|${RESTIC_CASE}")
+
+# - локальный каталог Restic: создание и проверка записи -
+RESTIC_LOCAL_CASE='
+mkdir -p "$SB/tmp"
+if _restic_prepare_local "$SB/tmp/restic-repo"; then echo "создан: да"; else echo "создан: нет"; fi
+[[ -d "$SB/tmp/restic-repo" ]] && echo "каталог: есть"
+: > "$SB/tmp/notadir"
+if _restic_prepare_local "$SB/tmp/notadir/sub"; then echo "под файлом: да"; else echo "под файлом: нет"; fi
+if _restic_prepare_local ""; then echo "пусто: да"; else echo "пусто: нет"; fi
+rm -rf "$SB/tmp/restic-repo" "$SB/tmp/notadir"
+'
+CASES+=("restic_local|write|${RESTIC_LOCAL_CASE}")
+
+# - показ пароля Restic: репозиторий и пароль из env -
+RESTIC_SHOW_CASE='
+_restic_write_env "sftp:backup@host:/repo" "my-secret-pass"; echo "write rc=$?"
+restic_show_password
+rm -rf "$SB/etc/restic"
+'
+CASES+=("restic_show|write|${RESTIC_SHOW_CASE}")
+
+# - провал init: временный env с паролем не остаётся на диске -
+RESTIC_FAIL_CASE='
+mkdir -p "$SB/bin" "$SB/tmp"
+cat > "$SB/bin/restic" <<"X"
+#!/bin/sh
+case "$1" in
+    init) echo "Fatal: config file already exists" >&2; exit 1 ;;
+    snapshots) exit 1 ;;
+esac
+exit 0
+X
+chmod +x "$SB/bin/restic"
+RESTIC_BIN="$SB/bin/restic"
+restic_installed(){ return 0; }
+rand_str(){ printf 'FixedPass0000000000000000'; }
+ask_raw(){ printf -v "$2" "%s" "1"; }
+ask(){ printf -v "$3" "%s" "$SB/tmp/restic-repo"; }
+restic_setup; echo "rc=$?"
+if [[ -f "$SB/etc/restic/env.new" ]]; then echo "env.new: остался"; else echo "env.new: убран"; fi
+rm -rf "$SB/etc/restic" "$SB/tmp/restic-repo"
+'
+CASES+=("restic_fail|write|${RESTIC_FAIL_CASE}")
+
+# - состав снапшота: контракты модулей, конфиги и базы голосовых, drop-in SSH; -
+# - путь базы TeamSpeak в книге фиксируется: предыдущие кейсы могли записать -
+# - путь песочницы, а эталон не должен зависеть от порядка прогонов -
+RESTIC_PATHS_CASE='
+mkdir -p "$SB/etc/ssh/sshd_config.d" "$SB/opt/teamspeak" "$SB/var/lib/mumble-server"
+printf "x\n" > "$SB/etc/ssh/sshd_config.d/00-eli.conf"
+printf "x\n" > "$SB/etc/mumble-server.ini"
+printf "x\n" > "$SB/opt/teamspeak/ts.sqlitedb"
+printf "x\n" > "$SB/var/lib/mumble-server/mumble-server.sqlite"
+cp -a "$_BOOK" "$SB/tmp/book.rp"
+sed -i "s|\"db_path\": *\"[^\"]*\"|\"db_path\": \"/opt/teamspeak/tsserver.sqlitedb\"|" "$_BOOK"
+_restic_paths | sort
+cp -a "$SB/tmp/book.rp" "$_BOOK"
+rm -f "$SB/tmp/book.rp"
+rm -rf "$SB/etc/ssh/sshd_config.d" "$SB/etc/mumble-server.ini" "$SB/opt/teamspeak" "$SB/var/lib/mumble-server"
+'
+CASES+=("restic_paths|jq,write|${RESTIC_PATHS_CASE}")
+
+# - снапшот при остановленных службах: база не копируется горячей -
+RESTIC_SERVICES_CASE='
+mkdir -p "$SB/bin" "$SB/etc/x-ui" "$SB/etc/restic" "$SB/tmp"
+printf "db\n" > "$SB/etc/x-ui/x-ui.db"
+printf "RESTIC_REPOSITORY=/tmp/repo\nRESTIC_PASSWORD=p\n" > "$SB/etc/restic/env"
+: > "$SB/tmp/rids"
+cat > "$SB/bin/restic" <<"X"
+#!/bin/sh
+echo "restic $1" >> "$SB/tmp/calls"
+case "$1" in
+    snapshots)
+        ids=$(tr "\n" " " < "$SB/tmp/rids" 2>/dev/null)
+        printf "["
+        sep=""
+        for id in $ids; do printf "%s{\"short_id\":\"%s\"}" "$sep" "$id"; sep=","; done
+        printf "]\n"
+        exit 0
+        ;;
+    backup)
+        if grep -q "^x-ui=inactive$" "$SB/tmp/rsvc"; then echo "x-ui: inactive" >> "$SB/tmp/calls"; else echo "x-ui: active" >> "$SB/tmp/calls"; fi
+        n=$(($(wc -l < "$SB/tmp/rids") + 1))
+        id=$(printf "b%07d" "$n")
+        echo "$id" >> "$SB/tmp/rids"
+        echo "snapshot $id saved"
+        exit 0
+        ;;
+esac
+exit 0
+X
+chmod +x "$SB/bin/restic"
+RESTIC_BIN="$SB/bin/restic"
+restic_installed(){ return 0; }
+_restic_env_value(){ case "$1" in RESTIC_REPOSITORY) echo "/tmp/repo" ;; RESTIC_PASSWORD) echo "p" ;; esac; }
+book_write(){ :; }
+ask_yn(){ printf -v "$3" "%s" "no"; }
+echo "x-ui=active" > "$SB/tmp/rsvc"
+systemctl(){
+    local verb="$1" u="" a
+    for a in "${@:2}"; do [[ "$a" == -* ]] && continue; u="$a"; break; done
+    case "$verb" in
+        is-active) grep -q "^${u}=active$" "$SB/tmp/rsvc"; return $? ;;
+        stop) sed -i "s/^${u}=.*/${u}=inactive/" "$SB/tmp/rsvc"; return 0 ;;
+        start) [[ -n "${SVC_START_FAIL:-}" ]] || sed -i "s/^${u}=.*/${u}=active/" "$SB/tmp/rsvc"; return 0 ;;
+    esac
+    return 0
+}
+eli_fact_unit(){
+    local want="${3:-active}"
+    grep -q "^${1}=${want}$" "$SB/tmp/rsvc"
+}
+restic_backup; echo "rc=$?"
+echo "--- вызовы ---"; cat "$SB/tmp/calls"
+echo "--- состояние ---"; cat "$SB/tmp/rsvc"
+echo "== службы не активны: строки об остановке нет =="
+echo "x-ui=inactive" > "$SB/tmp/rsvc"; : > "$SB/tmp/calls"
+restic_backup; echo "rc=$?"
+echo "--- вызовы ---"; cat "$SB/tmp/calls"
+echo "== служба не остановилась =="
+echo "x-ui=active" > "$SB/tmp/rsvc"; : > "$SB/tmp/calls"
+eli_fact_unit(){ return 1; }
+restic_backup; echo "rc=$?"
+echo "--- вызовы ---"; cat "$SB/tmp/calls"
+echo "== служба не поднялась после снапшота =="
+echo "x-ui=active" > "$SB/tmp/rsvc"; : > "$SB/tmp/calls"
+eli_fact_unit(){
+    local want="${3:-active}"
+    grep -q "^${1}=${want}$" "$SB/tmp/rsvc"
+}
+SVC_START_FAIL=1
+restic_backup; echo "rc=$?"
+echo "--- состояние ---"; cat "$SB/tmp/rsvc"
+SVC_START_FAIL=""
+rm -rf "$SB/etc/x-ui" "$SB/etc/restic" "$SB/bin/restic" "$SB/tmp/rsvc" "$SB/tmp/calls" "$SB/tmp/rids"
+'
+CASES+=("restic_services|write|${RESTIC_SERVICES_CASE}")
+
+# - коды restic: 3 - снапшот с предупреждением, 2 - провал, -
+# - 0 без нового снапшота в списке репозитория - провал факта -
+RESTIC_CODES_CASE='
+mkdir -p "$SB/bin" "$SB/etc/restic" "$SB/tmp/rsrc" "$SB/tmp/rids.d"
+printf "x\n" > "$SB/tmp/rsrc/file.txt"
+printf "RESTIC_REPOSITORY=/tmp/repo\nRESTIC_PASSWORD=p\n" > "$SB/etc/restic/env"
+: > "$SB/tmp/rids"
+cat > "$SB/bin/restic" <<"X"
+#!/bin/sh
+echo "restic $1" >> "$SB/tmp/calls"
+case "$1" in
+    snapshots)
+        ids=$(tr "\n" " " < "$SB/tmp/rids" 2>/dev/null)
+        printf "["
+        sep=""
+        for id in $ids; do printf "%s{\"short_id\":\"%s\"}" "$sep" "$id"; sep=","; done
+        printf "]\n"
+        exit 0
+        ;;
+    backup)
+        case "$(cat "$SB/tmp/rmode")" in
+            0) echo "snapshot aaaaaaa0 saved"; echo "aaaaaaa0" >> "$SB/tmp/rids"; exit 0 ;;
+            3) echo "snapshot aaaaaaa3 saved"; echo "Warning: at least one source file could not be read"; echo "aaaaaaa3" >> "$SB/tmp/rids"; exit 3 ;;
+            2) echo "Fatal: repository does not exist"; exit 2 ;;
+            silent) echo "snapshot aaaaaaa4 saved"; exit 0 ;;
+        esac
+        ;;
+esac
+exit 0
+X
+chmod +x "$SB/bin/restic"
+RESTIC_BIN="$SB/bin/restic"
+restic_installed(){ return 0; }
+_restic_env_value(){ case "$1" in RESTIC_REPOSITORY) echo "/tmp/repo" ;; RESTIC_PASSWORD) echo "p" ;; esac; }
+_restic_paths(){ printf "%s\n" "$SB/tmp/rsrc"; }
+_restic_services_stop(){ RESTIC_STOPPED=(); return 0; }
+_restic_services_start(){ return 0; }
+ask_yn(){ printf -v "$3" "%s" "no"; }
+book_write(){ :; }
+run_codes(){
+    printf "%s\n" "$1" > "$SB/tmp/rmode"
+    echo "== restic rc=$1 =="
+    restic_backup
+    echo "rc=$?"
+    echo "ids: $(tr "\n" " " < "$SB/tmp/rids")"
+}
+run_codes 0
+run_codes 3
+run_codes 2
+run_codes silent
+rm -rf "$SB/etc/restic" "$SB/bin/restic" "$SB/tmp/rsrc" "$SB/tmp/rids" "$SB/tmp/rids.d" "$SB/tmp/rmode" "$SB/tmp/calls"
+'
+CASES+=("restic_codes|write|${RESTIC_CODES_CASE}")
+
+# - runtime после восстановления: контейнеры из env и юниты hysteria -
+PROXY_RESTORE_CASE='
+mkdir -p "$SB/etc/mtproto" "$SB/etc/socks5" "$SB/etc/systemd/system"
+rm -f "$SB"/etc/mtproto/instance_*.env "$SB"/etc/socks5/instance_*.env
+printf "CONTAINER=\"mtproto-1\"\nPORT=\"443\"\n" > "$SB/etc/mtproto/instance_1.env"
+printf "secret = \"x\"\nbind-to = \"0.0.0.0:3128\"\n" > "$SB/etc/mtproto/config_1.toml"
+printf "CONTAINER=\"socks5-1\"\nPORT=\"1080\"\nUSER=\"u\"\nPASS=\"p\"\n" > "$SB/etc/socks5/instance_1.env"
+printf "[Service]\nExecStart=/nonexistent/engine serve\n" > "$SB/etc/systemd/system/hysteria-1.service"
+printf "[Service]\nExecStart=/bin/sh -c true\n" > "$SB/etc/systemd/system/hysteria-2.service"
+docker(){
+    case "$1" in
+        inspect) return 1 ;;
+        run) echo "RUN ${*:1:6}"; return 0 ;;
+        ps) [[ -n "${PS_OK:-}" ]] && { echo "mtproto-1"; echo "socks5-1"; }; return 0 ;;
+        rm) echo "RM $*"; return 0 ;;
+        *) return 0 ;;
+    esac
+}
+systemctl(){
+    case "$1" in
+        is-active) [[ -f "$SB/svc_h2" ]] && return 0; return 1 ;;
+        start) [[ "$2" == "hysteria-2" ]] && : > "$SB/svc_h2"; return 0 ;;
+        disable) echo "DISABLE $*"; return 0 ;;
+        *) return 0 ;;
+    esac
+}
+echo "== контейнер не поднялся =="
+_proxy_restore_runtime; echo "rc=$?"
+echo "== контейнер поднялся =="
+PS_OK=1
+_proxy_restore_runtime; echo "rc=$?"
+rm -rf "$SB/etc/mtproto" "$SB/etc/socks5" "$SB/etc/systemd/system/hysteria-1.service" "$SB/etc/systemd/system/hysteria-2.service" "$SB/svc_h2"
+'
+CASES+=("proxy_restore|write|${PROXY_RESTORE_CASE}")
+
+# - подсказки интерфейса: пункт X в меню и метки Введи/Подтверди -
+UX_PROMPTS_CASE='
+eli_read_line(){ printf "PROMPT: %s\n" "$1"; printf -v "$2" "%s" "${3:-}"; }
+echo "== меню с подвалом =="
+eli_menu_read v
+echo "== меню без подвала =="
+eli_menu_read v nofooter
+echo "== значение =="
+ask "Порт панели" "2053" v
+echo "== подтверждение =="
+ask_yn "Переустановить?" "n" yn
+ask_yn "Перезагрузить сейчас?" "y" yn
+echo "== X =="
+eli_read_line(){ printf -v "$2" "%s" "x"; }
+eli_menu_read v; echo "после X"
+'
+CASES+=("ux_prompts|-|${UX_PROMPTS_CASE}")
 
 # - JSON-отчёт диагностики: система, ресурсы, службы и проблемы по цветам -
 DIAG_JSON_CASE='
@@ -908,6 +2139,42 @@ rm -rf "$SB/state/mim_ufw_added"
 '
 CASES+=("mim_ufw_close|-|${MIM_UFW_CASE}")
 
+# - адресация правил mimic по порту: при смене порта туннеля правило нового -
+# - порта не должно считаться остатком старого (проверка без порта его находила) -
+MIM_UFW_PORT_CASE='
+q=$(printf "\047")
+ufw(){
+    case "$1 $2" in
+        "show added") printf "ufw allow 39511/tcp comment %smimic awg0%s\n" "$q" "$q" ;;
+        "status numbered") printf "[ 3] 39511/tcp ALLOW IN Anywhere # mimic awg0\n" ;;
+    esac
+}
+ufw_active(){ return 1; }
+echo "== s1: неактивный UFW, правило только на новом порту =="
+_mim_ufw_added awg0 35549 && echo "old_rc=0" || echo "old_rc=1"
+_mim_ufw_added awg0 39511 && echo "new_rc=0" || echo "new_rc=1"
+echo "== s2: активный UFW, номер правила по порту =="
+ufw_active(){ return 0; }
+echo "old_num=$(_mim_ufw_rule_num awg0 35549)"
+echo "new_num=$(_mim_ufw_rule_num awg0 39511)"
+'
+CASES+=("mim_ufw_port|-|${MIM_UFW_PORT_CASE}")
+
+# - удаление zapret2 при отсутствии движка снимает залипший флаг -
+# - автопроверки: Prayer не должен вечно предупреждать о несуществующей задаче -
+ZAPRET_REMOVE_GHOST_CASE='
+eli_cron_read(){ printf -v "$1" "%s" ""; return 0; }
+crontab(){ :; }
+systemctl(){ :; }
+nft(){ :; }
+book_write ".zapret.installed" "false" bool
+book_write ".zapret.autoupdate_enabled" "true" bool
+printf "y\n" | zapret_remove
+echo "rc=$?"
+echo "flag=$(jq -r .zapret.autoupdate_enabled "$_BOOK")"
+'
+CASES+=("zapret_remove_ghost|-|${ZAPRET_REMOVE_GHOST_CASE}")
+
 # - генератор обфускации: профили 2.0 и 3.1. rand_range подперт серединой -
 # - диапазона, h-диапазоны 2.0 фиксированы подпоркой, RANDOM фиксирован; -
 # - 2.0 - диапазоны H и разные S, 3.1 - H 1/2/3/4, разные S без RT и CPA -
@@ -938,6 +2205,28 @@ CASES+=('awg_collisions|-|for s4 in 15 16; do echo "s4=${s4}"; _awg_size_collisi
 # - предохранитель S3/S4 не должен принимать старые глобалы за успех:
 # - все кандидаты "сталкиваются", на входе OBF_S3=42/OBF_S4=20 -
 CASES+=('awg_s3s4_guard|-|_awg_size_collisions(){ echo "response 80"; }; OBF_S3=42; OBF_S4=20; _awg_gen_obf_v2 yes 1320 >/dev/null 2>&1; echo "rc=$? S3=${OBF_S3:-} S4=${OBF_S4:-}"')
+
+# - ожидание занятости порта: слушатель появляется позже первого щупа, -
+# - wait дособирает его, мгновенный busy остаётся честным, чужой порт - таймаут -
+# - счётчик щупов файловый: вызов ss идёт через подстановку, переменные в ней не переживают -
+TS_PORT_WAIT_CASE='
+rm -f "$SB/tmp/sscalls"
+ss(){
+    local n
+    n=$(cat "$SB/tmp/sscalls" 2>/dev/null || echo 0)
+    n=$((n+1)); printf "%s" "$n" > "$SB/tmp/sscalls"
+    case "$*" in
+        *-H*uln*) (( n >= 3 )) && printf ":9987 \n" ;;
+        *-H*tln*) printf ":30033 \n" ;;
+    esac
+    return 0
+}
+eli_port_busy 9987 udp; echo "voice_busy_instant_rc=$?"
+eli_port_wait 9987 udp 3; echo "voice_wait_rc=$?"
+eli_port_wait 30033 tcp 2; echo "ft_wait_rc=$?"
+eli_port_wait 1234 udp 1; echo "absent_wait_rc=$?"
+'
+CASES+=("ts_port_wait|-|${TS_PORT_WAIT_CASE}")
 
 # - кейсы меню: полный проход по номерам каждого меню. Заголовок и пауза -
 # - глушатся, выбор читается из очереди SB_MENU_Q, каждый пункт подменён -
@@ -971,7 +2260,7 @@ MENUS=(
 )
 for _m in "${MENUS[@]}"; do
     _m_name="${_m%%|*}"
-    _m_stubs='eli_header(){ :; }; eli_pause(){ :; }; eli_read_choice(){ printf -v "$1" "%s" "${SB_MENU_Q[0]:-0}"; SB_MENU_Q=("${SB_MENU_Q[@]:1}"); };'
+    _m_stubs='eli_header(){ :; }; eli_pause(){ :; }; eli_menu_read(){ printf -v "$1" "%s" "${SB_MENU_Q[0]:-0}"; SB_MENU_Q=("${SB_MENU_Q[@]:1}"); };'
     _m_q=""; _m_i=1
     for _t in ${_m#*|}; do
         _m_stubs+=" ${_t}(){ echo \"MARK ${_t}\"; };"
@@ -1224,6 +2513,8 @@ case "$*" in
     "status")          cat '@SB@/state/ufw_status' ;;
     "show added")      cat '@SB@/state/ufw_added' ;;
     allow*|delete*|enable|disable|reset|reload|insert*|prepend*|default*)
+        # - кейс пути записи: изменяющие глаголы разрешены и видны в журнале -
+        [[ -n "${GOLDEN_WRITE:-}" ]] && exit 0
         printf 'DENY %s\n' "ufw $*" >> '@SB@/calls.log'
         echo "подпорка песочницы: изменяющий вызов ufw запрещён" >&2
         exit 1
@@ -1389,7 +2680,7 @@ done
 # - стека, unbound, Outline, автообслуживание): в них переписываются и такие пути, -
 # - иначе кейс писал бы в реальную файловую систему; остальные модули не трогаются, -
 # - их эталоны не зависят -
-SCOPE_MODULES=(04i_backup.sh 04a_unbound.sh 02c_outline.sh 04g_routine.sh)
+SCOPE_MODULES=(04i_backup.sh 04a_unbound.sh 02c_outline.sh 04g_routine.sh 00e_txn.sh)
 SCOPED="${SB}/tmp/mono.scoped"
 cp "$MONO" "$SCOPED"
 for _sm in "${SCOPE_MODULES[@]}"; do
@@ -1400,7 +2691,6 @@ for _sm in "${SCOPE_MODULES[@]}"; do
         s|\([^\"\$}]\)/usr/sbin/|\1\${SB}/usr/sbin/|g
         s|\([^\"\$}]\)/var/|\1\${SB}/var/|g
         s|\([^\"\$}]\)/root/|\1\${SB}/root/|g
-        s|\([^\"\$}]\)/sys/|\1\${SB}/sys/|g
         s|\([^\"\$}]\)/tmp/|\1\${SB}/tmp/|g
     }" "$SCOPED" > "${SCOPED}.next"
     mv "${SCOPED}.next" "$SCOPED"

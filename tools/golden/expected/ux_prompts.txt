@@ -1,0 +1,21 @@
+# golden: ux_prompts
+--- вывод ---
+== меню с подвалом ==
+  <green>X)<off> Выход
+
+PROMPT:   \033[1mВыбор:\033[0m
+== меню без подвала ==
+PROMPT:   \033[1mВыбор:\033[0m
+== значение ==
+PROMPT:   <cyan>Введи<off> <bold>Порт панели<off> [2053] <cyan>(Enter - оставить, или своё)<off>:
+== подтверждение ==
+PROMPT:   <cyan>Подтверди<off> <bold>Переустановить?<off> [y/N, Enter=нет]:
+PROMPT:   <cyan>Подтверди<off> <bold>Перезагрузить сейчас?<off> [Y/n, Enter=да]:
+== X ==
+  <green>X)<off> Выход
+
+
+  <cyan>*<off> Выход.
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

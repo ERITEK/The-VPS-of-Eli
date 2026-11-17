@@ -161,7 +161,7 @@ diag_run() {
         D_BEST_SPEED="0"; D_BEST_HOST="?"
         local bw_confirm=""
         echo ""
-        echo -e "  ${YELLOW}Тест канала качает ~10 MB с каждой ЖИВОЙ точки по регионам.${NC}"
+        echo -e "  ${YELLOW}Тест канала качает ~25 MB с каждой ЖИВОЙ точки по регионам.${NC}"
         echo -e "  ${YELLOW}Мёртвые точки пропускаются пробником, на канал не влияют.${NC}"
         echo -e "  ${YELLOW}На VPS с лимитом трафика стоит пропустить.${NC}"
         ask_yn "Запустить тест канала?" "y" bw_confirm
@@ -192,9 +192,9 @@ diag_run() {
                 D_SPEED_RESULTS+=("${label}|n/a"); return 0
             fi
             local speed mbit
-            # - --range 0-10485760 ограничивает скачивание 10 MB даже на быстром канале -
-            speed=$(curl -o /dev/null -s --connect-timeout 5 --max-time 20 \
-                --range 0-10485760 -w "%{speed_download}" "$url" 2>/dev/null || echo "0")
+            # - --range ограничивает скачивание 25 MB даже на быстром канале -
+            speed=$(curl -o /dev/null -s --connect-timeout 5 --max-time 30 \
+                --range 0-26214399 -w "%{speed_download}" "$url" 2>/dev/null || echo "0")
             mbit=$(awk "BEGIN {printf \"%.1f\", ${speed}/1024/1024*8}")
             echo -e "  ${CYAN}${label}:${NC} ${mbit} Мбит/с"
             D_SPEED_RESULTS+=("${label}|${mbit}")
@@ -220,7 +220,7 @@ diag_run() {
             "Корея (Vultr Сеул)|https://sel-kor-ping.vultr.com/vultr.com.100MB.bin"
             "Гонконг (xTom HK)|https://mirror.xtom.com.hk/ubuntu/ls-lR.gz|https://mirror.xtom.com.hk/ubuntu/dists/noble/Contents-amd64.gz"
         )
-        print_info "Тестируем канал (живые точки по регионам, ~10 MB каждая)..."
+        print_info "Тестируем канал (живые точки по регионам, ~25 MB каждая)..."
         local _row _label _urls
         for _row in "${_pts[@]}"; do
             _label="${_row%%|*}"; _urls="${_row#*|}"

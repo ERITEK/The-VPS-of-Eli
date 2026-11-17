@@ -1,0 +1,21 @@
+# golden: ts_unit
+--- вывод ---
+[Unit]
+Description=TeamSpeak 6 Server
+After=network.target
+
+[Service]
+Type=simple
+User=teamspeak
+Group=teamspeak
+WorkingDirectory=<SB>/opt/teamspeak
+ExecStart=<SB>/opt/teamspeak/tsserver --accept-license=accept --default-voice-port=9987 --filetransfer-port=30033 --log-path=<SB>/var/log/teamspeak
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

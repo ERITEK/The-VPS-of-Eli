@@ -59,11 +59,11 @@ _ts_arch_pattern() {
     esac
 }
 
-# - возвращает на stdout строку "url|fmt" (fmt: xz|bz2|gz|zst) - вместе, чтобы пережить $(...) -
+# - возвращает на stdout строку "url|fmt|sha256" (fmt: xz|bz2|gz|zst) - вместе, чтобы пережить $(...) -
 # - архитектура матчится regex'ом (переживает смену amd64 <-> x86_64); перебор форматов -
 # - от современного к старому: xz (текущий TS6) > bz2 > gz > zst -
 ts_get_latest_url() {
-    local json arch_pat fmt url
+    local json arch_pat fmt url sha
     json=$(eli_github_fetch "$TS_GITHUB_API" 2>/dev/null || true)
     [[ -z "$json" ]] && return 1
     arch_pat=$(_ts_arch_pattern)
@@ -76,7 +76,10 @@ ts_get_latest_url() {
                    .browser_download_url // empty' \
             2>/dev/null)
         if [[ -n "$url" && "$url" != "null" ]]; then
-            echo "${url}|${fmt}"
+            sha=$(echo "$json" | jq -r --arg u "$url" \
+                '.assets[]? | select(.browser_download_url == $u) | (.digest // empty)' 2>/dev/null \
+                | sed -n 's/^sha256://p' | head -1)
+            echo "${url}|${fmt}|${sha}"
             return 0
         fi
     done
@@ -85,6 +88,29 @@ ts_get_latest_url() {
 
 ts_get_latest_version() {
     eli_github_fetch "$TS_GITHUB_API" | jq -r '.tag_name // "?"' 2>/dev/null || echo "?"
+}
+
+# - содержимое юнита: пути установки и порты; применяется через eli_service_apply -
+_ts_unit_content() {
+    local voice_port="$1" ft_port="$2"
+    cat << EOF
+[Unit]
+Description=TeamSpeak 6 Server
+After=network.target
+
+[Service]
+Type=simple
+User=${TS_USER}
+Group=${TS_USER}
+WorkingDirectory=${TS_DIR}
+ExecStart=${TS_BIN} --accept-license=accept --default-voice-port=${voice_port} --filetransfer-port=${ft_port} --log-path=${TS_LOG_DIR}
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
 }
 
 ts_install() {
@@ -118,10 +144,12 @@ ts_install() {
 
     # - скачивание -
     print_section "Скачивание"
-    local url_fmt download_url archive_fmt latest_ver
+    local url_fmt download_url archive_fmt latest_ver ts_sha _rest
     url_fmt=$(ts_get_latest_url)
     download_url="${url_fmt%%|*}"
-    archive_fmt="${url_fmt##*|}"
+    _rest="${url_fmt#*|}"
+    archive_fmt="${_rest%%|*}"
+    ts_sha="${_rest#*|}"
     latest_ver=$(ts_get_latest_version)
     [[ -z "$download_url" ]] && { print_err "URL не получен с GitHub"; return 1; }
     print_ok "Версия: ${latest_ver} (формат: ${archive_fmt})"
@@ -137,7 +165,9 @@ ts_install() {
         [[ -d "$_td" ]] || { print_err "Каталог не создан: ${_td}"; return 1; }
     done
 
-    local tmpdir; tmpdir=$(mktemp -d)
+    local tmpdir
+    local archive
+    tmpdir=$(mktemp -d)
     # - выбор флага tar по формату; xz/zst поддерживаются современным GNU tar (--auto-compress тоже работает) -
     local tar_flag archive_ext
     case "${archive_fmt:-xz}" in
@@ -155,21 +185,22 @@ ts_install() {
         bz2) command -v bzip2 &>/dev/null || apt-get install -y -qq bzip2    2>/dev/null || true ;;
     esac
 
-    if ! curl -fsSL --connect-timeout 30 --max-time 120 "$download_url" -o "${tmpdir}/ts6.${archive_ext}"; then
-        print_err "Не удалось скачать TeamSpeak: ${download_url}"
+    if ! eli_fetch_asset "$download_url" "ts6.${archive_ext}" "$ts_sha"; then
         rm -rf "$tmpdir"
         return 1
     fi
+    archive="${ELI_ASSET_PATH}"
     # - распаковка в TS_DIR. strip-components не используем: текущие архивы TS6 без верхней папки -
     # - на случай возврата вложенной структуры в будущем - проверяем оба варианта ниже -
     local tar_rc
     if [[ "$tar_flag" == "" ]]; then
-        tar --zstd -xf "${tmpdir}/ts6.${archive_ext}" -C "$TS_DIR"
+        tar --zstd -xf "$archive" -C "$TS_DIR"
         tar_rc=$?
     else
-        tar -x${tar_flag}f "${tmpdir}/ts6.${archive_ext}" -C "$TS_DIR"
+        tar -x${tar_flag}f "$archive" -C "$TS_DIR"
         tar_rc=$?
     fi
+    rm -rf "$(dirname "$archive")"
     if [[ $tar_rc -ne 0 ]]; then
         print_err "Не удалось распаковать архив (формат: ${archive_ext})"
         rm -rf "$tmpdir"
@@ -197,37 +228,24 @@ ts_install() {
     chown -R "${TS_USER}:${TS_USER}" "$TS_DIR" "$TS_DATA_DIR" "$TS_LOG_DIR" \
         || { print_err "chown ${TS_DIR} не удался"; return 1; }
 
-    # - systemd unit -
-    cat > "$TS_UNIT" << EOF
-[Unit]
-Description=TeamSpeak 6 Server
-After=network.target
-
-[Service]
-Type=simple
-User=${TS_USER}
-Group=${TS_USER}
-WorkingDirectory=${TS_DIR}
-ExecStart=${TS_BIN} --accept-license=accept --default-voice-port=${voice_port} --filetransfer-port=${ft_port} --log-path=${TS_LOG_DIR}
-Restart=always
-RestartSec=5
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
-    systemctl enable teamspeak 2>/dev/null || true
+    # - systemd unit: канон пишет файл, проверяет синтаксис, включает -
+    # - автозапуск, запускает службу и подтверждает active; провал -
+    # - возвращает прежний юнит -
+    if ! eli_service_apply teamspeak "$(_ts_unit_content "$voice_port" "$ft_port")"; then
+        print_err "Юнит teamspeak не применён"
+        return 1
+    fi
     if ! systemctl is-enabled --quiet teamspeak 2>/dev/null; then
         print_err "Автозапуск teamspeak не включён: systemctl enable teamspeak"
         return 1
     fi
 
-    # - первый запуск и перехват ключа -
+    # - первый запуск и перехват ключа: служба поднята каноном, пауза -
+    # - даёт tsserver записать token в журнал и лог-файлы -
     # - TS6 печатает token= в stdout/stderr (попадает в journal) И в лог-файлы в --log-path -
     # - имя файла: tsserver_YYYY-MM-DD__HH_MM_SS.NNNNNN_INDEX.log -
     print_section "Первый запуск"
-    systemctl start teamspeak; sleep 5
+    sleep 5
     local start_time
     start_time=$(systemctl show teamspeak --property=ActiveEnterTimestamp 2>/dev/null | cut -d= -f2 || date "+%Y-%m-%d %H:%M:%S")
     local priv_key="" attempts=0
@@ -254,9 +272,9 @@ EOF
     fi
 
     # - пост-проверка порта: в бете TS6 --default-voice-port иногда игнорируется -
-    # - сверяем что сервис реально слушает заданный voice_port через ss -
+    # - слушатель открывается позже старта юнита, поэтому порт ждётся, а не щупается раз -
     if eli_fact_unit teamspeak 10; then
-        if eli_port_busy "$voice_port" udp; then
+        if eli_port_wait "$voice_port" udp 15; then
             print_ok "Voice ${voice_port}/udp: слушает"
         else
             print_warn "Сервис активен, но НЕ слушает ${voice_port}/udp"
@@ -395,11 +413,13 @@ ts_update() {
     [[ ! -f "$TS_BIN" ]] && { print_err "Не установлен"; return 0; }
     local cur; cur=$(ts_get_version)
     local lat; lat=$(ts_get_latest_version)
-    # - получаем url и формат одной строкой "url|fmt" -
-    local url_fmt url archive_fmt
+    # - получаем url, формат и сумму одной строкой "url|fmt|sha256" -
+    local url_fmt url archive_fmt ts_sha _rest
     url_fmt=$(ts_get_latest_url)
     url="${url_fmt%%|*}"
-    archive_fmt="${url_fmt##*|}"
+    _rest="${url_fmt#*|}"
+    archive_fmt="${_rest%%|*}"
+    ts_sha="${_rest#*|}"
     # - убираем префикс v для корректного сравнения -
     [[ "${cur#v}" == "${lat#v}" ]] && { print_ok "Актуальная версия: ${cur}"; return 0; }
     [[ -z "$url" ]] && { print_err "URL релиза TeamSpeak: $(eli_github_reason)"; return 0; }
@@ -413,7 +433,9 @@ ts_update() {
         print_err "TeamSpeak не остановился: обновление отменено"
         return 1
     fi
-    local tmpdir; tmpdir=$(mktemp -d)
+    local tmpdir
+    local archive
+    tmpdir=$(mktemp -d)
     # - выбор флага tar по формату -
     local tar_flag archive_ext
     case "${archive_fmt:-xz}" in
@@ -429,21 +451,22 @@ ts_update() {
         bz2) command -v bzip2 &>/dev/null || apt-get install -y -qq bzip2    2>/dev/null || true ;;
     esac
     # - скачивание: при провале старый бинарник на месте, поднимаем его обратно -
-    if ! curl -fsSL --connect-timeout 30 --max-time 120 "$url" -o "${tmpdir}/ts6.${archive_ext}"; then
-        print_err "Не удалось скачать ${url}"
+    if ! eli_fetch_asset "$url" "ts6.${archive_ext}" "$ts_sha"; then
         rm -rf "$tmpdir"
         systemctl start teamspeak 2>/dev/null || true
         return 1
     fi
+    archive="${ELI_ASSET_PATH}"
     # - распаковка: при провале часть файлов могла затереться, всё равно пытаемся поднять -
     local tar_rc
     if [[ "$tar_flag" == "" ]]; then
-        tar --zstd -xf "${tmpdir}/ts6.${archive_ext}" -C "$TS_DIR"
+        tar --zstd -xf "$archive" -C "$TS_DIR"
         tar_rc=$?
     else
-        tar -x${tar_flag}f "${tmpdir}/ts6.${archive_ext}" -C "$TS_DIR"
+        tar -x${tar_flag}f "$archive" -C "$TS_DIR"
         tar_rc=$?
     fi
+    rm -rf "$(dirname "$archive")"
     if [[ $tar_rc -ne 0 ]]; then
         print_err "Не удалось распаковать архив (формат: ${archive_ext})"
         rm -rf "$tmpdir"

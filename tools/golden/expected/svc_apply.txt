@@ -1,0 +1,75 @@
+# golden: svc_apply
+--- вывод ---
+== успех ==
+rc=0
+файл: [Unit] Description=test
+active: active
+== провал: юнита нет в состоянии, старт не подтвердится ==
+  <red>[xXx]<off> Служба ghost-unit не в состоянии active: journalctl -xeu ghost-unit --no-pager | tail -20
+  <red>[xXx]<off> Юнит ghost-unit: не активен после запуска
+rc=1
+файл убран
+== откат прежнего файла ==
+  <red>[xXx]<off> Служба ghost-unit не в состоянии active: journalctl -xeu ghost-unit --no-pager | tail -20
+  <red>[xXx]<off> Юнит ghost-unit: не активен после запуска
+rc=1
+после отката: Description=старый
+--- вызовы платформы ---
+CMD flock -n 200
+CMD systemctl is-active --quiet x-ui
+CMD systemctl daemon-reload
+CMD systemctl enable x-ui
+CMD systemctl restart x-ui
+CMD systemctl is-active --quiet x-ui
+CMD systemctl is-active x-ui
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl daemon-reload
+CMD systemctl enable ghost-unit
+CMD systemctl restart ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl daemon-reload
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl daemon-reload
+CMD systemctl enable ghost-unit
+CMD systemctl restart ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl is-active --quiet ghost-unit
+CMD systemctl daemon-reload
+rc=0

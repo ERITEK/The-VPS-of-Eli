@@ -1,0 +1,18 @@
+# golden: svc_apply_rollback
+--- вывод ---
+  <red>[xXx]<off> Юнит demo: не активен после запуска
+rc=1
+--- файл ---
+Description=старый
+--- состояние ---
+demo=active
+--- вызовы ---
+restart demo
+start demo
+--- новый юнит без файла ---
+  <red>[xXx]<off> Юнит ghost: не активен после запуска
+rc=1
+ghost: убран
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

@@ -203,43 +203,54 @@ _zap_resolve_tag() {
 }
 
 # --> ZAP2: ССЫЛКА НА АРХИВ РЕЛИЗА <--
-# - берём не embedded и не openwrt tar.gz из ассетов тега -
-_zap_asset_url() {
-    local tag="$1"
-    eli_github_fetch "https://api.github.com/repos/${ZAP2_REPO}/releases/tags/${tag}" \
-        | jq -r '.assets[]?.browser_download_url
-                 | select(test("tar\\.gz$"))
-                 | select(test("embedded|openwrt")|not)' 2>/dev/null \
-        | head -1
+# - берём не embedded и не openwrt tar.gz из ассетов тега; на stdout "url|sha256" -
+_zap_asset() {
+    local tag="$1" api url sha
+    api=$(eli_github_fetch "https://api.github.com/repos/${ZAP2_REPO}/releases/tags/${tag}" 2>/dev/null) || return 1
+    url=$(jq -r '.assets[]?.browser_download_url
+             | select(test("tar\\.gz$"))
+             | select(test("embedded|openwrt")|not)' <<< "$api" 2>/dev/null | head -1)
+    [[ -n "$url" ]] || return 1
+    sha=$(eli_github_asset_sha "$api" "$(basename "$url")")
+    printf '%s|%s\n' "$url" "$sha"
 }
 
 # --> ZAP2: ПОЛУЧЕНИЕ БИНАРЯ <--
 # - скачиваем архив релиза, кладём nfqws2 под нашу arch, при отсутствии -> собираем -
 _zap_fetch_binary() {
     local comp d
-    local tag="$1" arch tmp url tarball extracted src
+    local tag="$1" arch tmp url tarball tarball_dir extracted src sha=""
     arch=$(_zap_arch)
     tmp=$(mktemp -d) || { print_err "mktemp failed"; return 1; }
 
-    url=$(_zap_asset_url "$tag")
+    local ures="" is_src=0
+    ures=$(_zap_asset "$tag") || ures=""
+    url="${ures%%|*}"
+    [[ "$ures" == *"|"* ]] && sha="${ures#*|}"
     if [[ -z "$url" ]]; then
         print_warn "Готовый архив релиза не найден ($(eli_github_reason)), берём исходники для сборки"
         url="https://api.github.com/repos/${ZAP2_REPO}/tarball/${tag}"
+        is_src=1
     fi
 
     print_info "Скачиваем ${tag}..."
-    tarball="${tmp}/zapret2.tar.gz"
-    if ! curl -fsSL --connect-timeout 15 -o "$tarball" "$url"; then
-        print_err "Не удалось скачать релиз"
+    if (( is_src )); then
+        if ! eli_fetch_asset "$url" "zapret2.tar.gz" -; then
+            rm -rf "$tmp"; return 1
+        fi
+    elif ! eli_fetch_asset "$url" "zapret2.tar.gz" "$sha"; then
         rm -rf "$tmp"; return 1
     fi
+    tarball="$ELI_ASSET_PATH"
+    tarball_dir=$(dirname "$tarball")
 
     mkdir -p "${tmp}/x"
     if ! tar -xzf "$tarball" -C "${tmp}/x" 2>/dev/null; then
         print_err "Архив повреждён (tar failed)"
-        rm -rf "$tmp"; return 1
+        rm -rf "$tmp" "$tarball_dir"; return 1
     fi
     # - у tarball от API один верхнеуровневый каталог -
+    rm -rf "$tarball_dir"
     extracted=$(find "${tmp}/x" -maxdepth 1 -mindepth 1 -type d | head -1)
     [[ -z "$extracted" ]] && extracted="${tmp}/x"
 
@@ -409,22 +420,6 @@ _zap_connectivity_ok() {
     return 0
 }
 
-# --> ZAP2: ПРОВЕРКА ЗАПУСКА ИНСТАНСА <--
-# - Type=simple рапортует active сразу при exec, а nfqws2 может упасть секундой позже -
-# - даём осесть и проверяем реальное состояние, при падении показываем причину из journalctl -
-_zap_verify_active() {
-    local iface="$1" unit sub
-    unit=$(_zap_unit "$iface")
-    sleep 2
-    sub=$(systemctl show -p SubState --value "$unit" 2>/dev/null)
-    if [[ "$sub" == "running" ]] && systemctl is-active --quiet "$unit"; then
-        return 0
-    fi
-    print_err "Инстанс ${unit} не удержался (SubState=${sub:-?}). Причина:"
-    journalctl -u "$unit" -n 15 --no-pager 2>/dev/null | sed 's/^/    /'
-    return 1
-}
-
 # --> ZAP2: ГИБРИДНЫЙ ОТКАТ <--
 # - применяем правила атомарно, ставим страховочный таймер, проверяем, меняем или откатываем -
 _zap_apply_with_rollback() {
@@ -492,6 +487,8 @@ _zap_write_nft_loader() {
     nftf=$(_zap_nftf "$iface")
     table=$(_zap_table "$iface")
     local loader="/etc/systemd/system/zeli-nft-${iface}.service"
+    # - старт идемпотентен: таблица снимается перед загрузкой, иначе повторный -
+    # - старт добавляет вторую копию строк к уже загруженной таблице -
     cat > "$loader" << EOF
 [Unit]
 Description=zapret2 (Eli) nft rules for ${iface}
@@ -501,6 +498,7 @@ Before=$(_zap_unit "$iface")
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+ExecStartPre=-/usr/sbin/nft delete table inet ${table}
 ExecStart=/usr/sbin/nft -f ${nftf}
 ExecStop=/usr/sbin/nft delete table inet ${table}
 
@@ -510,6 +508,20 @@ EOF
     chmod 644 "$loader"
     systemctl daemon-reload 2>/dev/null
     systemctl enable "zeli-nft-${iface}.service" 2>/dev/null
+}
+
+# --> ZAP2: ЮНИТЫ ЗАГРУЗКИ ПРАВИЛ ПРОШЛЫХ СБОРОК <--
+# - юнит без предварительного снятия таблицы переписывается по шаблону: -
+# - старт поверх загруженных правил в таком юните добавляет вторую копию строк -
+_zap_sync_loaders() {
+    local iface f
+    for iface in $(_zap_bound_list); do
+        f="/etc/systemd/system/zeli-nft-${iface}.service"
+        [[ -f "$f" ]] || continue
+        grep -q '^ExecStartPre=-/usr/sbin/nft delete table inet ' "$f" && continue
+        _zap_write_nft_loader "$iface"
+    done
+    return 0
 }
 
 # --> ZAP2: ЗАПИСЬ В КНИГУ ПО ИНТЕРФЕЙСУ <--
@@ -606,9 +618,7 @@ zapret_bind_iface() {
     # - !ВАЖНО! -> сначала поднимаем nfqws2 (слушатель очереди), потом заводим правила -
     # - иначе трафик идёт в queue без слушателя (bypass пропускает), десинка нет и тест пустой -
     _zap_write_nft_loader "$iface"
-    systemctl enable "$unit" 2>/dev/null
-    systemctl restart "$unit" 2>/dev/null
-    if ! _zap_verify_active "$iface"; then
+    if ! eli_service_start "$unit"; then
         _zap_rollback_bind "$iface" "$keep_conf" "$keep_hosts" "$keep_loader"
         print_err "Привязка отменена -> инстанс nfqws2 не стартовал"
         return 1
@@ -684,8 +694,12 @@ _zap_run_blockcheck() {
 # - код HTTP без обхода: 000 - запрос не прошёл, иначе домен доступен и -
 # - десинк для него не требуется -
 _zap_domain_direct_code() {
-    local d="$1"
-    curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "https://$d" 2>/dev/null || echo "000"
+    local d="$1" code
+    code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "https://$d" 2>/dev/null)
+    # - провал соединения даёт 000 из write-out; пустой ответ (обрыв) тоже считается 000 -
+    # - вывод без перевода строки, как у write-out: код одиночный -
+    [[ -z "$code" ]] && code="000"
+    printf '%s' "${code}"
 }
 
 # --> ZAP2: АВТОПОДБОР И АВТОПРИМЕНЕНИЕ СТРАТЕГИИ <--
@@ -793,8 +807,7 @@ zapret_autostrategy() {
 
     # - применяем и проверяем, что инстанс удержался -
     _zap_write_conf "$iface" "$strat" >/dev/null
-    systemctl restart "$(_zap_unit "$iface")" 2>/dev/null
-    if _zap_verify_active "$iface"; then
+    if eli_service_start "$(_zap_unit "$iface")"; then
         print_ok "Стратегия подобрана и применена для ${iface}"
         local q; q=$(_zap_qnum_for "$iface")
         _zap_book_iface "$iface" "$q" "auto" "true" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -803,7 +816,7 @@ zapret_autostrategy() {
     print_err "Новая стратегия не завелась -> откатываю на baseline"
     local bstrat; bstrat=$(_zap_baseline_strategy "$hostf")
     _zap_write_conf "$iface" "$bstrat" >/dev/null
-    systemctl restart "$(_zap_unit "$iface")" 2>/dev/null
+    eli_service_start "$(_zap_unit "$iface")" || true
     return 1
 }
 
@@ -825,10 +838,11 @@ zapret_set_strategy() {
 
     print_info "Вставь строку(и) стратегии nfqws2 (профили через --new). Пустая строка = конец:"
     local strat="" line
-    while IFS= read -r line; do
+    while :; do
+        eli_read_line "" line
         [[ -z "$line" ]] && break
         strat="${strat}${line}"$'\n'
-    done < /dev/tty
+    done
     [[ -z "$strat" ]] && { print_warn "Пусто, отмена"; return 0; }
 
     local hostf
@@ -839,9 +853,8 @@ zapret_set_strategy() {
     conf=$(_zap_conf "$iface"); bak="${conf}.bak"
     cp -a "$conf" "$bak" || { print_err "Прежний конфиг не сохранён: ${conf}"; return 1; }
     _zap_write_conf "$iface" "$strat" >/dev/null
-    systemctl restart "$(_zap_unit "$iface")" 2>/dev/null
     # - проверка удержания инстанса: is-active сразу после restart врёт про Type=simple -
-    if _zap_verify_active "$iface"; then
+    if eli_service_start "$(_zap_unit "$iface")"; then
         rm -f "$bak"
         print_ok "Стратегия применена для ${iface}"
         local q; q=$(_zap_qnum_for "$iface")
@@ -851,8 +864,7 @@ zapret_set_strategy() {
     print_err "Стратегия не применена: инстанс не удержался -> возвращаю прежний конфиг"
     # - факт возврата: файл совпадает с копией, инстанс снова удержался -
     if cp -a "$bak" "$conf" && cmp -s "$bak" "$conf"; then
-        systemctl restart "$(_zap_unit "$iface")" 2>/dev/null
-        if _zap_verify_active "$iface"; then
+        if eli_service_start "$(_zap_unit "$iface")"; then
             print_ok "Прежняя стратегия возвращена для ${iface}, запись в книгу не сделана"
             rm -f "$bak"
         else
@@ -960,7 +972,27 @@ zapret_disable_iface() {
 # --> ZAP2: ПОЛНОЕ УДАЛЕНИЕ <--
 zapret_remove() {
     local iface
-    _zap_installed || { print_warn "zapret2 не установлен"; return 0; }
+    # - restore возвращает книгу целиком: метка installed может остаться без движка -
+    # - движка нет, запись есть: удаляются остатки, чтобы книга не расходилась с машиной -
+    if [[ ! -x "$ZAP2_BIN" ]] && [[ "$(book_read ".zapret.installed")" == "true" ]]; then
+        print_warn "Движок zapret2 отсутствует (снят вне меню или потерян), в книге осталась метка установки"
+        print_warn "Снимаются остатки: конфиги, привязки, запись книги."
+    else
+        if ! _zap_installed; then
+            # - движка нет: флаг автопроверки от удалённого компонента снимается, -
+            # - иначе Prayer вечно предупреждает о задаче, которой на машине нет -
+            if [[ "$(book_read ".zapret.autoupdate_enabled")" == "true" ]]; then
+                if _zap_autoupdate_cron "off"; then
+                    book_write ".zapret.autoupdate_enabled" "false" bool
+                    print_ok "Остаток автопроверки снят: флаг и cron"
+                else
+                    print_warn "Флаг автопроверки остался: crontab не изменён"
+                fi
+            fi
+            print_warn "zapret2 не установлен"
+            return 0
+        fi
+    fi
     print_section "Полное удаление zapret2"
     local confirm=""
     ask_yn "Удалить zapret2 полностью со всеми интерфейсами?" "n" confirm

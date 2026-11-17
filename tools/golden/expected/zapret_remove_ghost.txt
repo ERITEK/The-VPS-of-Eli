@@ -1,0 +1,9 @@
+# golden: zapret_remove_ghost
+--- вывод ---
+  <green>[-OK-]<off> Остаток автопроверки снят: флаг и cron
+  <yellow>[!!!]<off>  zapret2 не установлен
+rc=0
+flag=false
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

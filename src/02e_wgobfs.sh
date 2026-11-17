@@ -143,14 +143,17 @@ _wgo_resolve_tag() {
     eli_github_latest_tag "$WGO_REPO"
 }
 
-# --> WGO: ССЫЛКА НА АССЕТ ПОД АРХИТЕКТУРУ <--
+# --> WGO: АССЕТ ПОД АРХИТЕКТУРУ <--
 # - имя ассета: wg-obfuscator-<tag>-linux-x64.tar.gz, суффикс однозначен -
-_wgo_asset_url() {
-    local tag="$1" arch="$2"
-    eli_github_fetch "https://api.github.com/repos/${WGO_REPO}/releases/tags/${tag}" \
-        | jq -r --arg a "$arch" '.assets[]?.browser_download_url
-                 | select(endswith("-" + $a + ".tar.gz"))' 2>/dev/null \
-        | head -1
+# - на stdout "url|sha256": хеш из digest ответа API для сверки загрузки -
+_wgo_asset() {
+    local tag="$1" arch="$2" api url sha
+    api=$(eli_github_fetch "https://api.github.com/repos/${WGO_REPO}/releases/tags/${tag}" 2>/dev/null) || return 1
+    url=$(jq -r --arg a "$arch" '.assets[]?.browser_download_url
+             | select(endswith("-" + $a + ".tar.gz"))' <<< "$api" 2>/dev/null | head -1)
+    [[ -n "$url" ]] || return 1
+    sha=$(eli_github_asset_sha "$api" "$(basename "$url")")
+    printf '%s|%s\n' "$url" "$sha"
 }
 
 # --> WGO: ВЕРСИЯ БИНАРЯ <--
@@ -164,48 +167,54 @@ _wgo_version() {
 # --> WGO: ПОЛУЧЕНИЕ БИНАРЯ <--
 # - готовый ассет статический, зависимостей нет; при его отсутствии сборка из исходников -
 _wgo_fetch_binary() {
-    local tag="$1" arch tmp url tarball extracted src
+    local tag="$1" arch tmp url tarball tarball_dir extracted src sha=""
     arch=$(_wgo_arch)
     tmp=$(mktemp -d) || { print_err "mktemp failed"; return 1; }
     mkdir -p "$WGO_DIR"
 
-    [[ -n "$arch" ]] && url=$(_wgo_asset_url "$tag" "$arch")
+    if [[ -n "$arch" ]]; then
+        local ures=""
+        ures=$(_wgo_asset "$tag" "$arch") || ures=""
+        url="${ures%%|*}"
+        [[ "$ures" == *"|"* ]] && sha="${ures#*|}"
+    fi
 
     if [[ -n "$url" ]]; then
         print_info "Скачиваем ${tag} (${arch})..."
-        tarball="${tmp}/wgo.tar.gz"
-        if ! curl -fsSL --connect-timeout 15 -o "$tarball" "$url"; then
-            print_err "Не удалось скачать ассет релиза"
+        if ! eli_fetch_asset "$url" "wgo.tar.gz" "$sha"; then
             rm -rf "$tmp"; return 1
         fi
+        tarball="$ELI_ASSET_PATH"
+        tarball_dir=$(dirname "$tarball")
         mkdir -p "${tmp}/x"
         if ! tar -xzf "$tarball" -C "${tmp}/x" 2>/dev/null; then
             print_err "Архив повреждён (tar failed)"
-            rm -rf "$tmp"; return 1
+            rm -rf "$tmp" "$tarball_dir"; return 1
         fi
         # - внутри каталог wg-obfuscator/ с бинарём, конфигом-примером и лицензией -
         src=$(find "${tmp}/x" -type f -name 'wg-obfuscator' -perm -u+x 2>/dev/null | head -1)
+        rm -rf "$tarball_dir"
     else
         print_warn "Готовый ассет ${tag} (${arch}) недоступен: $(eli_github_reason)"
         _wgo_install_buildtools || { print_err "Не удалось поставить тулчейн"; rm -rf "$tmp"; return 1; }
         print_info "Скачиваем исходники ${tag}..."
-        tarball="${tmp}/wgo-src.tar.gz"
-        if ! curl -fsSL --connect-timeout 15 -o "$tarball" \
-            "https://api.github.com/repos/${WGO_REPO}/tarball/${tag}"; then
-            print_err "Не удалось скачать исходники"
+        if ! eli_fetch_asset "https://api.github.com/repos/${WGO_REPO}/tarball/${tag}" "wgo-src.tar.gz" -; then
             rm -rf "$tmp"; return 1
         fi
+        tarball="$ELI_ASSET_PATH"
+        tarball_dir=$(dirname "$tarball")
         mkdir -p "${tmp}/x"
         if ! tar -xzf "$tarball" -C "${tmp}/x" 2>/dev/null; then
             print_err "Архив повреждён (tar failed)"
-            rm -rf "$tmp"; return 1
+            rm -rf "$tmp" "$tarball_dir"; return 1
         fi
         extracted=$(find "${tmp}/x" -maxdepth 1 -mindepth 1 -type d | head -1)
-        [[ -z "$extracted" ]] && { print_err "Каталог исходников не найден"; rm -rf "$tmp"; return 1; }
+        [[ -z "$extracted" ]] && { print_err "Каталог исходников не найден"; rm -rf "$tmp" "$tarball_dir"; return 1; }
         print_info "Сборка из исходников..."
         make -C "$extracted" 2>/dev/null
         src="${extracted}/wg-obfuscator"
         [[ -f "$src" ]] || src=""
+        rm -rf "$tarball_dir"
     fi
 
     if [[ -z "$src" || ! -f "$src" ]]; then
@@ -283,21 +292,6 @@ masking = ${masking}
 verbose = INFO
 EOF
     chmod 600 "$conf"
-}
-
-# --> WGO: ПРОВЕРКА ЗАПУСКА ИНСТАНСА <--
-# - Type=simple рапортует active в момент exec, а конфиг разбирается уже после -
-_wgo_verify_active() {
-    local iface="$1" unit sub
-    unit=$(_wgo_unit "$iface")
-    sleep 2
-    sub=$(systemctl show -p SubState --value "$unit" 2>/dev/null)
-    if [[ "$sub" == "running" ]] && systemctl is-active --quiet "$unit"; then
-        return 0
-    fi
-    print_err "Инстанс ${unit} не удержался (SubState=${sub:-?}). Причина:"
-    journalctl -u "$unit" -n 15 --no-pager 2>/dev/null | sed 's/^/    /'
-    return 1
 }
 
 # --> WGO: ЗАКРЫТИЕ ПОРТА VANILLA-AWG СНАРУЖИ <--
@@ -383,7 +377,7 @@ wgo_iface_bound() {
 # - цель переписывается на новый порт и перечитывается рестартом; запасное -
 # - правило старого порта снимается после подтверждённого переезда -
 wgo_retarget() {
-    local iface="$1" old_port="$2" new_port="$3" conf unit tmp
+    local iface="$1" old_port="$2" new_port="$3" conf tmp
     conf=$(_wgo_conf "$iface")
     [[ -f "$conf" ]] || { print_err "Конфиг инстанса ${iface} не найден"; return 1; }
     tmp=$(mktemp) || return 1
@@ -396,9 +390,7 @@ wgo_retarget() {
     chmod 600 "$conf"
     eli_fact_line "$conf" "^target = 127[.]0[.]0[.]1:${new_port}$" "Цель инстанса ${iface}" || return 1
     book_write ".wgobfs.instances.\"${iface}\".target" "127.0.0.1:${new_port}"
-    unit=$(_wgo_unit "$iface")
-    systemctl restart "$unit" 2>/dev/null
-    _wgo_verify_active "$iface" || return 1
+    eli_service_start "$(_wgo_unit "$iface")" || return 1
     wgo_unlock_awg_port "$iface" "$old_port"
     return 0
 }
@@ -722,9 +714,7 @@ wgo_bind_iface() {
 
     local unit
     unit=$(_wgo_unit "$iface")
-    systemctl enable "$unit" 2>/dev/null
-    systemctl restart "$unit" 2>/dev/null
-    if ! _wgo_verify_active "$iface"; then
+    if ! eli_service_start "$unit"; then
         systemctl disable --now "$unit" 2>/dev/null
         rm -f "$(_wgo_conf "$iface")"
         command -v ufw &>/dev/null && ufw delete allow "${lport}/udp" >/dev/null 2>&1
@@ -888,11 +878,10 @@ wgo_set_masking() {
     [[ -z "$lport" || -z "$target" || -z "$key" ]] && { print_err "Нет данных инстанса в книге"; return 1; }
 
     _wgo_write_conf "$iface" "$lport" "$target" "$key" "$masking"
-    systemctl restart "$(_wgo_unit "$iface")" 2>/dev/null
-    if ! _wgo_verify_active "$iface"; then
+    if ! eli_service_start "$(_wgo_unit "$iface")"; then
         print_err "Не завелось -> откат на ${old}"
         _wgo_write_conf "$iface" "$lport" "$target" "$key" "$old"
-        systemctl restart "$(_wgo_unit "$iface")" 2>/dev/null
+        eli_service_start "$(_wgo_unit "$iface")" || true
         return 1
     fi
     _wgo_book_iface "$iface" "$lport" "$target" "$key" "$masking" "true"
@@ -1026,8 +1015,7 @@ wgo_update() {
     book_write ".wgobfs.version" "$(_wgo_version)" string
     local fail=0
     for iface in $bound; do
-        systemctl start "$(_wgo_unit "$iface")" 2>/dev/null
-        _wgo_verify_active "$iface" || fail=1
+        eli_service_start "$(_wgo_unit "$iface")" || fail=1
     done
     [[ $fail -eq 1 ]] && { print_err "Часть инстансов не поднялась после обновления"; return 1; }
     print_ok "Обновлено до $(_wgo_version)"
@@ -1094,7 +1082,14 @@ wgo_unbind() {
 
 # --> WGO: ПОЛНОЕ УДАЛЕНИЕ <--
 wgo_remove() {
-    _wgo_installed || { print_warn "wg-obfuscator не установлен"; return 0; }
+    # - restore возвращает книгу целиком: метка installed может остаться без движка -
+    # - движка нет, запись есть: удаляются остатки, чтобы книга не расходилась с машиной -
+    if [[ ! -x "$WGO_BIN" ]] && [[ "$(book_read ".wgobfs.installed")" == "true" ]]; then
+        print_warn "Движок wg-obfuscator отсутствует (снят вне меню или потерян), в книге осталась метка установки"
+        print_warn "Снимаются остатки: конфиги, привязки, запись книги."
+    else
+        _wgo_installed || { print_warn "wg-obfuscator не установлен"; return 0; }
+    fi
     print_section "Полное удаление wg-obfuscator"
     print_warn "Все привязки снимаются, клиенты возвращаются на прямой Endpoint."
     local confirm=""

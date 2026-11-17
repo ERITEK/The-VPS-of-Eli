@@ -1,0 +1,10 @@
+# golden: exit_key
+--- вывод ---
+x=yes
+X=yes
+0=no
+пусто=no
+q=no
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

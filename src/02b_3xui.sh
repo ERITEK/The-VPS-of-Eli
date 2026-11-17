@@ -126,29 +126,30 @@ _xui_verify_sha256() {
 # --> 3X-UI: СКАЧАТЬ И РАСПАКОВАТЬ tar.gz <--
 # - установка распаковкой релиза: штатный установщик интерактивен -
 _xui_fetch_and_extract() {
-    local arch tmpdir tarball exdir
+    local arch tmpdir tarball tarball_dir exdir
     arch=$(_xui_arch)
     tmpdir=$(mktemp -d)
     tarball="${tmpdir}/x-ui-linux-${arch}.tar.gz"
     exdir="${tmpdir}/extract"
 
     print_info "Скачиваем ${XUI_TAG} для ${arch}..."
-    if ! curl -4fLRo "$tarball" --connect-timeout 15 "$XUI_TARBALL_URL"; then
-        print_err "Не удалось скачать ${XUI_TARBALL_URL}"
+    if ! eli_fetch_asset "$XUI_TARBALL_URL" "x-ui-linux-${arch}.tar.gz" -; then
         rm -rf "$tmpdir"
         return 1
     fi
+    tarball="$ELI_ASSET_PATH"
+    tarball_dir=$(dirname "$tarball")
 
     # - сумма архива: несходство или недоступный .sha256 останавливает установку -
     if ! _xui_verify_sha256 "$tarball" "$XUI_TARBALL_URL"; then
-        rm -rf "$tmpdir"
+        rm -rf "$tmpdir" "$tarball_dir"
         return 1
     fi
 
     # - целостность архива до того как трогать рабочую установку -
     if ! gzip -t "$tarball" 2>/dev/null; then
         print_err "Скачанный архив битый (gzip -t не прошёл)"
-        rm -rf "$tmpdir"
+        rm -rf "$tmpdir" "$tarball_dir"
         return 1
     fi
 
@@ -156,14 +157,14 @@ _xui_fetch_and_extract() {
     mkdir -p "$exdir"
     if ! tar -xzf "$tarball" -C "$exdir"; then
         print_err "Не удалось распаковать tar.gz"
-        rm -rf "$tmpdir"
+        rm -rf "$tmpdir" "$tarball_dir"
         return 1
     fi
 
     # - новая сборка валидна (есть бинарь) до сноса старой установки -
     if [[ ! -f "${exdir}/x-ui/x-ui" ]]; then
         print_err "В архиве нет x-ui/x-ui, старую установку не трогаю"
-        rm -rf "$tmpdir"
+        rm -rf "$tmpdir" "$tarball_dir"
         return 1
     fi
 
@@ -172,10 +173,10 @@ _xui_fetch_and_extract() {
     rm -rf "$XUI_DIR"
     if ! mv "${exdir}/x-ui" "$XUI_DIR"; then
         print_err "Не удалось переместить новую сборку в ${XUI_DIR}"
-        rm -rf "$tmpdir"
+        rm -rf "$tmpdir" "$tarball_dir"
         return 1
     fi
-    rm -rf "$tmpdir"
+    rm -rf "$tmpdir" "$tarball_dir"
 
     [[ ! -d "$XUI_DIR" ]] && { print_err "После установки ${XUI_DIR} не найден"; return 1; }
 
@@ -504,16 +505,22 @@ xui_install() {
         print_info "Проверь: journalctl -u ${XUI_SERVICE} --no-pager -n 50"
         return 1
     fi
+    # - транзакция настроек: база и env возвращаются, если проверки не прошли -
+    eli_txn_begin "xui.settings" || { print_err "Не открыть транзакцию настроек"; return 1; }
+    eli_txn_backup_file "$XUI_DB" || { eli_txn_rollback; return 1; }
+    eli_txn_backup_file "$XUI_ENV" || true
+
     systemctl stop "$XUI_SERVICE" 2>/dev/null || true
     if ! eli_fact_unit "$XUI_SERVICE" 5 inactive; then
         print_err "3X-UI не остановился перед записью настроек: установка отменена"
+        eli_txn_rollback
         return 1
     fi
 
-    "$XUI_BIN" setting -port "$panel_port" >/dev/null 2>&1 || true
-    "$XUI_BIN" setting -webBasePath "$panel_path" >/dev/null 2>&1 || true
+    eli_txn_run "$XUI_BIN" setting -port "$panel_port" >/dev/null 2>&1 || true
+    eli_txn_run "$XUI_BIN" setting -webBasePath "$panel_path" >/dev/null 2>&1 || true
     # - CLI принимает пароль только флагом: значение видно в argv процесса -
-    "$XUI_BIN" setting -username "$panel_user" -password "$panel_pass" >/dev/null 2>&1 || true
+    eli_txn_run "$XUI_BIN" setting -username "$panel_user" -password "$panel_pass" >/dev/null 2>&1 || true
 
     local shown
     shown=$("$XUI_BIN" setting -show 2>&1 || true)
@@ -521,6 +528,7 @@ xui_install() {
         print_err "Настройки 3X-UI не подтвердились после записи (port/webBasePath)"
         print_info "Ожидалось: порт ${panel_port}, путь ${panel_path}"
         print_info "Фактический вывод: ${shown//$'\n'/; }"
+        eli_txn_rollback
         systemctl start "$XUI_SERVICE" 2>/dev/null || true
         return 1
     fi
@@ -528,17 +536,27 @@ xui_install() {
     systemctl start "$XUI_SERVICE" 2>/dev/null || true
     # - живость панели после правок сверяется опросом: иначе установка -
     # - объявляет успех, а панель лежит -
-    if ! eli_fact_unit "$XUI_SERVICE" 5; then
+    if ! eli_txn_expect "unit ${XUI_SERVICE} активен" eli_fact_unit "$XUI_SERVICE" 5; then
+        print_err "3X-UI не поднялся после записи настроек"
+        eli_txn_rollback
+        systemctl start "$XUI_SERVICE" 2>/dev/null || true
         return 1
     fi
     # - логин подтверждает и порт/путь, и пару логин/пароль: CLI мог -
     # - напечатать ошибку и всё равно вернуть 0 -
-    if ! _xui_verify_login "$panel_port" "$panel_path" "$panel_user" "$panel_pass"; then
+    if ! eli_txn_expect "логин в панели 3X-UI" _xui_verify_login "$panel_port" "$panel_path" "$panel_user" "$panel_pass"; then
         print_err "Панель 3X-UI не принимает сохранённые логин/пароль или путь"
         print_info "Проверь: journalctl -u ${XUI_SERVICE} --no-pager -n 50"
+        eli_txn_rollback
+        systemctl start "$XUI_SERVICE" 2>/dev/null || true
         return 1
     fi
     print_ok "Настройки 3X-UI подтверждены входом в панель"
+    if ! eli_txn_commit; then
+        print_err "Настройки 3X-UI откатаны"
+        systemctl start "$XUI_SERVICE" 2>/dev/null || true
+        return 1
+    fi
 
     # - лимит файлов: побочная правка, её провал панель не отменяет -
     if ! _xui_fix_nofile; then

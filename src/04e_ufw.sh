@@ -29,6 +29,26 @@ _ufw_has_rule() {
     grep -Eq "(^|[[:space:]])${pat}([[:space:]]|$)" <<< "$out"
 }
 
+# - отсутствие правила: обратная проверка для обязательного факта -
+_ufw_no_rule() {
+    ! _ufw_has_rule "$1" "$2"
+}
+
+# - правило по спецификации ufw: порт или диапазон, протокол опционален -
+_ufw_rule_present() {
+    local spec="$1" pp proto=""
+    pp="${spec%/*}"
+    [[ "$spec" == */* ]] && proto="${spec#*/}"
+    _ufw_has_rule "$pp" "$proto"
+}
+
+# - перечитать живые правила после возврата файлов: активный UFW держит -
+# - снятое правило в iptables, пока не выполнен reload -
+_ufw_reload_if_active() {
+    ufw_active || return 0
+    ufw reload >/dev/null 2>&1 || true
+}
+
 ufw_show_status() {
     _ufw_guard || return 0
     print_section "Статус UFW"
@@ -175,6 +195,13 @@ ufw_add_port() {
     local comment=""
     echo -e "  ${CYAN}Комментарий - пометка для чего этот порт (например: nginx, игра). Можно пропустить.${NC}"
     ask "Комментарий (опционально)" "" comment
+    # - транзакция: файлы правил ufw в откат, наличие правила - обязательный факт -
+    if ! eli_txn_begin "ufw_add_port ${port_spec}"; then
+        print_err "Транзакция не открылась: правило не добавлено"
+        return 1
+    fi
+    eli_txn_backup_file "/etc/ufw/user.rules" || { eli_txn_rollback; return 1; }
+    eli_txn_backup_file "/etc/ufw/user6.rules" || { eli_txn_rollback; return 1; }
     local allow_rc=0
     if [[ -n "$comment" ]]; then
         ufw allow "${port_spec}" comment "${comment}" || allow_rc=$?
@@ -183,8 +210,15 @@ ufw_add_port() {
     fi
     if [[ $allow_rc -ne 0 ]]; then
         print_err "ufw отклонил правило: allow ${port_spec}"
+        eli_txn_rollback
         return 1
     fi
+    if ! eli_txn_expect "правило allow ${port_spec} в ufw" _ufw_rule_present "$port_spec"; then
+        ufw delete allow "${port_spec}" >/dev/null 2>&1 || true
+        eli_txn_rollback
+        return 1
+    fi
+    eli_txn_commit || return 1
     print_ok "Добавлено: allow ${port_spec}"
     return 0
 }
@@ -233,8 +267,18 @@ ufw_delete_rule() {
         print_err "Правило #${num} не найдено в списке"
         return 1
     fi
+    # - транзакция: файлы правил в откат; провал удаления или факта -
+    # - возвращает файлы и перечитывает живой файрвол -
+    if ! eli_txn_begin "ufw_delete_rule #${num}"; then
+        print_err "Транзакция не открылась: правило не удаляется"
+        return 1
+    fi
+    eli_txn_backup_file "/etc/ufw/user.rules" || { eli_txn_rollback; return 1; }
+    eli_txn_backup_file "/etc/ufw/user6.rules" || { eli_txn_rollback; return 1; }
     if ! echo "y" | ufw delete "$num" 2>/dev/null; then
         print_err "Не удалось удалить #${num}"
+        eli_txn_rollback
+        _ufw_reload_if_active
         return 1
     fi
 
@@ -256,6 +300,8 @@ ufw_delete_rule() {
         if [[ -n "$twin_num" ]]; then
             if ! echo "y" | ufw delete "$twin_num" 2>/dev/null; then
                 print_err "Пара #${twin_num} не удалена: смотри раздел Статус UFW"
+                eli_txn_rollback
+                _ufw_reload_if_active
                 return 1
             fi
         fi
@@ -271,6 +317,12 @@ ufw_delete_rule() {
     n_after=$(_ufw_norm_count "$norm" "$final")
     if (( n_after != n_before - expect )); then
         print_err "Правило #${num} числится в списке после удаления: смотри раздел Статус UFW"
+        eli_txn_rollback
+        _ufw_reload_if_active
+        return 1
+    fi
+    if ! eli_txn_commit; then
+        _ufw_reload_if_active
         return 1
     fi
     if [[ -n "$twin_num" ]]; then
@@ -313,6 +365,9 @@ ufw_check_ports() {
 
         if echo "$ufw_rules" | grep -qE "(^|[[:space:]])${port}/${proto}([[:space:]]|$)|(^|[[:space:]])${port}([[:space:]]|$)"; then
             echo -e "  ${GREEN}[OK]${NC} ${port}/${proto}  ${proc}"
+        elif [[ "$proto" == "udp" ]] && eli_port_dropped "$port"; then
+            # - порт намеренно закрыт DROP обфускатора: правило не требуется -
+            echo -e "  ${GREEN}[OK]${NC} ${port}/${proto}  ${proc}  ${GREEN}закрыт DROP${NC}"
         else
             echo -e "  ${YELLOW}[!]${NC}  ${port}/${proto}  ${proc}  ${YELLOW}нет правила${NC}"
             missing_rules+=("${port}:${proto}:${proc}")

@@ -370,21 +370,6 @@ _mim_build_conf() {
     return 0
 }
 
-# --> MIM: ПРОВЕРКА ЗАПУСКА <--
-# - юнит Type=notify, но SubState надёжнее: is-active бывает activating -
-_mim_verify_active() {
-    local wan="$1" unit sub
-    unit=$(_mim_unit "$wan")
-    sleep 2
-    sub=$(systemctl show -p SubState --value "$unit" 2>/dev/null)
-    if [[ "$sub" == "running" ]] && systemctl is-active --quiet "$unit"; then
-        return 0
-    fi
-    print_err "Инстанс ${unit} не удержался (SubState=${sub:-?}). Причина:"
-    journalctl -u "$unit" -n 15 --no-pager 2>/dev/null | sed 's/^/    /'
-    return 1
-}
-
 # --> MIM: ПРОБНОЕ РАЗВОРАЧИВАНИЕ <--
 # - mimic run --check грузит BPF на интерфейс и выходит: ловим отказ верификатора до боя -
 # - при живом инстансе не гоняем: --check упрётся в тот же lock-файл в /run/mimic -
@@ -421,23 +406,32 @@ _mim_apply() {
         print_info "Привязок не осталось = инстанс ${unit} остановлен"
         return 0
     fi
-    systemctl enable "$unit" 2>/dev/null
-    systemctl restart "$unit" 2>/dev/null
-    _mim_verify_active "$wan"
+    eli_service_start "$unit"
 }
 
 # --> MIM: UFW ДЛЯ ПОРТА <--
 # - порт нужен и как TCP, и как UDP: данные XDP возвращает в UDP до netfilter, а SYN -
 # - и keepalive mimic шлёт настоящим TCP через raw-сокет (доходят до INPUT) -
 # - rc: номер строки своего правила в нумерованном списке, пусто - правила нет -
+# - порт сужает поиск: правила одного интерфейса на разных портах не путаются -
 _mim_ufw_rule_num() {
-    local iface="$1"
-    ufw status numbered 2>/dev/null | sed -n "s/^ *\[ *\([0-9][0-9]*\)\].*mimic ${iface}.*/\1/p" | head -1
+    local iface="$1" port="${2:-}"
+    if [[ -n "$port" ]]; then
+        ufw status numbered 2>/dev/null | sed -n "s/^ *\[ *\([0-9][0-9]*\)\].*${port}\/tcp.*mimic ${iface}.*/\1/p" | head -1
+    else
+        ufw status numbered 2>/dev/null | sed -n "s/^ *\[ *\([0-9][0-9]*\)\].*mimic ${iface}.*/\1/p" | head -1
+    fi
 }
 
 # - правило mimic в отложенных: ufw show added видит его и при неактивном файрволе -
+# - с портом сверяется точная спецификация правила, а не одна метка интерфейса -
 _mim_ufw_added() {
-    ufw show added 2>/dev/null | grep -qF "mimic $1"
+    local iface="$1" port="${2:-}"
+    if [[ -n "$port" ]]; then
+        ufw show added 2>/dev/null | grep -qF "allow ${port}/tcp comment 'mimic ${iface}'"
+    else
+        ufw show added 2>/dev/null | grep -qF "mimic ${iface}"
+    fi
 }
 
 _mim_ufw_open() {
@@ -463,11 +457,11 @@ _mim_ufw_close() {
     # - метка; удаление по спецификации унесло бы правило пользователя на том же порту -
     if ufw_active; then
         for i in 1 2 3; do
-            num=$(_mim_ufw_rule_num "$iface")
+            num=$(_mim_ufw_rule_num "$iface" "$port")
             [[ -z "$num" ]] && break
             echo "y" | ufw delete "$num" >/dev/null 2>&1
         done
-        if [[ -n "$(_mim_ufw_rule_num "$iface")" ]]; then
+        if [[ -n "$(_mim_ufw_rule_num "$iface" "$port")" ]]; then
             print_err "Правило mimic на ${port}/tcp осталось в UFW: проверь ufw status verbose"
             return 1
         fi
@@ -475,9 +469,9 @@ _mim_ufw_close() {
     fi
     # - неактивный UFW номеров не отдаёт: своё правило ищется в отложенных -
     # - (ufw show added) и снимается по спецификации, факт - повторной проверкой -
-    _mim_ufw_added "$iface" || return 0
+    _mim_ufw_added "$iface" "$port" || return 0
     ufw delete allow "${port}/tcp" >/dev/null 2>&1
-    if _mim_ufw_added "$iface"; then
+    if _mim_ufw_added "$iface" "$port"; then
         print_err "Правило mimic на ${port}/tcp осталось в UFW: ufw show added"
         return 1
     fi
@@ -1357,7 +1351,14 @@ mim_unbind() {
 
 # --> MIM: ПОЛНОЕ УДАЛЕНИЕ <--
 mim_remove() {
-    _mim_installed || { print_warn "mimic не установлен"; return 0; }
+    # - restore возвращает книгу целиком: метка installed может остаться без движка -
+    # - движка нет, запись есть: удаляются остатки, чтобы книга не расходилась с машиной -
+    if [[ ! -x "$MIM_BIN" ]] && [[ "$(book_read ".mimic.installed")" == "true" ]]; then
+        print_warn "Движок mimic отсутствует (снят вне меню или потерян), в книге осталась метка установки"
+        print_warn "Снимаются остатки: конфиги, привязки, запись книги."
+    else
+        _mim_installed || { print_warn "mimic не установлен"; return 0; }
+    fi
     print_section "Полное удаление mimic"
     print_warn "Все привязки снимаются, клиентам придётся выключить свой mimic."
     local confirm=""

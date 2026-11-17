@@ -1,0 +1,8 @@
+# golden: rst_exec_missing
+--- вывод ---
+ok: живой
+bad: пропуск
+none: живой
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

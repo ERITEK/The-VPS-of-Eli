@@ -36,7 +36,7 @@ menu_vpn() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) menu_awg       || { print_warn "Ошибка в разделе AmneziaWG"; eli_pause; } ;;
@@ -83,7 +83,7 @@ menu_awg() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) awg_install    || { print_warn "Ошибка при установке AWG"; }; eli_pause ;;
@@ -129,7 +129,7 @@ menu_zapret() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) zapret_install || { print_warn "Ошибка при установке zapret2"; }; eli_pause ;;
@@ -185,7 +185,7 @@ menu_wgobfs() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) wgo_install || { print_warn "Ошибка при установке wg-obfuscator"; }; eli_pause ;;
@@ -240,7 +240,7 @@ menu_mimic() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) mim_install || { print_warn "Ошибка при установке mimic"; }; eli_pause ;;
@@ -287,7 +287,7 @@ menu_xui() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) xui_install       || print_warn "Ошибка при установке 3X-UI" ;;
@@ -336,7 +336,7 @@ menu_otl() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) otl_install        || print_warn "Ошибка при установке Outline" ;;
@@ -383,7 +383,7 @@ menu_proxy() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) menu_mtp  || { print_warn "Ошибка в разделе MTProto"; eli_pause; } ;;
@@ -423,7 +423,7 @@ menu_mtp() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) mtp_add     || print_warn "Ошибка при добавлении MTProto" ;;
@@ -463,7 +463,7 @@ menu_s5() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) s5_add    || print_warn "Ошибка при добавлении SOCKS5" ;;
@@ -506,7 +506,7 @@ menu_hy2() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) hy2_add         || print_warn "Ошибка при добавлении Hysteria 2" ;;
@@ -550,7 +550,7 @@ menu_sig() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) sig_install || print_warn "Ошибка при установке Signal Proxy" ;;
@@ -588,7 +588,7 @@ menu_comms() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) menu_ts  || { print_warn "Ошибка в разделе TeamSpeak"; eli_pause; } ;;
@@ -628,7 +628,7 @@ menu_ts() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) ts_install     || print_warn "Ошибка при установке TeamSpeak" ;;
@@ -672,7 +672,7 @@ menu_mbl() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) mbl_install     || print_warn "Ошибка при установке Mumble" ;;
@@ -726,7 +726,7 @@ menu_maint() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) diag_run        || { print_warn "Ошибка при диагностике"; eli_pause; } ;;
@@ -771,7 +771,7 @@ menu_unbound() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) unbound_install || print_warn "Ошибка при установке Unbound" ;;
@@ -812,7 +812,7 @@ menu_ssh() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) ssh_show_status  || print_warn "Ошибка при показе статуса" ;;
@@ -872,7 +872,7 @@ menu_ufw() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) ufw_show_status || print_warn "Ошибка при показе статуса" ;;
@@ -916,7 +916,7 @@ menu_update() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) update_scan    || print_warn "Ошибка при проверке обновлений" ;;
@@ -956,16 +956,19 @@ menu_backup() {
         echo -e "  ${GREEN}2)${NC} Восстановить из бэкапа"
         echo -e "  ${GREEN}3)${NC} Список бэкапов"
         echo ""
+        echo -e "  ${GREEN}4)${NC} Офсайт-бэкап (Restic)"
+        echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) backup_create   || print_warn "Ошибка при создании бэкапа" ;;
             2) backup_restore  || print_warn "Ошибка при восстановлении" ;;
             3) backup_list     || print_warn "Ошибка при показе списка" ;;
+            4) menu_restic     || print_warn "Ошибка в офсайт-бэкапе" ;;
             0) return 0 ;;
-            *) print_warn "Введите число от 0 до 3" ;;
+            *) print_warn "Введите число от 0 до 4" ;;
         esac
 
         eli_pause
@@ -999,7 +1002,7 @@ menu_tgbot() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) tgbot_setup   || print_warn "Ошибка при настройке" ;;
@@ -1029,7 +1032,7 @@ eli_main() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Выход"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice nofooter
 
         case "$choice" in
             1) boot_run   || { print_warn "Ошибка в разделе Старт"; }; eli_pause ;;

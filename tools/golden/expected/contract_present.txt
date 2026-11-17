@@ -1,0 +1,14 @@
+# golden: contract_present
+--- вывод ---
+xui: нет
+awg: нет
+ufw: да
+teamspeak: нет
+xui true: да
+teamspeak true: да
+awg живой: да
+ufw с бинарём: да
+ufw без бинаря: нет
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

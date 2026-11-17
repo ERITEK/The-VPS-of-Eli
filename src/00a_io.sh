@@ -46,7 +46,7 @@ if ! flock -n 200; then
 fi
 printf '%s\n' "$$" > "$LOCKFILE"
 
-ELI_VERSION="1.1.0"
+ELI_VERSION="1.1.1"
 
 # --> ФУНКЦИИ ВЫВОДА <--
 # - единый набор для всего скрипта -
@@ -196,16 +196,43 @@ eli_read_line() {
     printf -v "$__eli_varname" '%s' "$__eli_input"
 }
 
-eli_read_choice() {
+# --> ВЫХОД И МЕНЮ <--
+# - клавиша X в меню завершает скрипт без обхода по 0; в полях ввода X -
+# - остаётся обычной буквой, перехват живёт только в чтении меню -
+_eli_is_exit_key() {
+    case "${1:-}" in
+        x|X) return 0 ;;
+    esac
+    return 1
+}
+
+# - выход: вернуть терминал, снять ловушки, закрыть lock, выйти -
+eli_exit() {
+    eli_tty_restore 2>/dev/null || true
+    trap - EXIT INT TERM
+    exec 200>&- 2>/dev/null || true
+    exit 0
+}
+
+eli_menu_read() {
+    if [[ "${2:-}" != "nofooter" ]]; then
+        echo -e "  ${GREEN}X)${NC} Выход"
+        echo ""
+    fi
     eli_read_line "  ${BOLD}Выбор:${NC} " "$1"
+    if _eli_is_exit_key "${!1:-}"; then
+        echo ""
+        print_info "Выход."
+        eli_exit
+    fi
 }
 
 ask() {
     local prompt="$1" default="$2" varname="$3" p
     if [[ -n "$default" ]]; then
-        p=$(printf '  %b%s%b [%s]: ' "$BOLD" "$prompt" "$NC" "$default")
+        p=$(printf '  %bВведи%b %b%s%b [%s] %b(Enter - оставить, или своё)%b: ' "$CYAN" "$NC" "$BOLD" "$prompt" "$NC" "$default" "$CYAN" "$NC")
     else
-        p=$(printf '  %b%s%b: ' "$BOLD" "$prompt" "$NC")
+        p=$(printf '  %bВведи%b %b%s%b: ' "$CYAN" "$NC" "$BOLD" "$prompt" "$NC")
     fi
     eli_read_line "$p" "$varname" "$default"
 }
@@ -214,9 +241,9 @@ ask_yn() {
     local prompt="$1" default="$2" varname="$3" value="" p
     while true; do
         if [[ "$default" == "y" ]]; then
-            p=$(printf '  %b%s%b [Y/n]: ' "$BOLD" "$prompt" "$NC")
+            p=$(printf '  %bПодтверди%b %b%s%b [Y/n, Enter=да]: ' "$CYAN" "$NC" "$BOLD" "$prompt" "$NC")
         else
-            p=$(printf '  %b%s%b [y/N]: ' "$BOLD" "$prompt" "$NC")
+            p=$(printf '  %bПодтверди%b %b%s%b [y/N, Enter=нет]: ' "$CYAN" "$NC" "$BOLD" "$prompt" "$NC")
         fi
 
         eli_read_line "$p" value "$default"

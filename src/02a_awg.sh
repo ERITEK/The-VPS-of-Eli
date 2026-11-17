@@ -3455,6 +3455,43 @@ awg_change_dns() {
 # - симптом выгорания: ping в туннеле живой, throughput мёртв. Новый порт: сервер + -
 # - ufw + env + книга + клиентские conf; старый порт в burned_ports (TTL 30 дней), -
 # - опционально grace-redirect через systemd-run (до ребута сервера) -
+# - откат смены порта: файлы возвращает транзакция, живое состояние - здесь -
+# - порядок: книга на старый порт, рестарт на старом порту, возврат целей -
+# - обфускатора и mimic, возврат правила UFW -
+_awg_port_undo() {
+    local iface="$1" old_port="$2" new_port="$3" behind="$4"
+    book_write ".awg.interfaces.${iface}.port" "$old_port" number
+    systemctl restart "awg-quick@${iface}" >/dev/null 2>&1
+    sleep 1
+    if systemctl is-active --quiet "awg-quick@${iface}" \
+       && [[ "$(awg show "${iface}" listen-port 2>/dev/null)" == "$old_port" ]]; then
+        print_ok "Откат: ${iface} снова на ${old_port}"
+    else
+        print_err "Откат не поднялся: journalctl -xeu awg-quick@${iface} --no-pager | tail -20"
+    fi
+    if [[ -n "$behind" ]]; then
+        wgo_retarget "$iface" "$new_port" "$old_port" >/dev/null 2>&1 || true
+    fi
+    if declare -f mim_retarget >/dev/null 2>&1; then
+        mim_retarget "$iface" "$new_port" "$old_port" >/dev/null 2>&1 || true
+    fi
+    if [[ -z "$behind" ]] && command -v ufw &>/dev/null; then
+        ufw delete allow "${new_port}/udp" >/dev/null 2>&1 || true
+        ufw allow "${old_port}/udp" comment "AWG ${iface}" >/dev/null 2>&1 || true
+    fi
+}
+
+# - книга подтверждает новый порт: обязательный факт транзакции -
+_awg_book_port_is() {
+    [[ "$(book_read ".awg.interfaces.\"${1}\".port")" == "$2" ]]
+}
+
+# - пир снят с живого интерфейса: список пиров не содержит ключ -
+_awg_live_peer_absent() {
+    local iface="$1" pub="$2"
+    ! awg show "$iface" peers 2>/dev/null | grep -qxF "$pub"
+}
+
 awg_change_port() {
     print_section "Сменить порт интерфейса"
     awg_select_iface
@@ -3499,11 +3536,27 @@ awg_change_port() {
     ask_yn "Сменить порт ${old_port} -> ${new_port} у интерфейса ${iface}?" "y" confirm
     [[ "$confirm" == "yes" ]] || { print_info "Отменено"; return 0; }
 
+    # - транзакция: файлы интерфейса в откат, живые проверки - обязательные факты -
+    if ! eli_txn_begin "awg_change_port ${iface}"; then
+        print_err "Транзакция не открылась: смена порта отменена"
+        return 1
+    fi
+    eli_txn_backup_file "$conf_file" || { eli_txn_rollback; return 1; }
+    eli_txn_backup_file "$env_file" || { eli_txn_rollback; return 1; }
+    eli_txn_backup_file "${AWG_SETUP_DIR}/server.env" || { eli_txn_rollback; return 1; }
+    eli_txn_backup_file "${AWG_SETUP_DIR}/burned_ports" || { eli_txn_rollback; return 1; }
+    local _awg_cf
+    for _awg_cf in "$(awg_iface_clients "$iface")"/*/client.conf; do
+        [[ -f "$_awg_cf" ]] || continue
+        eli_txn_backup_file "$_awg_cf" || { eli_txn_rollback; return 1; }
+    done
+
     # - сервер: замена ListenPort с контролем (sed молчивал бы неудачу), рестарт. -
     # - рестарт упал или порт не подтвердился -> откат conf на старый и подъём, -
     # - burned/ufw/env/книга/клиенты трогаются только после подтверждённого рестарта -
     if ! _awg_conf_set_port "$conf_file" "$old_port" "$new_port"; then
         print_err "Строка 'ListenPort = ${old_port}' в ${conf_file} не найдена, ничего не изменено"
+        eli_txn_rollback
         return 1
     fi
     # - интерфейс за обфускатором: новый порт закрывается до рестарта, -
@@ -3513,7 +3566,7 @@ awg_change_port() {
         behind_obfs="1"
         if ! wgo_lock_awg_port "$iface" "$new_port"; then
             print_err "Не удалось закрыть ${new_port}/udp -> смена порта отменена"
-            _awg_conf_set_port "$conf_file" "$new_port" "$old_port"
+            eli_txn_rollback
             return 1
         fi
     fi
@@ -3522,7 +3575,7 @@ awg_change_port() {
     if ! systemctl is-active --quiet "awg-quick@${iface}" \
        || [[ "$(awg show "${iface}" listen-port 2>/dev/null)" != "$new_port" ]]; then
         print_err "Подъём на порту ${new_port} не удался, откатываю на ${old_port}"
-        _awg_conf_set_port "$conf_file" "$new_port" "$old_port"
+        eli_txn_rollback
         [[ -n "$behind_obfs" ]] && wgo_unlock_awg_port "$iface" "$new_port"
         systemctl restart "awg-quick@${iface}"
         sleep 1
@@ -3549,7 +3602,8 @@ awg_change_port() {
         fi
     fi
     echo "${old_port} ${now}" >> "${AWG_SETUP_DIR}/burned_ports"
-    eli_fact_line "${AWG_SETUP_DIR}/burned_ports" "^${old_port} " "Выгоревший порт ${old_port}"
+    eli_txn_expect "порт ${old_port} в burned" \
+        grep -q "^${old_port} " "${AWG_SETUP_DIR}/burned_ports"
 
     # - ufw: новый открыть, старый закрыть (там же, где create/delete интерфейса); -
     # - за обфускатором порт туннеля наружу не выставляется, новый закрыт заранее -
@@ -3558,24 +3612,42 @@ awg_change_port() {
         ufw delete allow "${old_port}/udp" >/dev/null 2>&1 || true
         # - факт смены: новый порт открыт, старый снят; успех печатает -
         # - конец смены, провал виден здесь -
-        if ! _ufw_has_rule "$new_port" "udp"; then
-            print_err "UFW не разрешил ${new_port}/udp: ufw allow ${new_port}/udp и проверь ufw status verbose"
-        fi
-        if _ufw_has_rule "$old_port" "udp"; then
-            print_warn "UFW не закрыт ${old_port}/udp: ufw delete allow ${old_port}/udp"
-        fi
+        eli_txn_expect "UFW разрешил ${new_port}/udp" _ufw_has_rule "$new_port" "udp"
+        eli_txn_expect "UFW закрыл ${old_port}/udp" _ufw_no_rule "$old_port" "udp"
     fi
 
-    # - env (iface + legacy server.env) и книга -
+    # - env (iface + legacy server.env) и книга: правки подтверждаются фактом -
+    # - legacy server.env принадлежит первому интерфейсу: его порт проверяется, -
+    # - только когда файл держит старый порт сменяемого интерфейса -
+    local legacy_port=""
+    if [[ -f "${AWG_SETUP_DIR}/server.env" ]]; then
+        legacy_port=$(eli_source_env "${AWG_SETUP_DIR}/server.env" SERVER_PORT || true)
+    fi
     sed -i "s/^SERVER_PORT=\"${old_port}\"/SERVER_PORT=\"${new_port}\"/" "$env_file"
     [[ -f "${AWG_SETUP_DIR}/server.env" ]] && \
         sed -i "s/^SERVER_PORT=\"${old_port}\"/SERVER_PORT=\"${new_port}\"/" "${AWG_SETUP_DIR}/server.env"
+    eli_txn_expect "env ${iface}: SERVER_PORT ${new_port}" \
+        grep -q "^SERVER_PORT=\"${new_port}\"" "$env_file"
+    if [[ -n "$legacy_port" && "$legacy_port" == "$old_port" ]]; then
+        eli_txn_expect "server.env: SERVER_PORT ${new_port}" \
+            grep -q "^SERVER_PORT=\"${new_port}\"" "${AWG_SETUP_DIR}/server.env"
+    fi
     book_write ".awg.interfaces.${iface}.port" "$new_port" number
+    eli_txn_expect "книга: порт ${iface} ${new_port}" _awg_book_port_is "$iface" "$new_port"
+
+    # - обязательные факты не прошли: файлы и живое состояние возвращаются -
+    if (( TXN_FAILS > 0 )); then
+        eli_txn_commit
+        _awg_port_undo "$iface" "$old_port" "$new_port" "$behind_obfs"
+        return 1
+    fi
 
     # - обфускатор: цель инстанса переезжает вместе с туннелем -
     if [[ -n "$behind_obfs" ]]; then
         if ! wgo_retarget "$iface" "$old_port" "$new_port"; then
             print_err "Инстанс обфускатора не перешёл на порт ${new_port}: journalctl -xeu wgobfs-eli@${iface} --no-pager | tail -20"
+            eli_txn_rollback
+            _awg_port_undo "$iface" "$old_port" "$new_port" "$behind_obfs"
             return 1
         fi
     fi
@@ -3584,6 +3656,8 @@ awg_change_port() {
     if declare -f mim_retarget >/dev/null 2>&1; then
         if ! mim_retarget "$iface" "$old_port" "$new_port"; then
             print_err "mimic не переведён на порт ${new_port}: туннель на новом порту, фильтр на старом"
+            eli_txn_rollback
+            _awg_port_undo "$iface" "$old_port" "$new_port" "$behind_obfs"
             return 1
         fi
     fi
@@ -3604,6 +3678,11 @@ awg_change_port() {
         done
     fi
 
+    # - фиксация: провал обязательного факта возвращает файлы и живое состояние -
+    if ! eli_txn_commit; then
+        _awg_port_undo "$iface" "$old_port" "$new_port" "$behind_obfs"
+        return 1
+    fi
     print_ok "Порт ${iface}: ${old_port} -> ${new_port}"
     print_info "Обновлено клиентских конфигов: ${clients_changed} (${clients_dir}/<имя>/client.conf)"
     if (( clients_miss > 0 )); then
@@ -3964,6 +4043,14 @@ awg_edit_client() {
     cfg="$(awg_iface_clients "$iface")/${name}/client.conf"
     [[ ! -f "$cfg" ]] && { print_err "Конфиг не найден: ${cfg}"; return 0; }
 
+    # - транзакция: правки клиента - одна единица; не прошёл факт - конфиг
+    # - возвращается целиком, а не остаётся с половиной применённых полей -
+    if ! eli_txn_begin "awg_edit_client ${iface}/${name}"; then
+        print_err "Транзакция не открылась: правка отменена"
+        return 1
+    fi
+    eli_txn_backup_file "$cfg" || { eli_txn_rollback; return 1; }
+
     # - правки только в клиентском .conf: endpoint/DNS/AllowedIPs/MTU задают -
     # - поведение устройства. серверный peer (PublicKey + IP/32) не меняется, -
     # - reload интерфейса не требуется -
@@ -4001,6 +4088,9 @@ awg_edit_client() {
                 sed -i "s|^Endpoint = .*|Endpoint = ${new_ep}|" "$cfg"
                 if eli_fact_line "$cfg" "^Endpoint = ${new_ep}\$" "Endpoint"; then
                     print_ok "Endpoint: ${new_ep}"; changed=1
+                else
+                    eli_txn_rollback
+                    return 1
                 fi
                 ;;
             2)
@@ -4019,6 +4109,9 @@ awg_edit_client() {
                 sed -i "s|^DNS = .*|DNS = ${new_dns}|" "$cfg"
                 if eli_fact_line "$cfg" "^DNS = ${new_dns}\$" "DNS"; then
                     print_ok "DNS: ${new_dns}"; changed=1
+                else
+                    eli_txn_rollback
+                    return 1
                 fi
                 ;;
             3)
@@ -4036,6 +4129,9 @@ awg_edit_client() {
                 sed -i "s|^AllowedIPs = .*|AllowedIPs = ${new_allowed}|" "$cfg"
                 if eli_fact_line "$cfg" "^AllowedIPs = ${new_allowed}\$" "AllowedIPs"; then
                     print_ok "AllowedIPs: ${new_allowed}"; changed=1
+                else
+                    eli_txn_rollback
+                    return 1
                 fi
                 ;;
             4)
@@ -4049,12 +4145,20 @@ awg_edit_client() {
                     print_ok "MTU: ${new_mtu}"
                     print_info "Для YouTube/QUIC при обрывах видео пробуй MTU 1280 или ниже"
                     changed=1
+                else
+                    eli_txn_rollback
+                    return 1
                 fi
                 ;;
             0) break ;;
             *) print_warn "0-4" ;;
         esac
     done
+
+    # - фиксация правок клиента: все факты уже подтверждены по ходу -
+    if ! eli_txn_commit; then
+        return 1
+    fi
 
     if [[ $changed -eq 1 ]]; then
         echo ""
@@ -4099,40 +4203,67 @@ awg_delete_client() {
     ask_yn "Подтвердить?" "n" confirm
     [[ "$confirm" != "yes" ]] && { print_info "Отмена"; return 0; }
 
-    local cdir conf rm_rc=0
+    local cdir conf rm_rc=0 stage="" had_pub=""
     cdir="$(awg_iface_clients "$iface")/${name}"
     conf=$(awg_iface_conf "$iface")
+
+    # - транзакция: конфиг интерфейса в откат, каталог клиента - в карантин -
+    # - до фиксации: провал возвращает пир в конфиге и файлы клиента -
+    if ! eli_txn_begin "awg_delete_client ${iface}/${name}"; then
+        print_err "Транзакция не открылась: удаление отменено"
+        return 1
+    fi
+    eli_txn_backup_file "$conf" || { eli_txn_rollback; return 1; }
+
     if [[ -f "${cdir}/public.key" ]]; then
-        local pub
-        pub=$(cat "${cdir}/public.key")
-        awg_remove_peer_by_pubkey "$conf" "$pub" || rm_rc=$?
-        if (( rm_rc == 0 )); then
-            print_ok "Пир удалён из конфига"
-            awg_apply_peer "$iface" "$pub" ""
-        elif (( rm_rc == 2 )); then
-            print_warn "Пир клиента в конфиге не найден (уже снят)"
-            # - в конфиге пира нет, но живой интерфейс мог его удерживать: -
-            # - пир снимается и с живого интерфейса -
-            awg_apply_peer "$iface" "$pub" ""
+        had_pub=$(cat "${cdir}/public.key")
+        awg_remove_peer_by_pubkey "$conf" "$had_pub" || rm_rc=$?
+        if (( rm_rc == 0 || rm_rc == 2 )); then
+            if (( rm_rc == 0 )); then
+                print_ok "Пир удалён из конфига"
+            else
+                print_warn "Пир клиента в конфиге не найден (уже снят)"
+            fi
+            awg_apply_peer "$iface" "$had_pub" ""
         else
             print_err "Пир не снят: конфиг интерфейса не менялся, файлы клиента сохранены"
+            eli_txn_rollback
             return 1
         fi
     else
         awg_remove_peer_by_name "$conf" "$name" || rm_rc=$?
-        if (( rm_rc == 0 )); then
-            # - без файла ключа пир снимается только перечитыванием конфига интерфейса -
-            awg_reload_iface "$iface"
-        elif (( rm_rc == 2 )); then
-            print_warn "Пир клиента в конфиге не найден (уже снят)"
-            # - конфиг пира не содержал, конфиг интерфейса перечитывается -
+        if (( rm_rc == 0 || rm_rc == 2 )); then
+            (( rm_rc == 0 )) || print_warn "Пир клиента в конфиге не найден (уже снят)"
             awg_reload_iface "$iface"
         else
             print_err "Пир не снят: конфиг интерфейса не менялся, файлы клиента сохранены"
+            eli_txn_rollback
             return 1
         fi
     fi
-    rm -rf "${cdir:?}"
+
+    # - файлы клиента уводятся в карантин и удаляются только после фиксации -
+    stage=$(mktemp -d) || { eli_txn_rollback; return 1; }
+    if ! mv "$cdir" "$stage/"; then
+        print_err "Каталог клиента не убран: ${cdir}"
+        eli_txn_rollback
+        rm -rf "$stage"
+        awg_reload_iface "$iface"
+        return 1
+    fi
+    if [[ -n "$had_pub" ]]; then
+        eli_txn_expect "пир ${had_pub} снят с интерфейса" _awg_live_peer_absent "$iface" "$had_pub"
+    else
+        eli_txn_expect "каталог клиента ${name} убран" test ! -e "$cdir"
+    fi
+
+    if ! eli_txn_commit; then
+        mv "$stage/${name}" "$cdir" 2>/dev/null || true
+        rm -rf "$stage"
+        awg_reload_iface "$iface"
+        return 1
+    fi
+    rm -rf "$stage"
     print_ok "Файлы клиента '${name}' удалены"
     return 0
 }
@@ -5219,7 +5350,7 @@ awg_manage() {
         echo ""
         echo -e "  ${GREEN}0)${NC} Назад"
         echo ""
-        eli_read_choice choice
+        eli_menu_read choice
 
         case "$choice" in
             1) awg_create_iface   || print_warn "Ошибка при создании интерфейса" ;;

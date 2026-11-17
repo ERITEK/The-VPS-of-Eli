@@ -1,0 +1,23 @@
+# golden: fetch_asset
+--- вывод ---
+== s1: без суммы ==
+  <yellow>[!!!]<off>  a.tgz: sha256 не передана, сверка суммы не выполняется
+rc=0 content=good
+== s1b: сверку делает вызывающий ==
+rc=0 content=good
+== s2: сумма не сошлась, повтор ==
+  <yellow>[!!!]<off>  b.tgz: sha256 не совпала (1d7a363ce124..., ждали 106675dc1490...), попытка 1/3
+rc=0 content=good
+== s3: все попытки мимо ==
+  <yellow>[!!!]<off>  c.tgz: sha256 не передана, сверка суммы не выполняется
+  <yellow>[!!!]<off>  c.tgz: HTTP 500, curl rc=0, попытка 1/3
+  <yellow>[!!!]<off>  c.tgz: HTTP 500, curl rc=0, попытка 2/3
+  <yellow>[!!!]<off>  c.tgz: HTTP 500, curl rc=0, попытка 3/3
+  <red>[xXx]<off> Не удалось скачать c.tgz: https://example.test/c.tgz
+rc=1 path=пусто
+== s4: без URL ==
+  <red>[xXx]<off> Нужны URL и имя ассета
+rc=1
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

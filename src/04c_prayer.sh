@@ -15,6 +15,16 @@ _pr_failed()  { _PR_FAILED+=("$1");  echo -e "  ${RED}[НЕ СМОГ]${NC}  $1";
 _pr_found()   {                      echo -e "  ${GREEN}[ОК]${NC}       $1"; }
 _pr_check()   {                      echo -e "  ${CYAN}[...]${NC}      $1"; }
 
+# - модуль без движка не имеет привязок: записи привязок снимаются, -
+# - конфиг на диске привязкой не считается (restore возвращает и его, и книгу) -
+_pr_drop_bindings() {
+    local coll="$1" label="$2" k
+    for k in $(jq -r "${coll} | keys[]?" "$_BOOK" 2>/dev/null); do
+        book_del "${coll}.\"${k}\""
+        _pr_fixed "book: убрана привязка ${label} ${k} (движка нет)"
+    done
+}
+
 _pr_find_file() {
     local dir
     local pattern="$1"; shift
@@ -33,6 +43,21 @@ _pr_find_file() {
 _pr_env_sq() {
     local v="${1//\'/"'\''"}"
     printf '%s' "$v"
+}
+
+# - сверка контрактов установленных модулей с фактом: расхождения -
+# - применяются (юниты поднимаются), результат идёт в счётчики Prayer -
+_pr_contract_phase() {
+    local mod fails
+    for mod in xui awg ufw teamspeak mumble outline mtproto socks5 hysteria2 zapret2 wgobfs mimic; do
+        eli_contract_present "$mod" || continue
+        eli_reconcile "$mod" fix >/dev/null 2>&1
+        fails=$?
+        (( ELI_RECONCILE_CHANGED > 0 )) && \
+            _PR_FIXED+=("контракт ${mod}: поднято юнитов ${ELI_RECONCILE_CHANGED}")
+        (( fails > 0 )) && _PR_WARN+=("контракт ${mod}: проблем ${fails}")
+    done
+    return 0
 }
 
 prayer_run() {
@@ -676,6 +701,7 @@ EOF
         [[ $zap_disk -eq 0 ]] && _pr_check "Zapret2: движок установлен, привязок нет"
     else
         [[ "$(book_read '.zapret.installed')" == "true" ]] && { book_write ".zapret.installed" "false" bool; _pr_updated "book: .zapret.installed=false"; }
+        _pr_drop_bindings ".zapret.interfaces" "zapret"
         _pr_check "Zapret2 не установлен"
     fi
     # - cron автообновления vs книга -
@@ -722,7 +748,11 @@ EOF
                 # - смысл модуля: порт туннеля не должен быть виден снаружи -
                 wport=$(eli_source_env "$wenv" SERVER_PORT)
                 if [[ -n "$wport" ]] && _ufw_has_rule "$wport" "udp"; then
-                    _pr_warn "wg-obfuscator ${wiface}: порт ${wport}/udp открыт в UFW, голый WireGuard виден снаружи"
+                    if eli_port_dropped "$wport"; then
+                        _pr_found "wg-obfuscator ${wiface}: порт ${wport}/udp закрыт DROP, снаружи не виден"
+                    else
+                        _pr_warn "wg-obfuscator ${wiface}: порт ${wport}/udp открыт в UFW, голый WireGuard виден снаружи"
+                    fi
                 fi
             fi
 
@@ -755,6 +785,7 @@ EOF
         [[ $wgo_disk -eq 0 ]] && _pr_check "wg-obfuscator: движок установлен, привязок нет"
     else
         [[ "$(book_read '.wgobfs.installed')" == "true" ]] && { book_write ".wgobfs.installed" "false" bool; _pr_updated "book: .wgobfs.installed=false"; }
+        _pr_drop_bindings ".wgobfs.instances" "wgobfs"
         _pr_check "wg-obfuscator не установлен"
     fi
 
@@ -858,8 +889,14 @@ EOF
         fi
     else
         [[ "$(book_read '.mimic.installed')" == "true" ]] && { book_write ".mimic.installed" "false" bool; _pr_updated "book: .mimic.installed=false"; }
+        _pr_drop_bindings ".mimic.instances" "mimic"
         _pr_check "mimic не установлен"
     fi
+
+    # --> СВЕРКА КОНТРАКТОВ <--
+    # - проверяются только установленные модули: отсутствие компонента -
+    # - это не расхождение; расхождения применяются, провалы идут в список внимания -
+    _pr_contract_phase
 
     # --> ФИНАЛЬНОЕ ОБНОВЛЕНИЕ <--
     book_write "._meta.updated" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"

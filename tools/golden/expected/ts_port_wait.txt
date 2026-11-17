@@ -1,0 +1,9 @@
+# golden: ts_port_wait
+--- вывод ---
+voice_busy_instant_rc=1
+voice_wait_rc=0
+ft_wait_rc=0
+absent_wait_rc=1
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

@@ -1,0 +1,63 @@
+# golden: awg_change_port
+--- вывод ---
+== s1: UFW не разрешил новый порт - откат файлов и живого состояния ==
+
+<cyan><bold>>> Сменить порт интерфейса<off>
+<cyan>------------------------------------------------------<off>
+
+  <cyan>Текущий порт awg0: <bold>1618<off>
+  <cyan>Показание к смене: ping в туннеле живой, скорость упала, а трафик мимо<off>
+  <cyan>туннеля быстрый - так выгорает UDP-порт на границе сети (DPI/антифлад).<off>
+  <cyan>У клиентов меняется одно поле - порт в Endpoint, ключи и обфускация не трогаются.<off>
+  <red>[xXx]<off> Проверка не прошла: UFW разрешил 40000/udp
+  <red>[xXx]<off> Транзакция awg_change_port awg0: провалов 1, откат
+  <cyan>*<off> Возвращено: <SB>/etc/amnezia/amneziawg/awg0.conf
+  <cyan>*<off> Возвращено: <SB>/etc/awg-setup/iface_awg0.env
+  <cyan>*<off> Удалено: <SB>/etc/awg-setup/server.env
+  <cyan>*<off> Удалено: <SB>/etc/awg-setup/burned_ports
+  <cyan>*<off> Возвращено: <SB>/etc/awg-setup/clients_awg0/client1/client.conf
+  <cyan>*<off> Возвращено: <SB>/etc/awg-setup/clients_awg0/laptop/client.conf
+  <cyan>*<off> Возвращено: <SB>/etc/awg-setup/clients_awg0/phone/client.conf
+  <yellow>[!!!]<off>  Транзакция awg_change_port awg0: откат выполнен
+  <green>[-OK-]<off> Откат: awg0 снова на 1618
+rc=1
+conf: 1618
+env: "1618"
+client: 1618
+book: 1618
+live: 1618
+ufw_new: нет ufw_old: 1
+--- ufw ---
+ufw allow 40000/udp comment AWG awg0
+ufw delete allow 1618/udp
+ufw delete allow 40000/udp
+ufw allow 1618/udp comment AWG awg0
+== s2: успех ==
+
+<cyan><bold>>> Сменить порт интерфейса<off>
+<cyan>------------------------------------------------------<off>
+
+  <cyan>Текущий порт awg0: <bold>1618<off>
+  <cyan>Показание к смене: ping в туннеле живой, скорость упала, а трафик мимо<off>
+  <cyan>туннеля быстрый - так выгорает UDP-порт на границе сети (DPI/антифлад).<off>
+  <cyan>У клиентов меняется одно поле - порт в Endpoint, ключи и обфускация не трогаются.<off>
+  <green>[-OK-]<off> Транзакция awg_change_port awg0: зафиксирована
+  <green>[-OK-]<off> Порт awg0: 1618 -> 40000
+  <cyan>*<off> Обновлено клиентских конфигов: 1 (<SB>/etc/awg-setup/clients_awg0/<имя>/client.conf)
+  <yellow>[!!!]<off>  Порт не значится в Endpoint у 2 конфигов: у клиента адрес обфускатора, а не туннеля
+  <cyan>*<off> Клиентам: обнови порт (одно поле) или перекачай свежий конфиг/QR (пункт 8)
+rc=0
+conf: 40000
+env: "40000"
+client: 40000
+book: 40000
+live: 40000
+ufw_new: 1 ufw_old: нет
+--- ufw ---
+ufw allow 40000/udp comment AWG awg0
+ufw delete allow 1618/udp
+--- mimic ---
+mim_retarget awg0 1618 40000
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

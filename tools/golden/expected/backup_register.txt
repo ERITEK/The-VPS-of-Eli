@@ -1,0 +1,29 @@
+# golden: backup_register
+--- вывод ---
+modules:
+xui
+awg
+ufw
+teamspeak
+mumble
+outline
+mtproto
+socks5
+hysteria2
+zapret2
+wgobfs
+mimic
+xui:
+<SB>/etc/x-ui
+<SB>/etc/3xui
+awg:
+<SB>/etc/awg-setup
+<SB>/etc/amnezia/amneziawg
+ufw:
+<SB>/etc/ufw
+unknown:
+rc=0
+--- вызовы платформы ---
+CMD flock -n 200
+CMD awg show interfaces
+rc=0

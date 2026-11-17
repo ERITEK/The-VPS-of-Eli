@@ -1,0 +1,61 @@
+# golden: awg_edit_client
+--- вывод ---
+== s1: endpoint обновлён, транзакция зафиксирована ==
+
+<cyan><bold>>> Редактировать клиента<off>
+<cyan>------------------------------------------------------<off>
+
+  <cyan>*<off> client1
+
+
+  <bold>awg0/client1<off>
+  <green>1)<off> Endpoint    <cyan>(203.0.113.9:39255)<off>
+  <green>2)<off> DNS         <cyan>(1.1.1.1)<off>
+  <green>3)<off> AllowedIPs  <cyan>(0.0.0.0/0, ::/0)<off>
+  <green>4)<off> MTU         <cyan>(1320)<off>
+
+  <green>0)<off> Готово
+
+  <green>[-OK-]<off> Endpoint: 203.0.113.9:40000
+
+  <bold>awg0/client1<off>
+  <green>1)<off> Endpoint    <cyan>(203.0.113.9:40000)<off>
+  <green>2)<off> DNS         <cyan>(1.1.1.1)<off>
+  <green>3)<off> AllowedIPs  <cyan>(0.0.0.0/0, ::/0)<off>
+  <green>4)<off> MTU         <cyan>(1320)<off>
+
+  <green>0)<off> Готово
+
+  <green>[-OK-]<off> Транзакция awg_edit_client awg0/client1: зафиксирована
+
+  <green>[-OK-]<off> Конфиг client1 обновлён: <SB>/etc/awg-setup/clients_awg0/client1/client.conf
+  <cyan>*<off> Правки касаются только клиента. Переимпортируй .conf на устройстве.
+rc=0
+DNS = 1.1.1.1
+MTU = 1320
+Endpoint = 203.0.113.9:40000
+== s2: факт не подтверждён - конфиг возвращён целиком ==
+
+<cyan><bold>>> Редактировать клиента<off>
+<cyan>------------------------------------------------------<off>
+
+  <cyan>*<off> client1
+
+
+  <bold>awg0/client1<off>
+  <green>1)<off> Endpoint    <cyan>(203.0.113.9:39255)<off>
+  <green>2)<off> DNS         <cyan>(1.1.1.1)<off>
+  <green>3)<off> AllowedIPs  <cyan>(0.0.0.0/0, ::/0)<off>
+  <green>4)<off> MTU         <cyan>(1320)<off>
+
+  <green>0)<off> Готово
+
+  <cyan>*<off> Возвращено: <SB>/etc/awg-setup/clients_awg0/client1/client.conf
+  <yellow>[!!!]<off>  Транзакция awg_edit_client awg0/client1: откат выполнен
+rc=1
+DNS = 1.1.1.1
+MTU = 1320
+Endpoint = 203.0.113.9:39255
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

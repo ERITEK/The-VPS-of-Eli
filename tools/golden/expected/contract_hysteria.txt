@@ -1,0 +1,31 @@
+# golden: contract_hysteria
+--- вывод ---
+-- artifact --
+<SB>/usr/local/bin/hysteria
+<SB>/etc/hysteria/instance_1/hysteria.env
+<SB>/etc/hysteria/instance_1/config.yaml
+<SB>/etc/hysteria/instance_1/users.list
+<SB>/etc/hysteria/instance_1/server.crt
+<SB>/etc/hysteria/instance_1/server.key
+<SB>/etc/hysteria/instance_2/hysteria.env
+<SB>/etc/hysteria/instance_2/config.yaml
+<SB>/etc/hysteria/instance_2/users.list
+<SB>/etc/hysteria/instance_2/server.crt
+<SB>/etc/hysteria/instance_2/server.key
+-- unit --
+hysteria-1
+hysteria-2
+-- config --
+<SB>/etc/hysteria/instance_1/config.yaml
+<SB>/etc/hysteria/instance_2/config.yaml
+-- backup --
+<SB>/etc/hysteria
+-- probe --
+unit:hysteria-1
+port:udp:443
+unit:hysteria-2
+port:udp:8443
+present: да
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

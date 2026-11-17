@@ -111,12 +111,8 @@ CMD ss -H -uln
 CMD ss -H -uln
 CMD ss -H -tln
 CMD ss -H -uln
-CMD systemctl enable wgobfs-eli@awg1.service
-CMD systemctl restart wgobfs-eli@awg1.service
 CMD systemctl disable --now wgobfs-eli@awg1.service
 CMD ss -H -uln
 CMD ss -H -tln
 CMD ss -H -uln
-CMD systemctl enable wgobfs-eli@awg1.service
-CMD systemctl restart wgobfs-eli@awg1.service
 rc=0

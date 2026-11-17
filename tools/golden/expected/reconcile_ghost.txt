@@ -1,0 +1,11 @@
+# golden: reconcile_ghost
+--- вывод ---
+  <cyan>*<off> Сверка контракта: fake
+  <yellow>[!!!]<off>  юнит ghost-267: бинарь из ExecStart отсутствует, не поднимается
+  <green>[-OK-]<off> юнит поднят: live-267
+  <cyan>*<off> Итог fake: проверок 2, проблем 1, исправлено 1
+rc=1 changed=1
+active: live-267
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

@@ -9,66 +9,90 @@ _update_arch() {
 
 update_scan() {
     print_section "Проверка обновлений"
+    local updates=0
 
-    # - apt -
-    print_info "Система (apt)..."
+    # - apt: число пакетов к обновлению -
     apt-get update -qq 2>/dev/null || true
-    local apt_upgradable
-    apt_upgradable=$(apt-get upgrade --dry-run 2>/dev/null | grep -oP '^[0-9]+ upgraded' || echo "0 upgraded")
-    print_info "apt: ${apt_upgradable}"
+    local apt_upgradable=0
+    apt_upgradable=$(apt-get upgrade --dry-run 2>/dev/null | grep -oP '^[0-9]+(?= upgraded)' | head -1 || true)
+    [[ -z "$apt_upgradable" ]] && apt_upgradable=0
+    if (( apt_upgradable > 0 )); then
+        print_warn "Система (apt): ${apt_upgradable} пакетов ждут обновления"
+        updates=$(( updates + 1 ))
+    else
+        print_ok "Система (apt): обновлений нет"
+    fi
 
-    # - 3X-UI -
+    # - 3X-UI: версия панели против последнего релиза -
     if [[ -f "${XUI_DIR:-/usr/local/x-ui}/x-ui" ]]; then
-        local xui_cur xui_lat
+        local xui_cur xui_lat _xc _xl
         xui_cur=$("${XUI_DIR:-/usr/local/x-ui}/x-ui" -v 2>/dev/null | head -1 || echo "?")
         xui_lat=$(eli_github_fetch "https://api.github.com/repos/MHSanaei/3x-ui/releases/latest" \
             | grep -oP '"tag_name":\s*"\K[^"]+' || echo "?")
-        # - убираем префикс v для корректного сравнения -
-        local _xc="${xui_cur#v}" _xl="${xui_lat#v}"
-        if [[ "$_xc" == "$_xl" ]]; then
-            print_ok "3X-UI: ${xui_cur} (актуальна)"
+        _xc="${xui_cur#v}"; _xl="${xui_lat#v}"
+        if [[ -z "$_xl" || "$_xl" == "?" ]]; then
+            print_info "3X-UI: ${xui_cur}, последнюю версию проверить не удалось"
+        elif [[ "$_xc" == "$_xl" ]]; then
+            print_ok "3X-UI: ${xui_cur} - актуальна"
         else
-            print_warn "3X-UI: ${xui_cur} -> ${xui_lat}"
+            print_warn "3X-UI: ${xui_cur} -> ${xui_lat} - доступно обновление"
+            updates=$(( updates + 1 ))
         fi
     else
         print_info "3X-UI: не установлен"
     fi
 
-    # - TeamSpeak -
+    # - TeamSpeak: версия из env против релиза GitHub -
     if [[ -f "${TS_ENV:-/etc/teamspeak/teamspeak.env}" ]]; then
-        local ts_cur ts_lat
+        local ts_cur ts_lat _tc _tl
         ts_cur=$(grep -oP '^TS_VERSION="\K[^"]+' "${TS_ENV:-/etc/teamspeak/teamspeak.env}" 2>/dev/null || echo "?")
         ts_lat=$(ts_get_latest_version 2>/dev/null || echo "?")
-        local _tc="${ts_cur#v}" _tl="${ts_lat#v}"
-        if [[ "$_tc" == "$_tl" ]]; then
-            print_ok "TeamSpeak: ${ts_cur} (актуальна)"
+        _tc="${ts_cur#v}"; _tl="${ts_lat#v}"
+        if [[ -z "$_tl" || "$_tl" == "?" ]]; then
+            print_info "TeamSpeak: ${ts_cur}, последнюю версию проверить не удалось"
+        elif [[ "$_tc" == "$_tl" ]]; then
+            print_ok "TeamSpeak: ${ts_cur} - актуальна"
         else
-            print_warn "TeamSpeak: ${ts_cur} -> ${ts_lat}"
+            print_warn "TeamSpeak: ${ts_cur} -> ${ts_lat} - доступно обновление"
+            updates=$(( updates + 1 ))
         fi
     else
         print_info "TeamSpeak: не установлен"
     fi
 
-    # - Outline -
+    # - Outline: образ из реестра автоматически не сравнивается -
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^shadowbox$"; then
         local otl_img
         otl_img=$(docker inspect shadowbox 2>/dev/null | jq -r '.[0].Config.Image' 2>/dev/null || echo "?")
-        print_info "Outline: образ ${otl_img}"
-        print_info "Обновление: docker pull + restart"
+        print_info "Outline: образ ${otl_img}; сравнение с реестром не автоматизировано"
+        print_info "  Обновление образа: меню 4.6.7 (docker pull + restart)"
     else
         print_info "Outline: не установлен"
     fi
 
-    # - AWG -
+    # - AmneziaWG: обновляемый пакет в apt -
     if command -v awg &>/dev/null; then
-        local awg_ver; awg_ver=$(awg --version 2>/dev/null | head -1 || echo "?")
-        print_info "AmneziaWG: ${awg_ver}"
+        local awg_ver awg_upd
+        awg_ver=$(awg --version 2>/dev/null | head -1 || echo "?")
+        awg_upd=$(apt list --upgradable 2>/dev/null | grep -ci 'amneziawg' || true)
+        if (( awg_upd > 0 )); then
+            print_warn "AmneziaWG: ${awg_ver} - в apt есть обновление пакета"
+            updates=$(( updates + 1 ))
+        else
+            print_ok "AmneziaWG: ${awg_ver} - актуален"
+        fi
     else
         print_info "AmneziaWG: не установлен"
     fi
+
+    echo ""
+    if (( updates > 0 )); then
+        print_warn "Есть обновления: ${updates}. Обновить всё - меню 4.6.7"
+    else
+        print_ok "Обновлений нет: всё актуально"
+    fi
     return 0
 }
-
 update_apt() {
     print_section "Обновление системы (apt)"
     apt-get update -qq || true
@@ -301,7 +325,7 @@ update_awg() {
         book_write ".awg.version" "$new_ver"
         print_ok "AmneziaWG: ${cur_ver} -> ${new_ver}"
     else
-        print_info "AmneziaWG: ${new_ver} (не изменилось)"
+        print_ok "AmneziaWG: ${new_ver} - уже актуален"
     fi
     return 0
 }
@@ -347,6 +371,44 @@ _self_newer() {
 }
 
 # - обновление: последний релиз GitHub, архив с eli.sh, бэкап и сверка версии -
+# --> САМООБНОВЛЕНИЕ: ЗАПРОС РЕЛИЗА <--
+# - причина отказа печатается словами: DNS, код HTTP или код curl, а не -
+# - общее "проверь сеть"; запрос повторяется трижды -
+_self_http_hint() {
+    local rc="$1" code="$2" dns="$3"
+    if [[ "$dns" != "yes" ]]; then
+        echo "DNS не разрешает api.github.com: проверь /etc/resolv.conf и Unbound"
+        return 0
+    fi
+    case "$code" in
+        403|429) echo "GitHub ограничил частоту запросов (HTTP ${code}): подожди и повтори" ;;
+        5*) echo "GitHub ответил ошибкой ${code}: попробуй позже" ;;
+        000) echo "соединение не установлено (curl rc=${rc}): проверь сеть и файрвол" ;;
+        *) echo "GitHub ответил HTTP ${code} (curl rc=${rc})" ;;
+    esac
+}
+
+_self_fetch_release() {
+    local out="" code rc i dns="no"
+    _SELF_JSON=""
+    _SELF_FAIL_REASON=""
+    getent hosts api.github.com >/dev/null 2>&1 && dns="yes"
+    for i in 1 2 3; do
+        rc=0
+        out=$(curl -sS -w '\n%{http_code}' --connect-timeout 10 --max-time 20 \
+            "https://api.github.com/repos/ERITEK/The-VPS-of-Eli/releases/latest" 2>/dev/null) || rc=$?
+        code="${out##*$'\n'}"
+        out="${out%$'\n'*}"
+        if (( rc == 0 )) && [[ "$code" == "200" ]] && [[ -n "$out" ]] && jq -e '.tag_name' >/dev/null 2>&1 <<< "$out"; then
+            _SELF_JSON="$out"
+            return 0
+        fi
+        sleep 2
+    done
+    _SELF_FAIL_REASON=$(_self_http_hint "$rc" "${code:-000}" "$dns")
+    return 1
+}
+
 update_self() {
     print_section "Обновление скрипта Eli"
     local self cur api tag url dir tmp new_ver backup after go
@@ -357,10 +419,11 @@ update_self() {
     fi
     cur="$ELI_VERSION"
     print_info "Текущая версия: ${cur}"
-    api=$(curl -fsSL --connect-timeout 10 --max-time 20 "https://api.github.com/repos/ERITEK/The-VPS-of-Eli/releases/latest" 2>/dev/null) || {
-        print_err "GitHub не ответил: проверь сеть"
+    if ! _self_fetch_release; then
+        print_err "GitHub: ${_SELF_FAIL_REASON}"
         return 1
-    }
+    fi
+    api="$_SELF_JSON"
     tag=$(jq -r '.tag_name // empty' <<< "$api" 2>/dev/null)
     if [[ -z "$tag" ]]; then
         print_err "Не удалось прочитать последний релиз"
@@ -382,9 +445,13 @@ update_self() {
 
     dir=$(mktemp -d /tmp/eli-self.XXXXXX) || return 1
     tmp="${dir}/release.zip"
-    if ! curl -fsSL --connect-timeout 10 --max-time 120 -o "$tmp" "$url"; then
+    # - архив: код HTTP и код curl тоже нужны в сообщении об отказе -
+    # - -L обязателен: GitHub отвечает на browser_download_url редиректом 302 -
+    local dl_code dl_rc=0
+    dl_code=$(curl -sSL -o "$tmp" -w '%{http_code}' --connect-timeout 10 --max-time 120 "$url" 2>/dev/null) || dl_rc=$?
+    if (( dl_rc != 0 )) || [[ "$dl_code" != "200" ]] || [[ ! -s "$tmp" ]]; then
         rm -rf "$dir"
-        print_err "Архив не скачался"
+        print_err "Архив не скачался (HTTP ${dl_code:-000}, curl rc=${dl_rc})"
         return 1
     fi
     if ! python3 - "$tmp" "$dir" <<'PY' 2>/dev/null

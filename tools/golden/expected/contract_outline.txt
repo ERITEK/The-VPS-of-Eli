@@ -1,0 +1,21 @@
+# golden: contract_outline
+--- вывод ---
+outline present: да
+-- artifact --
+<SB>/etc/outline/manager_key.json
+<SB>/opt/outline/persisted-state
+-- config --
+<SB>/etc/outline/outline.env
+-- backup --
+<SB>/etc/outline
+<SB>/opt/outline
+-- probe --
+cmd:docker ps --format '{{.Names}}' | grep -qx shadowbox
+port:tcp:5555
+port:tcp:6666
+port:udp:6666
+== без портов ==
+cmd:docker ps --format '{{.Names}}' | grep -qx shadowbox
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

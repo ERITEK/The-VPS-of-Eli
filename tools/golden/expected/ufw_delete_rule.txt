@@ -1,0 +1,50 @@
+# golden: ufw_delete_rule
+--- вывод ---
+== s1: удаление #2 ==
+
+<cyan><bold>>> Удалить правило<off>
+<cyan>------------------------------------------------------<off>
+       To                         Action      From
+       --                         ------      ----
+  [ 1] 22/tcp                    ALLOW       Anywhere
+  [ 2] 18080/tcp                 ALLOW       Anywhere
+
+  <green>[-OK-]<off> Транзакция ufw_delete_rule #2: зафиксирована
+  <green>[-OK-]<off> Удалено
+rc=0
+правила: 22/tcp
+файл: # rules
+deleted 2
+--- ufw ---
+ufw status numbered
+ufw delete 2
+ufw status numbered
+ufw status numbered
+== s2: факт не подтверждён - файлы возвращаются и файрвол перечитывается ==
+
+<cyan><bold>>> Удалить правило<off>
+<cyan>------------------------------------------------------<off>
+       To                         Action      From
+       --                         ------      ----
+  [ 1] 22/tcp                    ALLOW       Anywhere
+  [ 2] 18080/tcp                 ALLOW       Anywhere
+
+  <red>[xXx]<off> Правило #1 числится в списке после удаления: смотри раздел Статус UFW
+  <cyan>*<off> Возвращено: <SB>/etc/ufw/user.rules
+  <cyan>*<off> Удалено: <SB>/etc/ufw/user6.rules
+  <yellow>[!!!]<off>  Транзакция ufw_delete_rule #1: откат выполнен
+rc=1
+правила: 22/tcp 18080/tcp
+файл: # rules
+--- ufw ---
+ufw status numbered
+ufw delete 1
+ufw status numbered
+ufw delete 1
+ufw status numbered
+ufw status
+ufw reload
+reload
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

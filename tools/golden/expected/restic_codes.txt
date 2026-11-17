@@ -1,0 +1,43 @@
+# golden: restic_codes
+--- вывод ---
+== restic rc=0 ==
+
+<cyan><bold>>> Restic: снапшот<off>
+<cyan>------------------------------------------------------<off>
+snapshot aaaaaaa0 saved
+  <green>[-OK-]<off> Снапшот создан
+rc=0
+ids: aaaaaaa0
+== restic rc=3 ==
+
+<cyan><bold>>> Restic: снапшот<off>
+<cyan>------------------------------------------------------<off>
+snapshot aaaaaaa3 saved
+Warning: at least one source file could not be read
+  <yellow>[!!!]<off>  Restic не прочитал часть файлов: снапшот создан без них
+  <green>[-OK-]<off> Снапшот создан
+rc=0
+ids: aaaaaaa0 aaaaaaa3
+== restic rc=2 ==
+
+<cyan><bold>>> Restic: снапшот<off>
+<cyan>------------------------------------------------------<off>
+Fatal: repository does not exist
+  <red>[xXx]<off> Снапшот не создан (restic вернул 2)
+rc=1
+ids: aaaaaaa0 aaaaaaa3
+== restic rc=silent ==
+
+<cyan><bold>>> Restic: снапшот<off>
+<cyan>------------------------------------------------------<off>
+snapshot aaaaaaa4 saved
+  <red>[xXx]<off> Снапшот не подтверждён в репозитории: нового снапшота нет
+rc=1
+ids: aaaaaaa0 aaaaaaa3
+--- вызовы платформы ---
+CMD flock -n 200
+CMD hostname
+CMD hostname
+CMD hostname
+CMD hostname
+rc=0

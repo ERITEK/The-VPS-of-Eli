@@ -1,0 +1,42 @@
+# golden: restic_paths
+--- вывод ---
+/etc/mumble-server.ini
+/etc/mumble-server.ini
+/etc/murmur/murmur.ini
+/etc/signal-proxy
+/etc/ssh/sshd_config
+/etc/ssh/sshd_config.d
+/etc/unbound
+/etc/vps-eli-stack
+/opt/teamspeak/tsserver.sqlitedb
+/opt/teamspeak/tsserver.sqlitedb-shm
+/opt/teamspeak/tsserver.sqlitedb-wal
+<SB>/etc/3xui
+<SB>/etc/amnezia/amneziawg
+<SB>/etc/awg-setup
+<SB>/etc/hysteria
+<SB>/etc/mimic
+<SB>/etc/mtproto
+<SB>/etc/outline
+<SB>/etc/socks5
+<SB>/etc/teamspeak
+<SB>/etc/ufw
+<SB>/etc/vps-eli-stack/wgobfs
+<SB>/etc/vps-eli-stack/zapret2
+<SB>/etc/x-ui
+<SB>/opt/outline
+<SB>/opt/teamspeak/ts.sqlitedb
+<SB>/opt/teamspeak/ts.sqlitedb-shm
+<SB>/opt/teamspeak/ts.sqlitedb-wal
+<SB>/opt/zapret2/eli
+<SB>/var/lib/mumble-server/mumble-server.sqlite
+<SB>/var/lib/mumble-server/mumble-server.sqlite-shm
+<SB>/var/lib/mumble-server/mumble-server.sqlite-wal
+/var/lib/mumble
+/var/lib/mumble-server
+/var/lib/murmur
+--- вызовы платформы ---
+CMD flock -n 200
+CMD awg show interfaces
+CMD awg show interfaces
+rc=0

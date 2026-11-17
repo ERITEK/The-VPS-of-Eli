@@ -1,0 +1,13 @@
+# golden: registry_restore
+--- вывод ---
+ok=2 fail=0
+--- /etc/3xui ---
+3xui.env
+old.txt
+--- вложенный ---
+нет
+--- файл ---
+cfg
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0

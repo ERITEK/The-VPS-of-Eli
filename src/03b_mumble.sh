@@ -50,7 +50,8 @@ mbl_install() {
         print_warn "Mumble уже установлен"; return 0
     fi
 
-    if ! apt-get install -y -qq mumble-server; then
+    # - confnew: dpkg-диалог conffile съедает stdin установки, конфиг перенастраивается ниже -
+    if ! apt-get install -y -qq -o Dpkg::Options::="--force-confnew" mumble-server; then
         print_err "Не удалось установить mumble-server"; return 1
     fi
     print_ok "mumble-server установлен"
@@ -302,7 +303,8 @@ mbl_update() {
         print_err "Сервис не остановился: обновление отменено"
         return 1
     fi
-    if apt-get install -y -qq mumble-server 2>/dev/null; then
+    # - confnew по той же причине: обновление поверх изменённого конфига без диалога dpkg -
+    if apt-get install -y -qq -o Dpkg::Options::="--force-confnew" mumble-server 2>/dev/null; then
         systemctl start "$MBL_SERVICE" 2>/dev/null || true
         sleep 2
         if systemctl is-active --quiet "$MBL_SERVICE" 2>/dev/null; then

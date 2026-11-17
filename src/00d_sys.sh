@@ -123,6 +123,17 @@ eli_fact_unit() {
     return 1
 }
 
+# - исполняемый файл из ExecStart существует; юнит без бинаря - остаток -
+# - restore у удалённого компонента, старт такого юнита = вечный рестарт-цикл -
+eli_unit_exec_exists() {
+    local unit="$1" line bin
+    line=$(systemctl cat "$unit" 2>/dev/null | sed -n 's/^ExecStart=//p' | head -1) || return 1
+    [[ -n "$line" ]] || return 1
+    bin=${line%% *}
+    bin=${bin#[-+]}
+    [[ -e "$bin" ]]
+}
+
 # - факт: запись на месте. Строка ищется тем же шаблоном, которым писалась: -
 # - проверка ловит и несовпадение с шаблоном правки, и потерю строки -
 # - arg1: файл, arg2: шаблон egrep, arg3: что проверяем словами -
@@ -168,6 +179,18 @@ eli_port_busy() {
         *)   return 1 ;;
     esac
     [[ "$out" == *":${port} "* || "$out" == *".${port} "* ]]
+}
+
+# - ожидание занятости порта: слушатель открывается позже старта юнита; 0 = занят -
+eli_port_wait() {
+    local port="${1:-}" proto="${2:-tcp}" secs="${3:-10}" try tries
+    [[ -z "$port" ]] && return 1
+    tries=$(( secs * 4 ))
+    for (( try=0; try<tries; try++ )); do
+        eli_port_busy "$port" "$proto" && return 0
+        sleep 0.25
+    done
+    return 1
 }
 
 # --> DOCKER: ПРИНАДЛЕЖНОСТЬ КОНТЕЙНЕРА СТЕКУ <--
@@ -377,4 +400,149 @@ eli_env_read_into() {
         val=$(eli_source_env "$file" "$key" || true)
         printf -v "$name" '%s' "$val"
     done
+}
+# --> ЗАГРУЗКА ВНЕШНЕГО АРТЕФАКТА <--
+# - sha256 ассета релиза GitHub: digest из ответа API рядом с адресом -
+eli_github_asset_sha() {
+    local api="$1" name="$2"
+    jq -r --arg n "$name" '.assets[]? | select(.name == $n) | (.digest // empty)' <<< "$api" 2>/dev/null \
+        | sed -n 's/^sha256://p' | head -1
+}
+
+# - один путь для всех загрузок: повторы, проверка размера и суммы, -
+# - временный файл в TMPDIR; вызывающий забирает путь и убирает каталог -
+# - третий аргумент: ожидаемая sha256 или "-" (сверку делает вызывающий) -
+eli_fetch_asset() {
+    local url="$1" name="$2" want_sha="${3:-}"
+    local dir tmp rc code i got
+    if [[ -z "$url" || -z "$name" ]]; then
+        print_err "Нужны URL и имя ассета"
+        return 1
+    fi
+    if [[ -z "$want_sha" ]]; then
+        print_warn "${name}: sha256 не передана, сверка суммы не выполняется"
+    fi
+    dir=$(mktemp -d "${TMPDIR:-/tmp}/eli-asset.XXXXXX") || { print_err "Не создать временный каталог"; return 1; }
+    tmp="${dir}/${name}"
+    ELI_ASSET_PATH=""
+    for (( i = 1; i <= 3; i++ )); do
+        rc=0
+        code=$(curl -sS -L -o "$tmp" -w '%{http_code}' --connect-timeout 15 --max-time 300 "$url" 2>/dev/null) || rc=$?
+        if (( rc == 0 )) && [[ "$code" == "200" ]] && [[ -s "$tmp" ]]; then
+            if [[ "$want_sha" != "-" && -n "$want_sha" ]]; then
+                got=$(sha256sum "$tmp" | awk '{print $1}')
+                if [[ "$got" != "$want_sha" ]]; then
+                    print_warn "${name}: sha256 не совпала (${got:0:12}..., ждали ${want_sha:0:12}...), попытка ${i}/3"
+                    rm -f "$tmp"
+                    sleep 2
+                    continue
+                fi
+            fi
+            ELI_ASSET_PATH="$tmp"
+            return 0
+        fi
+        print_warn "${name}: HTTP ${code:-000}, curl rc=${rc}, попытка ${i}/3"
+        rm -f "$tmp"
+        sleep 2
+    done
+    rm -rf "$dir"
+    print_err "Не удалось скачать ${name}: ${url}"
+    return 1
+}
+# --> ЮНИТ СЛУЖБЫ <--
+# - откат юнита: вернуть прежний файл и поднять службу, которая работала -
+# - до правки; новый юнит (файла не было) просто удаляется -
+_svc_unit_rollback() {
+    local unit="$1" path="$2" backup="$3" was_active="$4"
+    if [[ -n "$backup" ]]; then
+        cp -a "$backup" "$path"
+        rm -f "$backup"
+    else
+        rm -f "$path"
+    fi
+    systemctl daemon-reload
+    if [[ -n "$backup" && "$was_active" == "1" ]]; then
+        systemctl start "$unit" >/dev/null 2>&1 || true
+    fi
+}
+
+# - рендер юнита, проверка, reload, enable, запуск и факт active; при -
+# - провале возвращается прежний файл или удаляется новый -
+eli_service_apply() {
+    local unit="$1" content="$2" enable="${3:-yes}"
+    local path="/etc/systemd/system/${unit}.service" backup="" was_active=0
+    if [[ -z "$unit" || -z "$content" ]]; then
+        print_err "Нужны имя юнита и содержимое"
+        return 1
+    fi
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+        was_active=1
+    fi
+    if [[ -f "$path" ]]; then
+        backup=$(mktemp /tmp/eli-unit.XXXXXX) || return 1
+        cp -a "$path" "$backup" || { rm -f "$backup"; print_err "Не сохранить ${path}"; return 1; }
+    fi
+    if ! printf '%s\n' "$content" > "$path"; then
+        rm -f "$backup"
+        print_err "Не записать ${path}"
+        return 1
+    fi
+    chmod 644 "$path"
+    if command -v systemd-analyze >/dev/null 2>&1; then
+        if ! systemd-analyze verify "$path" >/dev/null 2>&1; then
+            print_err "Юнит ${unit}: systemd-analyze verify не прошёл"
+            _svc_unit_rollback "$unit" "$path" "$backup" "$was_active"
+            return 1
+        fi
+    fi
+    systemctl daemon-reload
+    [[ "$enable" == "yes" ]] && systemctl enable "$unit" >/dev/null 2>&1 || true
+    if ! systemctl restart "$unit" 2>/dev/null; then
+        print_err "Юнит ${unit}: не запустился"
+        _svc_unit_rollback "$unit" "$path" "$backup" "$was_active"
+        return 1
+    fi
+    if ! eli_fact_unit "$unit" 5; then
+        print_err "Юнит ${unit}: не активен после запуска"
+        _svc_unit_rollback "$unit" "$path" "$backup" "$was_active"
+        return 1
+    fi
+    rm -f "$backup"
+    return 0
+}
+# --> ЗАПУСК ГОТОВОГО ЮНИТА <--
+# - enable, restart и ожидание SubState=running: Type=simple рапортует -
+# - active сразу на exec, поэтому одной активности мало; провал печатает -
+# - хвост журнала и возвращает ошибку -
+eli_service_start() {
+    local unit="$1" wait_secs="${2:-10}" i=0 sub=""
+    if [[ -z "$unit" ]]; then
+        print_err "Нужно имя юнита"
+        return 1
+    fi
+    systemctl enable "$unit" >/dev/null 2>&1 || true
+    if ! systemctl restart "$unit" 2>/dev/null; then
+        print_err "Юнит ${unit}: не запустился"
+        return 1
+    fi
+    while (( i < wait_secs )); do
+        sub=$(systemctl show -p SubState --value "$unit" 2>/dev/null)
+        [[ "$sub" == "running" ]] && break
+        sleep 1
+        i=$(( i + 1 ))
+    done
+    if [[ "$sub" == "running" ]] && systemctl is-active --quiet "$unit"; then
+        return 0
+    fi
+    print_err "Инстанс ${unit} не удержался (SubState=${sub:-?}). Причина:"
+    journalctl -u "$unit" -n 15 --no-pager 2>/dev/null | sed 's/^/    /'
+    return 1
+}
+
+# --> ПОРТ ЗА DROP <--
+# - правило DROP в INPUT перекрывает разрешение UFW: порт снаружи не виден -
+eli_port_dropped() {
+    local port="$1"
+    [[ -n "$port" ]] || return 1
+    iptables -S INPUT 2>/dev/null | grep -E -- "--dport ${port}([^0-9]|$)" | grep -q -- "-j DROP"
 }

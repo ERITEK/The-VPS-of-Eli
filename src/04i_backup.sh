@@ -49,6 +49,63 @@ backup_create() {
         collected=$(( collected + 1 ))
     fi
 
+    # --> СЛУЖБЫ НА ВРЕМЯ КОПИЙ <--
+    # - базы SQLite входят в реестр: на время копий службы гасятся, иначе -
+    # - снимок базы будет горячим; провал остановки отменяет бэкап -
+    local -a _bkp_stopped=()
+    _bkp_services_stop() {
+        local u
+        for u in x-ui teamspeak mumble-server murmurd; do
+            systemctl is-active --quiet "$u" 2>/dev/null || continue
+            systemctl stop "$u" 2>/dev/null || true
+            if ! eli_fact_unit "$u" 10 inactive; then
+                print_err "${u} не остановился: бэкап отменён (база была бы живой)"
+                return 1
+            fi
+            _bkp_stopped+=("$u")
+        done
+        return 0
+    }
+    _bkp_services_start() {
+        local u bad=0
+        for u in "${_bkp_stopped[@]}"; do
+            systemctl start "$u" >/dev/null 2>&1 || true
+            eli_fact_unit "$u" 10 || bad=$(( bad + 1 ))
+        done
+        _bkp_stopped=()
+        return "$bad"
+    }
+    if ! _bkp_services_stop; then
+        _bkp_services_start || true
+        rm -rf "$tmpdir"
+        return 1
+    fi
+
+    # - реестр контрактов: пути модулей кладутся отдельно с манифестом; -
+    # - список модулей общий с restic, службы уже погашены -
+    local reg_dir="${tmpdir}/registry" _rmod _rp _rname _rn=0
+    mkdir -p "$reg_dir"
+    : > "${reg_dir}/files.tsv"
+    for _rmod in $(eli_backup_modules); do
+        while IFS= read -r _rp; do
+            [[ -e "$_rp" ]] || continue
+            _rname="${_rmod}_$(printf '%s' "$_rp" | tr '/' '_')"
+            if cp -a "$_rp" "${reg_dir}/${_rname}" 2>/dev/null; then
+                printf '%s\t%s\n' "$_rp" "registry/${_rname}" >> "${reg_dir}/files.tsv"
+                _rn=$(( _rn + 1 ))
+            else
+                print_warn "Реестр: не удалось ${_rp}"
+                failed=$(( failed + 1 ))
+            fi
+        done < <(eli_backup_register "$_rmod")
+    done
+    if (( _rn > 0 )); then
+        print_ok "Реестр контрактов: ${_rn} путей"
+        collected=$(( collected + 1 ))
+    else
+        rm -rf "$reg_dir"
+    fi
+
     # - AWG: env, ключи, клиенты -
     if [[ -d /etc/awg-setup ]]; then
         _bkp_cp /etc/awg-setup "${tmpdir}/awg-setup" "AWG setup (env, ключи, клиенты)"
@@ -283,6 +340,15 @@ backup_create() {
     done
     _bkp_add /etc/fail2ban/jail.d/ssh-hardening.local "${tmpdir}/system/ssh-hardening.local" && { print_ok "fail2ban jail"; collected=$(( collected + 1 )); }
 
+    # - службы возвращаются после копий: факт проверяется ожиданием, -
+    # - провал виден в счётчике ошибок архива -
+    local _bkp_svc_rc=0
+    _bkp_services_start || _bkp_svc_rc=$?
+    if (( _bkp_svc_rc > 0 )); then
+        print_err "Службы после бэкапа не поднялись: ${_bkp_svc_rc}"
+        failed=$(( failed + _bkp_svc_rc ))
+    fi
+
     # - метаданные -
     # - debian_version и version_id для проверки совместимости при restore -
     local _deb_ver="unknown"
@@ -334,6 +400,211 @@ METAEOF
         return 1
     fi
     return 0
+}
+
+# --> ВОССТАНОВЛЕНИЕ: RUNTIME <--
+# - юнит с отсутствующим ExecStart не запускается: иначе рестарт-цикл -
+_rst_unit_exec_missing() {
+    local unit="$1" exe
+    [[ -f "$unit" ]] || return 1
+    exe=$(sed -n 's/^ExecStart=\([^ ]*\).*/\1/p' "$unit" | head -1)
+    [[ -n "$exe" && ! -x "$exe" ]]
+}
+
+# - проверка runtime после восстановления: контейнеры прокси и юниты -
+# - движков файлами не создаются; отсутствие помечается, юнит гасится -
+_rst_runtime_check() {
+    local name unit bad=0
+    # - сначала попытка поднять runtime из env и юнитов, потом отчёт -
+    _proxy_restore_runtime || true
+    for name in $(jq -r '.mtproto.instances // {} | .[]?.container // empty' "$_BOOK" 2>/dev/null); do
+        if ! docker inspect "$name" >/dev/null 2>&1; then
+            print_warn "MTProto ${name}: контейнер не пересоздан, добавь инстанс заново"
+            bad=$(( bad + 1 ))
+        fi
+    done
+    for name in $(jq -r '.socks5.instances // {} | .[]?.container // empty' "$_BOOK" 2>/dev/null); do
+        if ! docker inspect "$name" >/dev/null 2>&1; then
+            print_warn "SOCKS5 ${name}: контейнер не пересоздан, добавь инстанс заново"
+            bad=$(( bad + 1 ))
+        fi
+    done
+    for name in $(jq -r '.hysteria2.instances // {} | keys[]?' "$_BOOK" 2>/dev/null); do
+        unit="/etc/systemd/system/hysteria-${name}.service"
+        if _rst_unit_exec_missing "$unit"; then
+            systemctl disable --now "hysteria-${name}" 2>/dev/null || true
+            print_err "Hysteria ${name}: нет файла из ExecStart - служба отключена, установи заново"
+            bad=$(( bad + 1 ))
+        fi
+    done
+    if (( bad > 0 )); then
+        print_info "Требуют пересоздания: ${bad} (см. строки выше)"
+    fi
+    return "$bad"
+}
+# --> ВОССТАНОВЛЕНИЕ: СОХРАНЕНИЕ ДОСТУПА <--
+# - порты, на которых sshd слушал до восстановления, добавляются в -
+# - drop-in вторыми и разрешаются в UFW: вход не теряется -
+_rst_keep_ssh_access() {
+    local ports="$1" p
+    [[ -n "$ports" ]] || return 1
+    mkdir -p /etc/ssh/sshd_config.d || return 1
+    {
+        for p in $ports; do
+            printf 'Port %s\n' "$p"
+        done
+    } > /etc/ssh/sshd_config.d/99-eli-keep-port.conf
+    for p in $ports; do
+        ufw allow "${p}/tcp" comment 'SSH (restore)' >/dev/null 2>&1 || true
+    done
+    return 0
+}
+
+# - drop-in записывается и проверяется sshd: при провале файл снимается, -
+# - прежний drop-in возвращается; иначе следующий рестарт поднял бы sshd -
+# - с непроверенным конфигом -
+_rst_apply_keep_ports() {
+    local ports="$1"
+    local conf="/etc/ssh/sshd_config.d/99-eli-keep-port.conf"
+    local prev=""
+    if [[ -f "$conf" ]]; then
+        prev=$(mktemp) || return 1
+        cp -a "$conf" "$prev" || { rm -f "$prev"; return 1; }
+    fi
+    if ! _rst_keep_ssh_access "$ports"; then
+        rm -f "$prev"
+        return 1
+    fi
+    if sshd -t 2>/dev/null; then
+        rm -f "$prev"
+        systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+        return 0
+    fi
+    if [[ -n "$prev" ]]; then
+        cp -a "$prev" "$conf"
+        rm -f "$prev"
+    else
+        rm -f "$conf"
+    fi
+    return 1
+}
+# - реестр контрактов: каталог копируется содержимым в целевой путь, а не -
+# - внутрь него; счётчики возвращаются в RST_REG_OK и RST_REG_FAIL -
+_rst_registry_restore() {
+    local root="$1" reg="$2" rpath rstore
+    RST_REG_OK=0
+    RST_REG_FAIL=0
+    [[ -f "$reg" ]] || return 0
+    while IFS=$'\t' read -r rpath rstore; do
+        [[ -n "$rpath" && -e "${root}/${rstore}" ]] || continue
+        if [[ -d "${root}/${rstore}" ]]; then
+            if ! mkdir -p "$rpath"; then
+                RST_REG_FAIL=$(( RST_REG_FAIL + 1 ))
+                print_warn "Реестр: не создать ${rpath}"
+                continue
+            fi
+            if cp -a "${root}/${rstore}/." "$rpath"/ 2>/dev/null; then
+                RST_REG_OK=$(( RST_REG_OK + 1 ))
+            else
+                RST_REG_FAIL=$(( RST_REG_FAIL + 1 ))
+                print_warn "Реестр: не удалось вернуть ${rpath}"
+            fi
+        else
+            mkdir -p "$(dirname "$rpath")"
+            if cp -a "${root}/${rstore}" "$rpath" 2>/dev/null; then
+                RST_REG_OK=$(( RST_REG_OK + 1 ))
+            else
+                RST_REG_FAIL=$(( RST_REG_FAIL + 1 ))
+                print_warn "Реестр: не удалось вернуть ${rpath}"
+            fi
+        fi
+    done < "$reg"
+    return 0
+}
+
+# - есть ли в манифесте реестра путь с заданным префиксом -
+_rst_reg_has() {
+    local reg="$1" prefix="$2"
+    awk -F'\t' -v p="$prefix" 'index($1, p) == 1 { f=1 } END { exit !f }' "$reg"
+}
+
+# - реестр возвращается до старта служб: их файлы не должны копироваться -
+# - поверх живых; факт остановки обязателен, иначе восстановление отменяется -
+RST_REG_STOPPED=()
+_rst_stop_for_registry() {
+    local reg="$1" u iface svc fail=0
+    if _rst_reg_has "$reg" "/etc/x-ui" && systemctl is-active --quiet x-ui 2>/dev/null; then
+        systemctl stop x-ui 2>/dev/null || true
+        if eli_fact_unit x-ui 10 inactive; then
+            RST_REG_STOPPED+=("x-ui")
+        else
+            print_err "3X-UI не остановился: реестр не восстанавливается"
+            fail=1
+        fi
+    fi
+    if _rst_reg_has "$reg" "/etc/teamspeak" || _rst_reg_has "$reg" "/opt/teamspeak"; then
+        if systemctl is-active --quiet teamspeak 2>/dev/null; then
+            systemctl stop teamspeak 2>/dev/null || true
+            if eli_fact_unit teamspeak 10 inactive; then
+                RST_REG_STOPPED+=("teamspeak")
+            else
+                print_err "TeamSpeak не остановился: реестр не восстанавливается"
+                fail=1
+            fi
+        fi
+    fi
+    if _rst_reg_has "$reg" "/etc/mumble" || _rst_reg_has "$reg" "/var/lib/mumble" \
+       || _rst_reg_has "$reg" "/var/lib/murmur"; then
+        for u in mumble-server murmurd; do
+            systemctl is-active --quiet "$u" 2>/dev/null || continue
+            systemctl stop "$u" 2>/dev/null || true
+            if eli_fact_unit "$u" 10 inactive; then
+                RST_REG_STOPPED+=("$u")
+            else
+                print_err "${u} не остановился: реестр не восстанавливается"
+                fail=1
+            fi
+            break
+        done
+    fi
+    # - интерфейсы и юниты перед подменой их файлов гасятся так же, -
+    # - как это делают их собственные ветки восстановления -
+    if _rst_reg_has "$reg" "/etc/awg-setup" || _rst_reg_has "$reg" "/etc/amnezia/amneziawg"; then
+        for u in /etc/systemd/system/multi-user.target.wants/awg-quick@*.service; do
+            [[ -e "$u" ]] || continue
+            iface=$(basename "$u" | sed 's/^awg-quick@//;s/\.service$//')
+            systemctl stop "awg-quick@${iface}" 2>/dev/null || true
+            if ! eli_fact_unit "awg-quick@${iface}" 10 inactive; then
+                print_err "AWG ${iface} не остановился: реестр не восстанавливается"
+                fail=1
+            fi
+        done
+    fi
+    if _rst_reg_has "$reg" "/etc/hysteria"; then
+        for u in /etc/systemd/system/hysteria-*.service; do
+            [[ -f "$u" ]] || continue
+            svc=$(basename "$u" | sed 's/\.service$//')
+            systemctl stop "$svc" 2>/dev/null || true
+            if ! eli_fact_unit "$svc" 10 inactive; then
+                print_err "Hysteria ${svc} не остановилась: реестр не восстанавливается"
+                fail=1
+            fi
+        done
+    fi
+    return "$fail"
+}
+
+# - службы, погашенные перед возвратом реестра, поднимаются обратно; -
+# - свои ветки восстановления делают это раньше, здесь страховка -
+_rst_resume_registry_services() {
+    local u bad=0
+    for u in "${RST_REG_STOPPED[@]}"; do
+        systemctl is-active --quiet "$u" 2>/dev/null && continue
+        systemctl start "$u" >/dev/null 2>&1 || true
+        eli_fact_unit "$u" 10 || bad=$(( bad + 1 ))
+    done
+    RST_REG_STOPPED=()
+    return "$bad"
 }
 
 # --> БЭКАП: СПИСОК <--
@@ -401,9 +672,15 @@ backup_restore() {
 
     echo ""
     print_warn "Восстановление перезапишет текущие конфиги и перезапустит сервисы!"
+    print_info "Текущий SSH-порт будет добавлен вторым: вход не должен потеряться."
     local confirm=""
     ask_yn "Продолжить?" "n" confirm
     [[ "$confirm" != "yes" ]] && { print_info "Отмена"; return 0; }
+
+    # - текущие порты sshd запоминаются до распаковки: восстановление -
+    # - конфигов и правил не должно отрезать доступ -
+    local keep_ports=""
+    keep_ports=$(ss -ltnp 2>/dev/null | awk '/sshd/ {print $4}' | sed 's/.*://' | sort -u | tr '\n' ' ')
 
     # - распаковка -
     local tmpdir
@@ -475,6 +752,23 @@ backup_restore() {
     if [[ -f "${root}/book/book_of_Eli.json" ]]; then
         book_replace "${root}/book/book_of_Eli.json"
         _rst_result $? "Book of Eli"
+    fi
+
+    # - реестр контрактов: пути возвращаются до старта служб, иначе копия -
+    # - базы легла бы поверх живой; службы гасятся по манифесту -
+    local reg="${root}/registry/files.tsv"
+    if [[ -f "$reg" ]]; then
+        if ! _rst_stop_for_registry "$reg"; then
+            _rst_resume_registry_services || true
+            rm -rf "$tmpdir"
+            return 1
+        fi
+        _rst_registry_restore "$root" "$reg"
+        if (( RST_REG_OK > 0 )); then
+            print_ok "Реестр контрактов: возвращено ${RST_REG_OK} путей"
+            restored=$(( restored + 1 ))
+        fi
+        (( RST_REG_FAIL > 0 )) && failed=$(( failed + RST_REG_FAIL ))
     fi
 
     # - AWG setup -
@@ -861,6 +1155,21 @@ backup_restore() {
         ufw reload 2>/dev/null || true
     fi
 
+    # - сохранение текущего доступа: архив мог содержать старый порт и правила -
+    if [[ -n "$keep_ports" ]]; then
+        if _rst_apply_keep_ports "$keep_ports"; then
+            print_ok "Доступ SSH сохранён: порты ${keep_ports}"
+            print_info "Порты записаны в /etc/ssh/sshd_config.d/99-eli-keep-port.conf; после проверки входа лишние можно убрать"
+            restored=$(( restored + 1 ))
+        else
+            print_err "sshd -t не прошёл: drop-in снят, проверь конфиг до перезапуска службы"
+            failed=$(( failed + 1 ))
+        fi
+    fi
+
+    # - runtime: контейнеры и движки файлами не создаются, расхождения видны -
+    _rst_runtime_check || true
+
     # - Crontab: merge eli-задач из бэкапа со сторонними из текущего, чтобы не терять чужое -
     if [[ -s "${root}/system/crontab.txt" ]]; then
         echo ""
@@ -900,6 +1209,11 @@ backup_restore() {
             print_info "Crontab пропущен"
         fi
     fi
+
+    # - службы, погашенные перед возвратом реестра, поднимаются обратно -
+    local _reg_svc_rc=0
+    _rst_resume_registry_services || _reg_svc_rc=$?
+    (( _reg_svc_rc > 0 )) && failed=$(( failed + _reg_svc_rc ))
 
     rm -rf "$tmpdir"
 

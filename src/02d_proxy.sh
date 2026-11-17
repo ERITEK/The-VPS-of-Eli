@@ -12,6 +12,26 @@ SIG_DIR="/opt/signal-proxy"
 # - ожидаемое число контейнеров: nginx-terminate, nginx-relay, certbot -
 SIG_EXPECT=3
 
+# --> КОНТЕЙНЕРЫ СТЕКА: ОБЩИЙ ЗАПУСК <--
+# - имя и автоперезапуск одинаковы у MTProto и SOCKS5, дальше параметры -
+# - образа и команды; секреты в argv не попадают -
+_proxy_docker_run() {
+    local name="$1"; shift
+    docker run -d --name "$name" --restart always "$@"
+}
+
+# - контейнер поднялся: имя в списке после паузы; упавший снимается сразу, -
+# - иначе restart always крутит его бесконечно, а меню его не видит -
+_proxy_container_up() {
+    local name="$1"
+    sleep 2
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${name}$"; then
+        return 0
+    fi
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    return 1
+}
+
 # --> MTPROTO PROXY (TELEGRAM) - МУЛЬТИИНСТАНС <--
 # - образ nineseconds/mtg:2; один инстанс = один секрет (mtg без мультисекрета), -
 # - секрет несёт домен (mtg generate-secret --hex DOMAIN) -
@@ -63,27 +83,97 @@ _mtp_start_container() {
     docker rm "$container" 2>/dev/null || true
 
     # - mtg слушает внутри 3128 по дефолту, пробрасываем внешний PORT -> 3128 -
-    if ! docker run -d \
-        --name "${container}" \
-        --restart always \
+    if ! _proxy_docker_run "$container" \
         -p "${port}:3128" \
         -v "${cfg}:/config.toml:ro" \
         "$MTG_IMAGE" \
         run /config.toml; then
         print_err "Не удалось запустить контейнер ${container}"; return 1
     fi
-    sleep 2
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${container}$"; then
+    if _proxy_container_up "$container"; then
         print_ok "Контейнер ${container} запущен"
         return 0
     fi
     print_err "Контейнер не запустился: docker logs ${container}"
-    # - упавший контейнер снимается сразу: с restart always docker перезапускает его -
-    # - бесконечно, а меню его не видит (env вызывающий удаляет) -
-    docker rm -f "$container" >/dev/null 2>&1 || true
     return 1
 }
 
+
+# --> ПРОКСИ: RUNTIME ПОСЛЕ ВОССТАНОВЛЕНИЯ <--
+# - контейнеры файлами не создаются: восстановление поднимает их из env -
+_proxy_restore_runtime() {
+    local envf container port id cfg tmp_env bad=0
+    for envf in "${MTP_DIR}"/instance_*.env; do
+        [[ -f "$envf" ]] || continue
+        container=$(eli_source_env "$envf" CONTAINER || true)
+        port=$(eli_source_env "$envf" PORT || true)
+        [[ -n "$container" && -n "$port" ]] || continue
+        if docker inspect "$container" >/dev/null 2>&1; then
+            docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${container}$" || docker start "$container" >/dev/null 2>&1 || true
+            continue
+        fi
+        id=$(basename "$envf" | sed 's/^instance_//; s/\.env$//')
+        cfg=$(_mtp_config_path "$id")
+        if [[ -f "$cfg" ]] && _proxy_docker_run "$container" \
+            -p "${port}:3128" -v "${cfg}:/config.toml:ro" "$MTG_IMAGE" run /config.toml >/dev/null 2>&1; then
+            if _proxy_container_up "$container"; then
+                print_ok "MTProto ${container}: пересоздан из env"
+            else
+                print_warn "MTProto ${container}: не запустился, снят (требует пересоздания)"
+                bad=$(( bad + 1 ))
+            fi
+        else
+            print_warn "MTProto ${container}: пересоздать не удалось"
+            bad=$(( bad + 1 ))
+        fi
+    done
+    for envf in "${S5_DIR}"/instance_*.env; do
+        [[ -f "$envf" ]] || continue
+        container=$(eli_source_env "$envf" CONTAINER || true)
+        port=$(eli_source_env "$envf" PORT || true)
+        [[ -n "$container" && -n "$port" ]] || continue
+        if docker inspect "$container" >/dev/null 2>&1; then
+            docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${container}$" || docker start "$container" >/dev/null 2>&1 || true
+            continue
+        fi
+        tmp_env=$(mktemp) || continue
+        chmod 600 "$tmp_env"
+        printf 'PROXY_USER=%s\nPROXY_PASSWORD=%s\n' \
+            "$(eli_source_env "$envf" USER || true)" \
+            "$(eli_source_env "$envf" PASS || true)" > "$tmp_env"
+        if _proxy_docker_run "$container" \
+            -p "${port}:1080" --env-file "$tmp_env" serjs/go-socks5-proxy:v0.0.4 >/dev/null 2>&1; then
+            if _proxy_container_up "$container"; then
+                print_ok "SOCKS5 ${container}: пересоздан из env"
+            else
+                print_warn "SOCKS5 ${container}: не запустился, снят (требует пересоздания)"
+                bad=$(( bad + 1 ))
+            fi
+        else
+            print_warn "SOCKS5 ${container}: пересоздать не удалось"
+            bad=$(( bad + 1 ))
+        fi
+        rm -f "$tmp_env"
+    done
+    for id in /etc/systemd/system/hysteria-*.service; do
+        [[ -f "$id" ]] || continue
+        container=$(basename "$id" .service)
+        systemctl is-active --quiet "$container" 2>/dev/null && continue
+        local exe
+        exe=$(sed -n 's/^ExecStart=\([^ ]*\).*/\1/p' "$id" | head -1)
+        if [[ -n "$exe" && -x "$exe" ]]; then
+            systemctl start "$container" >/dev/null 2>&1 || true
+            systemctl is-active --quiet "$container" 2>/dev/null \
+                && print_ok "Hysteria ${container}: запущен из восстановленного юнита" \
+                || { print_warn "Hysteria ${container}: не запустился"; bad=$(( bad + 1 )); }
+        else
+            systemctl disable --now "$container" >/dev/null 2>&1 || true
+            print_warn "Hysteria ${container}: нет файла из ExecStart, служба отключена"
+            bad=$(( bad + 1 ))
+        fi
+    done
+    return "$bad"
+}
 # --> MTPROTO: ДОБАВИТЬ ИНСТАНС <--
 mtp_add() {
     print_section "Добавить MTProto Proxy"
@@ -315,9 +405,7 @@ s5_add() {
     denv=$(mktemp) || { print_err "Не удалось создать env-файл"; return 1; }
     chmod 600 "$denv"
     printf 'PROXY_USER=%s\nPROXY_PASSWORD=%s\n' "$user" "$pass" > "$denv"
-    if ! docker run -d \
-        --name "${container}" \
-        --restart always \
+    if ! _proxy_docker_run "$container" \
         -p "${port}:1080" \
         --env-file "$denv" \
         serjs/go-socks5-proxy:v0.0.4; then
@@ -326,15 +414,11 @@ s5_add() {
         return 1
     fi
     rm -f "$denv"
-    sleep 2
 
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${container}$"; then
+    if _proxy_container_up "$container"; then
         print_ok "Контейнер ${container} запущен"
     else
         print_err "Контейнер не запустился: docker logs ${container}"
-        # - упавший контейнер снимается сразу: с restart always docker перезапускает его -
-        # - бесконечно, а env у него ещё не написан - в списке его не видно -
-        docker rm -f "$container" >/dev/null 2>&1 || true
         return 1
     fi
 
@@ -615,24 +699,26 @@ hy2_add() {
     if [[ ! -x "$HY2_BIN" ]]; then
         print_info "Скачиваю Hysteria 2..."
         local arch="amd64"; [[ "$(uname -m)" == "aarch64" ]] && arch="arm64"
-        local dl_url
-        dl_url=$(eli_github_fetch "https://api.github.com/repos/HyNetworks/hysteria/releases/latest" \
-            | jq -r ".assets[] | select(.name | test(\"hysteria-linux-${arch}$\")) | .browser_download_url" 2>/dev/null)
+        local api dl_url dl_name dl_sha
+        api=$(eli_github_fetch "https://api.github.com/repos/HyNetworks/hysteria/releases/latest" 2>/dev/null) || api=""
+        dl_name="hysteria-linux-${arch}"
+        dl_url=$(jq -r ".assets[] | select(.name | test(\"hysteria-linux-${arch}$\")) | .browser_download_url" <<< "$api" 2>/dev/null)
         [[ -z "$dl_url" ]] && { print_err "Ссылка на релиз Hysteria 2: $(eli_github_reason)"; return 1; }
-        # - загрузка рядом с целью: бинарь подменяется только после проверки -
-        local dl_tmp="${HY2_BIN}.part.$$"
-        if ! curl -fsSL -o "$dl_tmp" "$dl_url" || [[ ! -s "$dl_tmp" ]]; then
-            rm -f "$dl_tmp"
-            print_err "Не скачал"
+        dl_sha=$(eli_github_asset_sha "$api" "$dl_name")
+        # - загрузка в общий загрузчик: повторы, сверка суммы и уборка при провале -
+        if ! eli_fetch_asset "$dl_url" "$dl_name" "$dl_sha"; then
             return 1
         fi
+        local dl_tmp="$ELI_ASSET_PATH" dl_dir
+        dl_dir=$(dirname "$dl_tmp")
         chmod 755 "$dl_tmp"
         if ! "$dl_tmp" version >/dev/null 2>&1; then
-            rm -f "$dl_tmp"
+            rm -rf "$dl_dir"
             print_err "Скачанный бинарь не запускается: образец не для этой системы?"
             return 1
         fi
-        mv "$dl_tmp" "$HY2_BIN" || { rm -f "$dl_tmp"; print_err "Не удалось заменить ${HY2_BIN}"; return 1; }
+        mv "$dl_tmp" "$HY2_BIN" || { rm -rf "$dl_dir"; print_err "Не удалось заменить ${HY2_BIN}"; return 1; }
+        rm -rf "$dl_dir"
     fi
     # - версия лежит в баннере, который бинарь печатает о stderr, первой строкой пусто -
     local hy2_ver
@@ -720,7 +806,8 @@ HY2ENV
         return 1
     fi
 
-    cat > "/etc/systemd/system/${svc}.service" << HY2UNIT
+    local hy2_unit
+    hy2_unit=$(cat << HY2UNIT
 [Unit]
 Description=Hysteria 2 Server #${inst_id}
 After=network.target
@@ -733,9 +820,8 @@ LimitNOFILE=65536
 [Install]
 WantedBy=multi-user.target
 HY2UNIT
-    systemctl daemon-reload
-    systemctl enable "$svc" 2>/dev/null; systemctl start "$svc"; sleep 2
-    if ! systemctl is-active --quiet "$svc"; then
+)
+    if ! eli_service_apply "$svc" "$hy2_unit"; then
         print_err "Не запустился: journalctl -u ${svc} | tail -20"
         # - провал старта: инстанс убирается целиком, иначе он числится -
         # - в списке, печатает URI и занимает номер -
@@ -746,6 +832,7 @@ HY2UNIT
         print_warn "Инстанс #${inst_id} убран: каталог и юнит сняты"
         return 1
     fi
+    sleep 1
     print_ok "Hysteria 2 #${inst_id} на UDP:${port}"
 
     command -v ufw &>/dev/null && { ufw allow "${port}/udp" comment "Hy2 #${inst_id}" 2>/dev/null || true; }

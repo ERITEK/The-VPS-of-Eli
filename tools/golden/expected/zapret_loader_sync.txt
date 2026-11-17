@@ -1,0 +1,26 @@
+# golden: zapret_loader_sync
+--- вывод ---
+== юнит прошлой сборки ==
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f <SB>/etc/vps-eli-stack/zapret2/awg0.nft
+ExecStop=/usr/sbin/nft delete table inet zeli_awg0
+
+[Install]
+== после сверки ==
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/usr/sbin/nft delete table inet zeli_awg0
+ExecStart=/usr/sbin/nft -f <SB>/etc/vps-eli-stack/zapret2/awg0.nft
+ExecStop=/usr/sbin/nft delete table inet zeli_awg0
+
+[Install]
+== повторная сверка ==
+строк-маркеров: 1
+--- вызовы платформы ---
+CMD flock -n 200
+CMD systemctl daemon-reload
+CMD systemctl enable zeli-nft-awg0.service
+rc=0

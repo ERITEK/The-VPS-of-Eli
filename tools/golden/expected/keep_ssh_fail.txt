@@ -1,0 +1,19 @@
+# golden: keep_ssh_fail
+--- вывод ---
+rc(провал, прежний файл)=1
+--- файл ---
+Port 22
+rc(провал, файла не было)=1
+файл снят
+rc(успех)=0
+--- drop-in ---
+Port 2222
+Port 2200
+--- вызовы платформы ---
+CMD flock -n 200
+CMD ufw allow 2222/tcp comment SSH (restore)
+CMD ufw allow 2222/tcp comment SSH (restore)
+CMD ufw allow 2222/tcp comment SSH (restore)
+CMD ufw allow 2200/tcp comment SSH (restore)
+CMD systemctl restart ssh
+rc=0

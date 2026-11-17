@@ -19,6 +19,8 @@
   <green>2)<off> Восстановить из бэкапа
   <green>3)<off> Список бэкапов
 
+  <green>4)<off> Офсайт-бэкап (Restic)
+
   <green>0)<off> Назад
 
 MARK backup_create
@@ -40,6 +42,8 @@ MARK backup_create
   <green>1)<off> Создать бэкап
   <green>2)<off> Восстановить из бэкапа
   <green>3)<off> Список бэкапов
+
+  <green>4)<off> Офсайт-бэкап (Restic)
 
   <green>0)<off> Назад
 
@@ -63,6 +67,8 @@ MARK backup_restore
   <green>2)<off> Восстановить из бэкапа
   <green>3)<off> Список бэкапов
 
+  <green>4)<off> Офсайт-бэкап (Restic)
+
   <green>0)<off> Назад
 
 MARK backup_list
@@ -84,6 +90,8 @@ MARK backup_list
   <green>1)<off> Создать бэкап
   <green>2)<off> Восстановить из бэкапа
   <green>3)<off> Список бэкапов
+
+  <green>4)<off> Офсайт-бэкап (Restic)
 
   <green>0)<off> Назад
 --- вызовы платформы ---

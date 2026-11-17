@@ -10,6 +10,7 @@
 
 
   <yellow>[!!!]<off>  Восстановление перезапишет текущие конфиги и перезапустит сервисы!
+  <cyan>*<off> Текущий SSH-порт будет добавлен вторым: вход не должен потеряться.
   <yellow>[!!!]<off>  backup_meta.txt не найден в архиве - восстанавливаю без проверки совместимости
   <green>[-OK-]<off> AWG setup (env, ключи, клиенты)
   <green>[-OK-]<off> TeamSpeak SQLite -> <SB>/opt/teamspeak
@@ -29,6 +30,7 @@ CMD flock -n 200
 CMD du -h <SB>/root/eli-backups/eli-backup-2026-01-05_031500.tar.gz
 CMD du -h <SB>/root/eli-backups/eli-backup-2026-02-11_031500.tar.gz
 CMD du -h <SB>/root/eli-backups/eli-backup-20260913_120000.tar.gz
+CMD ss -ltnp
 CMD systemctl stop awg-quick@awg0
 CMD systemctl is-active --quiet awg-quick@awg0
 CMD systemctl stop awg-quick@awg1
@@ -40,4 +42,14 @@ CMD systemctl is-active --quiet awg-quick@awg1
 CMD systemctl is-active --quiet teamspeak
 CMD systemctl start teamspeak
 CMD systemctl is-active --quiet teamspeak
+CMD docker inspect mtg-1
+CMD docker ps --format {{.Names}}
+CMD docker inspect mtg-2
+CMD docker ps --format {{.Names}}
+CMD docker start mtg-2
+CMD docker inspect socks5-1
+CMD docker ps --format {{.Names}}
+CMD docker inspect socks5-2
+CMD docker ps --format {{.Names}}
+CMD docker start socks5-2
 rc=0

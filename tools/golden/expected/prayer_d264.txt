@@ -1,0 +1,24 @@
+# golden: prayer_d264
+--- вывод ---
+== книга до коррекции ==
+.zapret.installed=[true]
+.zapret.interfaces.awg0.bound=[true]
+.zapret.interfaces.awg1.bound=[true]
+.wgobfs.installed=[true]
+.wgobfs.instances.awg0.lport=[3333]
+.wgobfs.instances.awg1.lport=[3334]
+.mimic.installed=[true]
+.mimic.instances.awg0.port=[8443]
+== книга после коррекции ==
+.zapret.installed=[]
+.zapret.interfaces.awg0=[]
+.zapret.interfaces.awg1=[]
+.zapret.autoupdate_enabled=[true]
+.wgobfs.installed=[]
+.wgobfs.instances.awg0=[]
+.wgobfs.instances.awg1=[]
+.mimic.installed=[]
+.mimic.instances.awg0=[]
+.mimic.wan_iface=[eth0]
+--- вызовы платформы ---
+rc=0

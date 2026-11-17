@@ -1,0 +1,18 @@
+# golden: prayer_contract
+--- вывод ---
+--- вызовы ---
+reconcile xui fix
+reconcile teamspeak fix
+reconcile mumble fix
+reconcile outline fix
+reconcile mtproto fix
+reconcile socks5 fix
+reconcile hysteria2 fix
+reconcile zapret2 fix
+reconcile wgobfs fix
+reconcile mimic fix
+fixed: контракт xui: поднято юнитов 2 контракт teamspeak: поднято юнитов 2 контракт mumble: поднято юнитов 2 контракт outline: поднято юнитов 2 контракт mtproto: поднято юнитов 2 контракт socks5: поднято юнитов 2 контракт hysteria2: поднято юнитов 2 контракт zapret2: поднято юнитов 2 контракт wgobfs: поднято юнитов 2 контракт mimic: поднято юнитов 2
+warn: контракт xui: проблем 1 контракт teamspeak: проблем 1 контракт mumble: проблем 1 контракт outline: проблем 1 контракт mtproto: проблем 1 контракт socks5: проблем 1 контракт hysteria2: проблем 1 контракт zapret2: проблем 1 контракт wgobfs: проблем 1 контракт mimic: проблем 1
+--- вызовы платформы ---
+CMD flock -n 200
+rc=0
